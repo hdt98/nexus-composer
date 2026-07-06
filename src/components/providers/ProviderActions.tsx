@@ -36,7 +36,6 @@ interface ProviderActionsProps {
   isAutoFailoverEnabled?: boolean;
   isInFailoverQueue?: boolean;
   onToggleFailover?: (enabled: boolean) => void;
-  isOfficialBlockedByProxy?: boolean;
   // Hermes v12+ providers: dict overlay — edit/delete must go through Web UI
   isReadOnly?: boolean;
   // OpenClaw: default model
@@ -75,7 +74,6 @@ export function ProviderActions({
   isAutoFailoverEnabled = false,
   isInFailoverQueue = false,
   onToggleFailover,
-  isOfficialBlockedByProxy = false,
   isReadOnly = false,
   // OpenClaw: default model
   isDefaultModel = false,
@@ -193,17 +191,6 @@ export function ProviderActions({
           "bg-gray-200 text-muted-foreground hover:bg-gray-200 hover:text-muted-foreground dark:bg-gray-700 dark:hover:bg-gray-700",
         icon: <Check className="h-4 w-4" />,
         text: t("provider.inUse"),
-      };
-    }
-
-    if (isOfficialBlockedByProxy) {
-      return {
-        disabled: true,
-        variant: "default" as const,
-        className: "",
-        icon: <Play className="h-4 w-4" />,
-        text: t("provider.enable"),
-        title: t("provider.blockedByProxyHint"),
       };
     }
 
