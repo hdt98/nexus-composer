@@ -95,7 +95,7 @@ pub struct WebDavSyncStatus {
 }
 
 fn default_remote_root() -> String {
-    "cc-switch-sync".to_string()
+    "nexus-composer-sync".to_string()
 }
 fn default_profile() -> String {
     "default".to_string()

@@ -2,7 +2,7 @@ use crate::error::AppError;
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 
 /// 获取 macOS 上的 .app bundle 路径
-/// 将 `/path/to/CC Switch.app/Contents/MacOS/CC Switch` 转换为 `/path/to/CC Switch.app`
+/// 将 `/path/to/Nexus Composer.app/Contents/MacOS/Nexus Composer` 转换为 `/path/to/Nexus Composer.app`
 #[cfg(target_os = "macos")]
 fn get_macos_app_bundle_path(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
     let path_str = exe_path.to_string_lossy();
@@ -76,7 +76,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_get_macos_app_bundle_path_valid() {
-        let exe_path = std::path::Path::new("/Applications/Nexus Composer.app/Contents/MacOS/CC Switch");
+        let exe_path = std::path::Path::new("/Applications/Nexus Composer.app/Contents/MacOS/Nexus Composer");
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(
             result,
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn test_get_macos_app_bundle_path_with_spaces() {
         let exe_path =
-            std::path::Path::new("/Users/test/My Apps/Nexus Composer.app/Contents/MacOS/CC Switch");
+            std::path::Path::new("/Users/test/My Apps/Nexus Composer.app/Contents/MacOS/Nexus Composer");
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(
             result,
@@ -101,7 +101,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_get_macos_app_bundle_path_not_in_bundle() {
-        let exe_path = std::path::Path::new("/usr/local/bin/cc-switch");
+        let exe_path = std::path::Path::new("/usr/local/bin/nexus-composer");
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(result, None);
     }
@@ -110,7 +110,7 @@ mod tests {
     #[test]
     fn test_get_macos_app_bundle_path_dev_build() {
         // 开发环境下的路径通常不在 .app bundle 内
-        let exe_path = std::path::Path::new("/Users/dev/project/target/debug/cc-switch");
+        let exe_path = std::path::Path::new("/Users/dev/project/target/debug/nexus-composer");
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(result, None);
     }

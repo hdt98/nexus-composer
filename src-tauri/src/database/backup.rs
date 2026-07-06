@@ -786,7 +786,7 @@ mod tests {
     fn periodic_maintenance_runs_even_when_auto_backup_disabled() -> Result<(), AppError> {
         let old_test_home = std::env::var_os("CC_SWITCH_TEST_HOME");
         let test_home =
-            std::env::temp_dir().join("cc-switch-periodic-maintenance-backup-disabled-test");
+            std::env::temp_dir().join("nexus-composer-periodic-maintenance-backup-disabled-test");
         let _ = std::fs::remove_dir_all(&test_home);
         std::fs::create_dir_all(&test_home).expect("create test home");
         std::env::set_var("CC_SWITCH_TEST_HOME", &test_home);

@@ -1,6 +1,6 @@
-//! Deep link import functionality for CC Switch
+//! Deep link import functionality for Nexus Composer
 //!
-//! This module implements the ccswitch:// protocol for importing configurations
+//! This module implements the nexus:// protocol (backward compat with ccswitch://) for importing configurations
 //! via deep links. Supports importing:
 //! - Provider configurations (Claude/Codex/Gemini)
 //! - MCP server configurations

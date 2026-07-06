@@ -19,7 +19,7 @@ const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
 /// Value that disables the web-search tool. Some native `/responses` gateways
 /// reject a `web_search` tool with `responses_feature_not_supported` ("tool type
 /// 'web_search' is not supported by this gateway phase"), so for those we write
-/// this per the vendors' official Codex docs. Also doubles as cc-switch's
+/// this per the vendors' official Codex docs. Also doubles as Nexus Composer's
 /// ownership sentinel: we only ever remove a `web_search` key whose value equals
 /// this string, never a user's own setting.
 const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
@@ -97,7 +97,7 @@ const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
 
 /// Which Codex tool surface the generated model catalog should target.
 ///
-/// - `ProxyChat`: cc-switch's proxy takes over and converts Responses<->Chat,
+/// - `ProxyChat`: Nexus Composer's proxy takes over and converts Responses<->Chat,
 ///   so the catalog keeps Codex's default tool set (incl. the freeform
 ///   `apply_patch` custom tool, which the proxy rewrites to a function tool).
 /// - `NativeResponses`: Codex talks directly to a provider's native
@@ -912,7 +912,7 @@ fn set_codex_model_catalog_json_field(
 /// web-search tool off. When `disable` is true we write `web_search = "disabled"`
 /// (the catalog's `supports_search_tool` does NOT gate this — the request-time
 /// tool comes from the config, defaulting on). When false we *remove* the field,
-/// but only when it carries cc-switch's own `"disabled"` sentinel, so switching
+/// but only when it carries Nexus Composer's own `"disabled"` sentinel, so switching
 /// back to a web-search-capable provider re-enables it without clobbering a
 /// user's manual setting.
 ///
@@ -966,12 +966,12 @@ pub fn prepare_codex_config_text_with_model_catalog(
 }
 
 /// Reverse of `prepare_codex_config_text_with_model_catalog`: read the
-/// cc-switch–maintained catalog file referenced by `~/.codex/config.toml` and
+/// Nexus Composer–maintained catalog file referenced by `~/.codex/config.toml` and
 /// convert it back into the simplified shape the frontend table uses:
 /// `{ "models": [{ "model", "displayName"?, "contextWindow"? }, ...] }`.
 ///
 /// We only reverse-parse catalogs whose `model_catalog_json` path is the
-/// cc-switch–generated file (identified by filename
+/// Nexus Composer–generated file (identified by filename
 /// `cc-switch-model-catalog.json`). A user-managed external catalog file is
 /// left alone — surfacing its richer structure as the simplified table would
 /// be a downgrade we can't safely round-trip.
@@ -2571,7 +2571,7 @@ name = "xiaomi_mimo"
     #[test]
     fn native_web_search_field_removes_own_sentinel_when_not_disabled() {
         // Switching away from a native provider must re-enable web search by
-        // removing cc-switch's own "disabled" sentinel.
+        // removing Nexus Composer's own "disabled" sentinel.
         let input = r#"model = "gpt-5.5"
 web_search = "disabled"
 "#;
@@ -2579,14 +2579,14 @@ web_search = "disabled"
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert!(
             parsed.get("web_search").is_none(),
-            "cc-switch's disabled sentinel should be removed when not native"
+            "Nexus Composer's disabled sentinel should be removed when not native"
         );
     }
 
     #[test]
     fn native_web_search_field_preserves_user_value() {
         // A user's own web_search value must never be clobbered by cleanup,
-        // only cc-switch's "disabled" sentinel is owned/removable.
+        // only Nexus Composer's "disabled" sentinel is owned/removable.
         let input = r#"web_search = "enabled"
 "#;
         let result = set_codex_native_web_search_field(input, false).unwrap();
@@ -2883,7 +2883,7 @@ web_search = "disabled"
         let input = r#"model_provider = "custom"
 model = "glm-5"
 "#;
-        // Simulate a WSL UNC path as cc-switch would see it on Windows;
+        // Simulate a WSL UNC path as Nexus Composer would see it on Windows;
         // the function now writes just the relative filename.
         let unc_path =
             Path::new(r"\\wsl.localhost\Ubuntu\home\user\.codex\cc-switch-model-catalog.json");
@@ -2928,7 +2928,7 @@ model = "glm-5"
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert!(
             parsed.get("model_catalog_json").is_none(),
-            "None arm should remove cc-switch-owned field regardless of path format"
+            "None arm should remove Nexus Composer-owned field regardless of path format"
         );
     }
 
@@ -2967,7 +2967,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result, None,
-            "user-owned catalog should not be claimed by cc-switch"
+            "user-owned catalog should not be claimed by Nexus Composer"
         );
     }
 
@@ -2979,7 +2979,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert!(
             parsed.get("model_catalog_json").is_none(),
-            "None arm should remove relative cc-switch-owned field"
+            "None arm should remove relative Nexus Composer-owned field"
         );
     }
 }
