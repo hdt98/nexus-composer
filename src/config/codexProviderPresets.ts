@@ -103,7 +103,7 @@ function modelCatalog(
 
 export const codexProviderPresets: CodexProviderPreset[] = [
   // Nexus Composer MVP1 default: routes Codex Responses -> OpenAI Chat Completions
-  // via CC Switch's existing local proxy conversion layer to the SGLang endpoint.
+  // via Nexus Composer's existing local proxy conversion layer to the SGLang endpoint.
   // SGLang is an externally managed service; do not mutate its lifecycle.
   {
     name: "Nexus GLM-5.2",

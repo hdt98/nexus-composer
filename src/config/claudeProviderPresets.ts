@@ -75,7 +75,7 @@ export interface ProviderPreset {
 
 export const providerPresets: ProviderPreset[] = [
   // Nexus Composer MVP1 default: routes Claude Anthropic Messages -> OpenAI Chat
-  // Completions via CC Switch's existing local proxy conversion layer to SGLang.
+  // Completions via Nexus Composer's existing local proxy conversion layer to SGLang.
   // SGLang is an externally managed service; do not mutate its lifecycle.
   {
     name: "Nexus GLM-5.2",

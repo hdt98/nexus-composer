@@ -917,7 +917,7 @@ fn set_codex_model_catalog_json_field(
 /// user's manual setting.
 ///
 /// The caller decides `disable` (see `codex_native_gateway_rejects_web_search`);
-/// lifecycle is bound to the cc-switch catalog pointer so the field is set/cleaned
+/// lifecycle is bound to the nexus-composer catalog pointer so the field is set/cleaned
 /// up wherever the native catalog is written/removed.
 fn set_codex_native_web_search_field(config_text: &str, disable: bool) -> Result<String, AppError> {
     let mut doc = config_text
@@ -991,7 +991,7 @@ pub fn prepare_codex_config_text_with_model_catalog(
 pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, AppError> {
     let config_text = read_codex_config_text()?;
     let generated_path = get_codex_model_catalog_path();
-    let Some(catalog_path) = resolve_cc_switch_catalog_path(&config_text, &generated_path) else {
+    let Some(catalog_path) = resolve_nexus_catalog_path(&config_text, &generated_path) else {
         return Ok(None);
     };
     if !catalog_path.exists() {
@@ -1006,10 +1006,10 @@ pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, 
     ))
 }
 
-/// Given `config.toml` text, resolve the on-disk path of the cc-switch–owned
+/// Given `config.toml` text, resolve the on-disk path of the nexus-composer–owned
 /// catalog file (returns `None` if `model_catalog_json` is absent or points at
 /// a file we don't own). Relative paths fall back to `generated_path`.
-pub(crate) fn resolve_cc_switch_catalog_path(
+pub(crate) fn resolve_nexus_catalog_path(
     config_text: &str,
     generated_path: &Path,
 ) -> Option<PathBuf> {
@@ -2670,9 +2670,9 @@ web_search = "disabled"
     #[test]
     fn resolve_catalog_path_returns_none_when_config_missing_field() {
         let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
-        assert!(resolve_cc_switch_catalog_path("", &generated).is_none());
+        assert!(resolve_nexus_catalog_path("", &generated).is_none());
         assert!(
-            resolve_cc_switch_catalog_path("model = \"gpt-5\"", &generated).is_none(),
+            resolve_nexus_catalog_path("model = \"gpt-5\"", &generated).is_none(),
             "no model_catalog_json field should yield None"
         );
     }
@@ -2682,7 +2682,7 @@ web_search = "disabled"
         let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
         let config = r#"model_catalog_json = "/tmp/.codex/cc-switch-model-catalog.json"
 "#;
-        let resolved = resolve_cc_switch_catalog_path(config, &generated).expect("path resolves");
+        let resolved = resolve_nexus_catalog_path(config, &generated).expect("path resolves");
         assert_eq!(resolved, generated);
     }
 
@@ -2692,7 +2692,7 @@ web_search = "disabled"
         let config = r#"model_catalog_json = "/Users/me/.codex/my-handwritten-catalog.json"
 "#;
         assert!(
-            resolve_cc_switch_catalog_path(config, &generated).is_none(),
+            resolve_nexus_catalog_path(config, &generated).is_none(),
             "external catalog files should be left alone"
         );
     }
@@ -2951,7 +2951,7 @@ model = "glm-5"
 model_catalog_json = "cc-switch-model-catalog.json"
 "#;
         let generated_path = PathBuf::from("/home/user/.codex/cc-switch-model-catalog.json");
-        let result = resolve_cc_switch_catalog_path(config_text, &generated_path);
+        let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result,
             Some(generated_path),
@@ -2964,7 +2964,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
         let config_text = r#"model_catalog_json = "my-custom-catalog.json"
 "#;
         let generated_path = PathBuf::from("/home/user/.codex/cc-switch-model-catalog.json");
-        let result = resolve_cc_switch_catalog_path(config_text, &generated_path);
+        let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result, None,
             "user-owned catalog should not be claimed by cc-switch"

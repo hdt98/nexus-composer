@@ -5818,7 +5818,7 @@ requires_openai_auth = true
         );
         assert!(
             catalog_path.exists(),
-            "restore must generate the cc-switch catalog file on disk"
+            "restore must generate the nexus-composer catalog file on disk"
         );
         let catalog: Value = serde_json::from_str(
             &std::fs::read_to_string(&catalog_path).expect("read generated catalog"),
@@ -5887,7 +5887,7 @@ requires_openai_auth = true
         );
         assert!(
             crate::codex_config::get_codex_model_catalog_path().exists(),
-            "empty-auth restore must generate the cc-switch catalog file"
+            "empty-auth restore must generate the nexus-composer catalog file"
         );
         assert!(
             !crate::codex_config::get_codex_auth_path().exists(),
