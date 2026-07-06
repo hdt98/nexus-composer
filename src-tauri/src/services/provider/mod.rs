@@ -2119,14 +2119,23 @@ impl ProviderService {
 
         let should_hot_switch = is_app_taken_over || live_taken_over;
 
-        // Block switching to official providers when proxy takeover is active.
-        // Using a proxy with official APIs (Anthropic/OpenAI/Google) may cause account bans.
+        // Switching to an official provider while proxy takeover is active:
+        // automatically disable takeover first (restore original Live config),
+        // then proceed with a normal switch. This is safe because switching TO
+        // official means the user wants to stop using the proxy entirely.
         if should_hot_switch && _provider.category.as_deref() == Some("official") {
-            return Err(AppError::localized(
-                "switch.official_blocked_by_proxy",
-                "代理接管模式下不能切换到官方供应商，使用代理访问官方 API 可能导致账号被封禁。请先关闭代理接管，或选择第三方供应商。",
-                "Cannot switch to official provider while proxy takeover is active. Using proxy with official APIs may cause account bans.",
-            ));
+            log::info!(
+                "切换到官方供应商 {}，自动关闭 {} 的代理接管",
+                id,
+                app_type.as_str()
+            );
+            futures::executor::block_on(
+                state.proxy_service.set_takeover_for_app(app_type.as_str(), false),
+            ).map_err(|e| AppError::Message(format!("关闭代理接管失败: {e}")))?;
+
+            // After disabling takeover, the Live config has been restored from backup.
+            // Fall through to switch_normal which will write the official provider config.
+            return Self::switch_normal(state, app_type, id, &providers);
         }
 
         if should_hot_switch {
