@@ -7,10 +7,10 @@
   <array>
     <dict>
       <key>CFBundleURLName</key>
-      <string>CC Switch Deep Link</string>
+      <string>Nexus Composer Deep Link</string>
       <key>CFBundleURLSchemes</key>
       <array>
-        <string>ccswitch</string>
+        <string>nexus</string>
       </array>
     </dict>
   </array>

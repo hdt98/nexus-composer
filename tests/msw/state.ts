@@ -97,7 +97,16 @@ let settingsState: Settings = {
   enableClaudePluginIntegration: false,
   claudeConfigDir: "/default/claude",
   codexConfigDir: "/default/codex",
-  language: "zh",
+  language: "en",
+  visibleApps: {
+    claude: true,
+    "claude-desktop": true,
+    codex: true,
+    gemini: true,
+    opencode: true,
+    openclaw: true,
+    hermes: true,
+  },
 };
 let appConfigDirOverride: string | null = null;
 const sessionMessageKey = (providerId: string, sourcePath: string) =>
@@ -215,7 +224,16 @@ export const resetProviderState = () => {
     enableClaudePluginIntegration: false,
     claudeConfigDir: "/default/claude",
     codexConfigDir: "/default/codex",
-    language: "zh",
+    language: "en",
+    visibleApps: {
+      claude: true,
+      "claude-desktop": true,
+      codex: true,
+      gemini: true,
+      opencode: true,
+      openclaw: true,
+      hermes: true,
+    },
   };
   appConfigDirOverride = null;
   mcpConfigs = {

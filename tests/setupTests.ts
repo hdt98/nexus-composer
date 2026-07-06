@@ -10,8 +10,8 @@ import "./msw/tauriMocks";
 beforeAll(async () => {
   server.listen({ onUnhandledRequest: "warn" });
   await i18n.use(initReactI18next).init({
-    lng: "zh",
-    fallbackLng: "zh",
+    lng: "en",
+    fallbackLng: "en",
     resources: {
       zh: { translation: {} },
       en: { translation: {} },

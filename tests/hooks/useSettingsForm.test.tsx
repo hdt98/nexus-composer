@@ -14,7 +14,7 @@ let changeLanguageSpy: ReturnType<typeof vi.spyOn<any, any>>;
 beforeEach(() => {
   useSettingsQueryMock.mockReset();
   window.localStorage.clear();
-  (i18n as any).language = "zh";
+  (i18n as any).language = "en";
   changeLanguageSpy = vi
     .spyOn(i18n, "changeLanguage")
     .mockImplementation(async (lang?: string) => {
@@ -29,6 +29,7 @@ afterEach(() => {
 
 describe("useSettingsForm Hook", () => {
   it("should normalize settings and sync language on initialization", async () => {
+    (i18n as any).language = "vi";
     useSettingsQueryMock.mockReturnValue({
       data: {
         showInTray: undefined,
@@ -58,7 +59,7 @@ describe("useSettingsForm Hook", () => {
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
   });
 
-  it("should support japanese language preference from server data", async () => {
+  it("should support vietnamese language preference from server data", async () => {
     useSettingsQueryMock.mockReturnValue({
       data: {
         showInTray: true,
@@ -66,7 +67,7 @@ describe("useSettingsForm Hook", () => {
         enableClaudePluginIntegration: false,
         claudeConfigDir: "/Users/demo",
         codexConfigDir: null,
-        language: "ja",
+        language: "vi",
       },
       isLoading: false,
     });
@@ -74,14 +75,14 @@ describe("useSettingsForm Hook", () => {
     const { result } = renderHook(() => useSettingsForm());
 
     await waitFor(() => {
-      expect(result.current.settings?.language).toBe("ja");
+      expect(result.current.settings?.language).toBe("vi");
     });
 
-    expect(result.current.initialLanguage).toBe("ja");
-    expect(changeLanguageSpy).toHaveBeenCalledWith("ja");
+    expect(result.current.initialLanguage).toBe("vi");
+    expect(changeLanguageSpy).toHaveBeenCalledWith("vi");
   });
 
-  it("should support traditional chinese language preference aliases", async () => {
+  it("should support vietnamese language preference aliases", async () => {
     useSettingsQueryMock.mockReturnValue({
       data: {
         showInTray: true,
@@ -89,7 +90,7 @@ describe("useSettingsForm Hook", () => {
         enableClaudePluginIntegration: false,
         claudeConfigDir: "/Users/demo",
         codexConfigDir: null,
-        language: "zh-Hant",
+        language: "vi-VN",
       },
       isLoading: false,
     });
@@ -97,11 +98,11 @@ describe("useSettingsForm Hook", () => {
     const { result } = renderHook(() => useSettingsForm());
 
     await waitFor(() => {
-      expect(result.current.settings?.language).toBe("zh-TW");
+      expect(result.current.settings?.language).toBe("vi");
     });
 
-    expect(result.current.initialLanguage).toBe("zh-TW");
-    expect(changeLanguageSpy).toHaveBeenCalledWith("zh-TW");
+    expect(result.current.initialLanguage).toBe("vi");
+    expect(changeLanguageSpy).toHaveBeenCalledWith("vi");
   });
 
   it("should prioritize reading language from local storage in readPersistedLanguage", () => {
@@ -132,6 +133,7 @@ describe("useSettingsForm Hook", () => {
 
     expect(result.current.settings?.showInTray).toBe(false);
 
+    (i18n as any).language = "vi";
     changeLanguageSpy.mockClear();
     act(() => {
       result.current.updateSettings({ language: "en" });
@@ -161,7 +163,7 @@ describe("useSettingsForm Hook", () => {
     });
 
     changeLanguageSpy.mockClear();
-    (i18n as any).language = "zh";
+    (i18n as any).language = "vi";
 
     act(() => {
       result.current.resetSettings({
@@ -170,7 +172,7 @@ describe("useSettingsForm Hook", () => {
         enableClaudePluginIntegration: true,
         claudeConfigDir: "  /reset  ",
         codexConfigDir: "   ",
-        language: "zh",
+        language: "en",
       });
     });
 
@@ -180,7 +182,7 @@ describe("useSettingsForm Hook", () => {
     expect(settings.enableClaudePluginIntegration).toBe(true);
     expect(settings.claudeConfigDir).toBe("/reset");
     expect(settings.codexConfigDir).toBeUndefined();
-    expect(settings.language).toBe("zh");
+    expect(settings.language).toBe("en");
     expect(result.current.initialLanguage).toBe("en");
     expect(changeLanguageSpy).toHaveBeenCalledWith("en");
   });
@@ -193,7 +195,7 @@ describe("useSettingsForm Hook", () => {
         enableClaudePluginIntegration: false,
         claudeConfigDir: null,
         codexConfigDir: null,
-        language: "zh",
+        language: "en",
       },
       isLoading: false,
     });
@@ -205,10 +207,10 @@ describe("useSettingsForm Hook", () => {
     });
 
     changeLanguageSpy.mockClear();
-    (i18n as any).language = "zh";
+    (i18n as any).language = "en";
 
     act(() => {
-      result.current.syncLanguage("zh");
+      result.current.syncLanguage("en");
     });
 
     expect(changeLanguageSpy).not.toHaveBeenCalled();

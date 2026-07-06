@@ -102,6 +102,32 @@ function modelCatalog(
 }
 
 export const codexProviderPresets: CodexProviderPreset[] = [
+  // Nexus Composer MVP1 default: routes Codex Responses -> OpenAI Chat Completions
+  // via CC Switch's existing local proxy conversion layer to the SGLang endpoint.
+  // SGLang is an externally managed service; do not mutate its lifecycle.
+  {
+    name: "Nexus GLM-5.2",
+    nameKey: "providerForm.presets.nexusGlm",
+    websiteUrl: "http://127.0.0.1:30000",
+    auth: generateThirdPartyAuth("nexus-local"),
+    config: generateThirdPartyConfig(
+      "nexus_glm",
+      "http://127.0.0.1:30000/v1",
+      "GLM-5.2-SGLang",
+    ),
+    endpointCandidates: ["http://127.0.0.1:30000/v1"],
+    apiFormat: "openai_chat",
+    modelCatalog: modelCatalog([
+      {
+        model: "GLM-5.2-SGLang",
+        displayName: "GLM-5.2",
+        contextWindow: 1048576,
+      },
+    ]),
+    category: "third_party",
+    icon: "nexus",
+    iconColor: "#6366F1",
+  },
   {
     name: "OpenAI Official",
     websiteUrl: "https://chatgpt.com/codex",

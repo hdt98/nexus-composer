@@ -35,24 +35,10 @@ function normalizeLanguageTag(language: string): string {
   return language.toLowerCase().replace(/_/g, "-");
 }
 
-function isTraditionalChineseLanguage(normalizedLanguage: string): boolean {
-  return (
-    normalizedLanguage === "zh-tw" ||
-    normalizedLanguage.startsWith("zh-hant") ||
-    normalizedLanguage.startsWith("zh-hk") ||
-    normalizedLanguage.startsWith("zh-mo")
-  );
-}
-
 export function getLocaleFromLanguage(language: string): string {
   if (!language) return "en-US";
   const normalized = normalizeLanguageTag(language);
-  if (normalized === "zh") return "zh-CN";
-  if (isTraditionalChineseLanguage(normalized)) {
-    return "zh-TW";
-  }
-  if (normalized.startsWith("zh")) return "zh-CN";
-  if (normalized.startsWith("ja")) return "ja-JP";
+  if (normalized.startsWith("vi")) return "vi-VN";
   return "en-US";
 }
 
@@ -80,15 +66,11 @@ export function formatTokensShort(
   if (!Number.isFinite(value) || value <= 0) return "0";
   const decimals = compactDecimals;
   const normalizedLang = normalizeLanguageTag(lang);
-  if (isTraditionalChineseLanguage(normalizedLang)) {
-    if (value >= 1e8) return `${(value / 1e8).toFixed(2)} 億`;
-    if (value >= 1e4) return `${(value / 1e4).toFixed(decimals)} 萬`;
-    return value.toLocaleString("zh-TW");
-  }
-  if (normalizedLang.startsWith("zh") || normalizedLang.startsWith("ja")) {
-    if (value >= 1e8) return `${(value / 1e8).toFixed(2)} 亿`;
-    if (value >= 1e4) return `${(value / 1e4).toFixed(decimals)} 万`;
-    return value.toLocaleString();
+  if (normalizedLang.startsWith("vi")) {
+    if (value >= 1e9) return `${(value / 1e9).toFixed(2)} ty`;
+    if (value >= 1e6) return `${(value / 1e6).toFixed(2)} trieu`;
+    if (value >= 1e3) return `${(value / 1e3).toFixed(decimals)} nghin`;
+    return value.toLocaleString("vi-VN");
   }
   if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
   if (value >= 1e6) return `${(value / 1e6).toFixed(2)}M`;

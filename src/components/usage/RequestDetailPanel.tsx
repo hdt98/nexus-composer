@@ -20,13 +20,7 @@ export function RequestDetailPanel({
   const { t, i18n } = useTranslation();
   const { data: request, isLoading } = useRequestDetail(requestId);
   const dateLocale =
-    i18n.language === "zh"
-      ? "zh-CN"
-      : i18n.language === "zh-TW"
-        ? "zh-TW"
-        : i18n.language === "ja"
-          ? "ja-JP"
-          : "en-US";
+    i18n.language === "vi" ? "vi-VN" : "en-US";
 
   if (isLoading) {
     return (

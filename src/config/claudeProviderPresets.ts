@@ -74,6 +74,29 @@ export interface ProviderPreset {
 }
 
 export const providerPresets: ProviderPreset[] = [
+  // Nexus Composer MVP1 default: routes Claude Anthropic Messages -> OpenAI Chat
+  // Completions via CC Switch's existing local proxy conversion layer to SGLang.
+  // SGLang is an externally managed service; do not mutate its lifecycle.
+  {
+    name: "Nexus GLM-5.2",
+    nameKey: "providerForm.presets.nexusGlm",
+    websiteUrl: "http://127.0.0.1:30000",
+    settingsConfig: {
+      env: {
+        ANTHROPIC_BASE_URL: "http://127.0.0.1:30000/v1",
+        ANTHROPIC_AUTH_TOKEN: "nexus-local",
+        ANTHROPIC_MODEL: "GLM-5.2-SGLang",
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: "GLM-5.2-SGLang",
+        ANTHROPIC_DEFAULT_SONNET_MODEL: "GLM-5.2-SGLang",
+        ANTHROPIC_DEFAULT_OPUS_MODEL: "GLM-5.2-SGLang",
+      },
+    },
+    endpointCandidates: ["http://127.0.0.1:30000/v1"],
+    apiFormat: "openai_chat",
+    category: "third_party",
+    icon: "nexus",
+    iconColor: "#6366F1",
+  },
   {
     name: "Claude Official",
     websiteUrl: "https://www.anthropic.com/claude-code",

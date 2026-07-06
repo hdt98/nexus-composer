@@ -5,13 +5,20 @@ import {
 } from "@/components/usage/format";
 
 describe("usage format helpers", () => {
-  it("formats Traditional Chinese token units with Traditional characters", () => {
-    expect(formatTokensShort(12_345, "zh-TW")).toBe("1.2 萬");
-    expect(formatTokensShort(123_456_789, "zh-Hant", 2)).toBe("1.23 億");
+  it("formats English token units with K/M/B suffixes", () => {
+    expect(formatTokensShort(12_345, "en")).toBe("12.3K");
+    expect(formatTokensShort(123_456_789, "en", 2)).toBe("123.46M");
   });
 
-  it("resolves Traditional Chinese locale aliases", () => {
-    expect(getLocaleFromLanguage("zh_TW")).toBe("zh-TW");
-    expect(getLocaleFromLanguage("zh-HK")).toBe("zh-TW");
+  it("formats Vietnamese token units with nghin/trieu/ty suffixes", () => {
+    expect(formatTokensShort(12_345, "vi")).toBe("12.3 nghin");
+    expect(formatTokensShort(123_456_789, "vi", 2)).toBe("123.46 trieu");
+  });
+
+  it("resolves English and Vietnamese locale aliases", () => {
+    expect(getLocaleFromLanguage("en")).toBe("en-US");
+    expect(getLocaleFromLanguage("vi")).toBe("vi-VN");
+    expect(getLocaleFromLanguage("vi_VN")).toBe("vi-VN");
+    expect(getLocaleFromLanguage("en-US")).toBe("en-US");
   });
 });

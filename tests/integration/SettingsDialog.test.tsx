@@ -148,7 +148,7 @@ describe("SettingsPage integration", () => {
     renderDialog();
 
     await waitFor(() =>
-      expect(screen.getByText("language:zh")).toBeInTheDocument(),
+      expect(screen.getByText("language:en")).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByText("settings.advanced.configDir.title"));
@@ -163,7 +163,7 @@ describe("SettingsPage integration", () => {
     renderDialog({ onImportSuccess });
 
     await waitFor(() =>
-      expect(screen.getByText("language:zh")).toBeInTheDocument(),
+      expect(screen.getByText("language:en")).toBeInTheDocument(),
     );
 
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
@@ -187,7 +187,7 @@ describe("SettingsPage integration", () => {
     renderDialog();
 
     await waitFor(() =>
-      expect(screen.getByText("language:zh")).toBeInTheDocument(),
+      expect(screen.getByText("language:en")).toBeInTheDocument(),
     );
 
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
@@ -214,7 +214,7 @@ describe("SettingsPage integration", () => {
     renderDialog();
 
     await waitFor(() =>
-      expect(screen.getByText("language:zh")).toBeInTheDocument(),
+      expect(screen.getByText("language:en")).toBeInTheDocument(),
     );
 
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
@@ -255,7 +255,7 @@ describe("SettingsPage integration", () => {
     renderDialog();
 
     await waitFor(() =>
-      expect(screen.getByText("language:zh")).toBeInTheDocument(),
+      expect(screen.getByText("language:en")).toBeInTheDocument(),
     );
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByText("settings.advanced.data.title"));

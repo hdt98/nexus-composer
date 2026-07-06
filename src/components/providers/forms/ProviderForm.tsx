@@ -653,39 +653,40 @@ function ProviderFormFull({
     [t],
   );
 
+  // MVP1: hide commercial sponsor/partner presets to keep the marketplace focused
+  // on the Nexus GLM-5.2 endpoint. Official and non-partner presets remain visible.
+  // Original array indices are preserved so presetId lookups still resolve correctly.
+  const isSponsorPreset = (preset: any): boolean => {
+    if (preset.isOfficial || preset.category === "official") return false;
+    if (preset.name === "Nexus GLM-5.2") return false;
+    return !!(preset.isPartner || preset.primePartner || preset.partnerPromotionKey);
+  };
+
   const presetEntries = useMemo(() => {
     if (appId === "codex") {
-      return codexProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `codex-${index}`,
-        preset,
-      }));
+      return codexProviderPresets
+        .map<PresetEntry>((preset, index) => ({ id: `codex-${index}`, preset }))
+        .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "gemini") {
-      return geminiProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `gemini-${index}`,
-        preset,
-      }));
+      return geminiProviderPresets
+        .map<PresetEntry>((preset, index) => ({ id: `gemini-${index}`, preset }))
+        .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "opencode") {
-      return opencodeProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `opencode-${index}`,
-        preset,
-      }));
+      return opencodeProviderPresets
+        .map<PresetEntry>((preset, index) => ({ id: `opencode-${index}`, preset }))
+        .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "openclaw") {
-      return openclawProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `openclaw-${index}`,
-        preset,
-      }));
+      return openclawProviderPresets
+        .map<PresetEntry>((preset, index) => ({ id: `openclaw-${index}`, preset }))
+        .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "hermes") {
-      return hermesProviderPresets.map<PresetEntry>((preset, index) => ({
-        id: `hermes-${index}`,
-        preset,
-      }));
+      return hermesProviderPresets
+        .map<PresetEntry>((preset, index) => ({ id: `hermes-${index}`, preset }))
+        .filter(({ preset }) => !isSponsorPreset(preset));
     }
     return providerPresets
-      .filter((p) => !p.hidden)
-      .map<PresetEntry>((preset, index) => ({
-        id: `claude-${index}`,
-        preset,
-      }));
+      .map<PresetEntry>((preset, index) => ({ id: `claude-${index}`, preset }))
+      .filter(({ preset }) => !(preset as any).hidden && !isSponsorPreset(preset));
   }, [appId]);
 
   const {

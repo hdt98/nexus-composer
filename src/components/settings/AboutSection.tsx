@@ -829,9 +829,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           <div className="flex items-center gap-8">
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
-                <img src={appIcon} alt="CC Switch" className="h-5 w-5" />
+                <div className="h-20 w-20 rounded-2xl overflow-hidden border border-gray-300 dark:border-gray-600 shadow-sm"><img src={appIcon} alt="Nexus Composer" className="w-full h-full object-contain" /></div>
                 <h4 className="text-lg font-semibold text-foreground">
-                  CC Switch
+                  Nexus Composer
                 </h4>
               </div>
               <div className="flex items-center gap-2">
@@ -860,7 +860,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => settingsApi.openExternal("https://ccswitch.io")}
+              onClick={() => settingsApi.openExternal("https://github.com/farion1231/cc-switch")}
               className="h-8 gap-1.5 text-xs"
             >
               <Globe className="h-3.5 w-3.5" />

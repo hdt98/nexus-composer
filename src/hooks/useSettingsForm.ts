@@ -3,46 +3,31 @@ import { useTranslation } from "react-i18next";
 import { useSettingsQuery } from "@/lib/query";
 import type { Settings } from "@/types";
 
-type Language = "zh" | "zh-TW" | "en" | "ja";
+type Language = "en" | "vi";
 
 export type SettingsFormState = Omit<Settings, "language"> & {
   language: Language;
 };
 
 const normalizeLanguage = (lang?: string | null): Language => {
-  if (!lang) return "zh";
+  if (!lang) return "en";
   const normalized = lang.toLowerCase().replace(/_/g, "-");
 
-  if (normalized === "zh") {
-    return "zh";
+  if (normalized === "vi" || normalized.startsWith("vi")) {
+    return "vi";
   }
 
-  if (
-    normalized === "zh-tw" ||
-    normalized.startsWith("zh-hant") ||
-    normalized.startsWith("zh-hk") ||
-    normalized.startsWith("zh-mo")
-  ) {
-    return "zh-TW";
+  if (normalized === "en" || normalized.startsWith("en")) {
+    return "en";
   }
 
-  if (normalized === "en" || normalized === "ja") {
-    return normalized;
-  }
-
-  if (normalized.startsWith("zh")) {
-    return "zh";
-  }
-
-  return "zh";
+  return "en";
 };
 
 const isSupportedLanguage = (lang?: string | null): boolean => {
   if (!lang) return false;
   const normalized = lang.toLowerCase().replace(/_/g, "-");
-  return (
-    normalized === "en" || normalized === "ja" || normalized.startsWith("zh")
-  );
+  return normalized === "en" || normalized.startsWith("vi");
 };
 
 const sanitizeDir = (value?: string | null): string | undefined => {
@@ -77,7 +62,7 @@ export function useSettingsForm(): UseSettingsFormResult {
     null,
   );
 
-  const initialLanguageRef = useRef<Language>("zh");
+  const initialLanguageRef = useRef<Language>("en");
 
   const readPersistedLanguage = useCallback((): Language => {
     if (typeof window !== "undefined") {

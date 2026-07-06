@@ -48,7 +48,7 @@ const createSettings = (
   enableClaudePluginIntegration: false,
   claudeConfigDir: "/claude/custom",
   codexConfigDir: "/codex/custom",
-  language: "zh",
+  language: "en",
   ...overrides,
 });
 

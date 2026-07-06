@@ -31,5 +31,5 @@ fn main() {
         }
     }
 
-    cc_switch_lib::run();
+    nexus_composer_lib::run();
 }
