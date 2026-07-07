@@ -12,7 +12,7 @@ endpoints through a local proxy with protocol conversion.
   OpenAI Responses, and OpenAI Chat Completions formats
 - **Multi-app support**: Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw,
   and Hermes — enable only the apps you use
-- **Usage tracking**: Logs requests, tokens, and latency through the proxy
+- **Usage tracking**: Logs requests, tokens, costs, and latency through the proxy
 - **Extensible**: Add new providers and endpoints as your needs grow
 
 ## Getting Started
@@ -28,6 +28,23 @@ endpoints through a local proxy with protocol conversion.
 
 Click the **Official** provider in the provider list. The proxy takeover is
 automatically disabled and your original config is restored.
+
+### Adding a custom provider
+
+1. Select the assistant tab (Claude Code or Codex)
+2. Click **Add Provider** → choose **Custom** at the bottom of the preset list
+3. Fill in:
+   - **Name**: your provider name
+   - **Base URL**: your endpoint URL (e.g., `http://localhost:8080/v1`)
+   - **API Key**: your key (or a dummy if the endpoint doesn't require auth)
+   - **API format**: `openai_chat` for OpenAI-compatible endpoints, `anthropic`
+     for Anthropic-compatible, `openai_responses` for OpenAI Responses API
+4. Save and switch to the new provider
+
+For Claude Code, the provider configures `ANTHROPIC_BASE_URL`,
+`ANTHROPIC_AUTH_TOKEN`, and model mapping in `~/.claude/settings.json`.
+
+For Codex, the provider configures `~/.codex/config.toml` and `~/.codex/auth.json`.
 
 ## Building from Source
 
