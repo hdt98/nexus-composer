@@ -1,37 +1,33 @@
 # Nexus Composer
 
-Nexus Composer is a desktop control panel that connects local coding assistants
-(Claude Code and Codex) to a single GLM-5.2 model endpoint served by SGLang.
+Nexus Composer is a desktop control panel for coding assistants. It connects
+local tools like Claude Code, Codex, Gemini CLI, and more to custom model
+endpoints through a local proxy with protocol conversion.
 
 ## What It Does
 
-- **Provider switching**: Switch Claude Code and Codex between the Nexus GLM-5.2
-  endpoint and their official APIs with one click
-- **Protocol conversion**: Reuses the local proxy to convert between
-  Anthropic Messages / OpenAI Responses and OpenAI Chat Completions formats
-- **Endpoint health**: Monitors the SGLang endpoint status
+- **Provider switching**: Switch coding assistants between custom endpoints and
+  their official APIs with one click
+- **Protocol conversion**: Local proxy converts between Anthropic Messages,
+  OpenAI Responses, and OpenAI Chat Completions formats
+- **Multi-app support**: Claude Code, Codex, Gemini CLI, OpenCode, OpenClaw,
+  and Hermes — enable only the apps you use
 - **Usage tracking**: Logs requests, tokens, and latency through the proxy
+- **Extensible**: Add new providers and endpoints as your needs grow
 
-## Prerequisites
+## Getting Started
 
-- An SGLang endpoint running GLM-5.2 (e.g., via SSH tunnel on `http://127.0.0.1:30000/v1`)
-- Claude Code CLI and/or Codex installed on your machine
+### Connecting an assistant to a custom endpoint
 
-## Connecting Claude Code
-
-1. Open Nexus Composer and select the **Claude Code** tab
-2. Click **Add Provider** and select the **Nexus GLM-5.2** preset
-3. Switch to the Nexus GLM-5.2 provider to route through the proxy
+1. Open Nexus Composer and select the assistant tab (e.g., Claude Code)
+2. Click **Add Provider** and select or create a provider preset
+3. Switch to the provider to route through the local proxy
 4. Enable local proxy in Settings → Routing if format conversion is needed
 
-To switch back to normal Anthropic: click **Claude Official** in the provider list.
-The proxy takeover is automatically disabled and your original config is restored.
+### Switching back to official API
 
-## Connecting Codex
-
-1. Select the **Codex** tab
-2. Add the **Nexus GLM-5.2** preset
-3. Switch to it to route through the proxy
+Click the **Official** provider in the provider list. The proxy takeover is
+automatically disabled and your original config is restored.
 
 ## Building from Source
 

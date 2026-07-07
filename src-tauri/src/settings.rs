@@ -510,17 +510,7 @@ impl Default for AppSettings {
             first_run_notice_confirmed: None,
             common_config_confirmed: None,
             language: None,
-            // MVP1: only show Codex and Claude Code by default.
-            // Users can enable additional apps in Settings as more providers are added.
-            visible_apps: Some(VisibleApps {
-                claude: true,
-                claude_desktop: false,
-                codex: true,
-                gemini: false,
-                opencode: false,
-                openclaw: false,
-                hermes: false,
-            }),
+            visible_apps: None,
             claude_config_dir: None,
             codex_config_dir: None,
             gemini_config_dir: None,

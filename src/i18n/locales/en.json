@@ -1048,7 +1048,7 @@
       "openrouter": "OpenRouter",
       "deepseek": "DeepSeek",
       "together": "Together AI",
-      "nexusGlm": "Nexus GLM-5.2"
+      "nexusLocal": "Nexus GLM-5.2"
     },
     "parameterConfig": "Parameter Config - {{name}} *",
     "mainModel": "Main Model (optional)",
@@ -2937,7 +2937,7 @@
       "step3": "Switch to the Nexus GLM-5.2 provider in each assistant to route through the built-in protocol conversion layer."
     },
     "preset": {
-      "nexusGlm": "Nexus GLM-5.2"
+      "nexusLocal": "Nexus GLM-5.2"
     }
   }
 }
