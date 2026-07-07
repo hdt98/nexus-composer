@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=CC Switch
+Name=Nexus Composer
 Comment=All-in-One Assistant for Claude Code, Codex & Gemini CLI
-Exec=cc-switch
-Icon=com.ccswitch.desktop
+Exec=nexus-composer
+Icon=com.nexus-composer.desktop
 Terminal=false
 Categories=Utility;Development;
 StartupNotify=true
