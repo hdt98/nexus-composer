@@ -2124,6 +2124,11 @@ fn strip_known_model_namespace(model_id: &str) -> Option<String> {
         }
     }
 
+    // Strip "-sglang" suffix so "glm-5.2-sglang" matches "glm-5.2" pricing
+    if let Some(stripped) = model_id.strip_suffix("-sglang") {
+        return Some(stripped.to_string());
+    }
+
     None
 }
 
