@@ -108,18 +108,18 @@ export const codexProviderPresets: CodexProviderPreset[] = [
   {
     name: "Nexus Local",
     nameKey: "providerForm.presets.nexusLocal",
-    websiteUrl: "http://127.0.0.1:30000",
-    auth: generateThirdPartyAuth("nexus-local"),
+    websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+    auth: generateThirdPartyAuth("onenx_4f0133292760f767_4NJH8994xJRPhxRGJzIahdDRtnRLkds8UD6FLrwA6ZQ"),
     config: generateThirdPartyConfig(
       "nexus_glm",
-      "http://127.0.0.1:30000/v1",
-      "GLM-5.2-SGLang",
+      "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+      "glm-5.2",
     ),
-    endpointCandidates: ["http://127.0.0.1:30000/v1"],
+    endpointCandidates: ["https://glm-test-glm52-tp4.onenexus-do.cloud/v1"],
     apiFormat: "openai_chat",
     modelCatalog: modelCatalog([
       {
-        model: "GLM-5.2-SGLang",
+        model: "glm-5.2",
         displayName: "GLM-5.2",
         contextWindow: 1048576,
       },
