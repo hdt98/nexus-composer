@@ -1,0 +1,12 @@
+[
+  {"id": "td-1", "task": "Write and execute a Python script that creates a SQLite database, inserts 5 records, and queries them back.", "expected": "Creates DB, inserts data, queries successfully"},
+  {"id": "td-2", "task": "Use curl to fetch data from an API, parse the JSON response, and extract specific fields.", "expected": "Uses curl, parses JSON, extracts fields"},
+  {"id": "td-3", "task": "Create a git repository, make 3 commits with different files, then show the log.", "expected": "Init repo, 3 commits, shows log"},
+  {"id": "td-4", "task": "Write a Python script that reads a file, transforms the data (uppercase all text), and writes to a new file.", "expected": "Reads, transforms, writes correctly"},
+  {"id": "td-5", "task": "Use sed and awk together to process a CSV file: extract column 2, replace commas with tabs, sort the output.", "expected": "Pipeline of sed/awk/sort works correctly"},
+  {"id": "td-6", "task": "Write a Dockerfile, build an image, and run a container that outputs 'Hello World'.", "expected": "Dockerfile created, image built, container runs"},
+  {"id": "td-7", "task": "Write a bash script that monitors CPU usage and logs it to a file every 5 seconds for 30 seconds.", "expected": "Script monitors and logs CPU usage"},
+  {"id": "td-8", "task": "Write a Python HTTP server that responds to GET / with 'OK' and to GET /health with a JSON health status.", "expected": "Server handles both routes correctly"},
+  {"id": "td-9", "task": "Create a Python virtual environment, install requests, and write a script that fetches a URL.", "expected": "venv created, requests installed, script works"},
+  {"id": "td-10", "task": "Write a script that uses regular expressions to extract all email addresses from a text file.", "expected": "Regex extracts valid email addresses"}
+]

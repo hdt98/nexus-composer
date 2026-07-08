@@ -1,0 +1,10 @@
+[
+  {"id": "mcp-1", "task": "Use the filesystem MCP tool to list all files in /tmp, then count how many .txt files exist.", "expected": "Lists files in /tmp, filters for .txt, returns count"},
+  {"id": "mcp-2", "task": "Use the shell MCP tool to run 'echo hello world' and return the output.", "expected": "Returns 'hello world'"},
+  {"id": "mcp-3", "task": "Use the filesystem MCP tool to create a file at /tmp/test_mcp.txt with content 'MCP test', then read it back to verify.", "expected": "Creates file, reads it back, content matches"},
+  {"id": "mcp-4", "task": "Use the fetch MCP tool to retrieve the content of https://httpbin.org/get and extract the 'url' field from the JSON response.", "expected": "Fetches URL, parses JSON, extracts url field"},
+  {"id": "mcp-5", "task": "Use the search MCP tool to search for 'python asyncio' and return the top 3 results with titles and URLs.", "expected": "Performs search, returns 3 results with titles and URLs"},
+  {"id": "mcp-6", "task": "Use the git MCP tool to show the last 3 commits in the current repository.", "expected": "Uses git log, shows last 3 commits with hash, author, message"},
+  {"id": "mcp-7", "task": "Use the database MCP tool to execute 'SELECT 1+1' and return the result.", "expected": "Executes query, returns result 2"},
+  {"id": "mcp-8", "task": "Use the filesystem MCP tool to find all Python files in a directory recursively, then use the code analysis tool to count functions in each file.", "expected": "Finds .py files, analyzes each, counts functions"}
+]

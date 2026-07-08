@@ -1,0 +1,12 @@
+[
+  {"id": "hmmt-nov-1", "question": "Compute the sum of all positive integers n such that n divides 2025! but n does not divide 2024!", "answer": "2026"},
+  {"id": "hmmt-nov-2", "question": "How many 6-digit positive integers have the property that the sum of their digits equals 20?", "answer": "35550"},
+  {"id": "hmmt-nov-3", "question": "Let f(x) = x^4 - 4x^3 + 6x^2 - 4x + 1. Find the number of real solutions to f(f(x)) = 0.", "answer": "4"},
+  {"id": "hmmt-nov-4", "question": "A bag contains 5 red balls and 3 blue balls. Three balls are drawn without replacement. What is the probability that at least 2 are red? Express as p/q in lowest terms.", "answer": "p/q = 5/7"},
+  {"id": "hmmt-nov-5", "question": "Find the number of ordered pairs (a,b) with 1 <= a,b <= 100 such that a^2 + b^2 is divisible by 5.", "answer": "2000"},
+  {"id": "hmmt-nov-6", "question": "In triangle ABC, angle A = 60 degrees, AB = 7, AC = 8. Find BC^2.", "answer": "57"},
+  {"id": "hmmt-nov-7", "question": "The polynomial x^3 - 6x^2 + 11x - 6 has roots a, b, c. Find a^2 + b^2 + c^2.", "answer": "14"},
+  {"id": "hmmt-nov-8", "question": "How many positive integers less than 1000 are relatively prime to 1000?", "answer": "400"},
+  {"id": "hmmt-nov-9", "question": "Find the sum of all prime numbers p such that p^2 + 2 is also prime.", "answer": "3"},
+  {"id": "hmmt-nov-10", "question": "A circle of radius 5 is inscribed in a triangle with sides 13, 14, 15. Find the area of the triangle.", "answer": "84"}
+]

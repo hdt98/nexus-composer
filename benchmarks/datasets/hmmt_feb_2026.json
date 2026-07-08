@@ -1,0 +1,12 @@
+[
+  {"id": "hmmt-feb-1", "question": "Find the number of ways to arrange the letters of MATHEMATICS such that no two adjacent letters are the same.", "answer": "4900500"},
+  {"id": "hmmt-feb-2", "question": "Let a_n = 2^n + 3^n for n >= 1. Find the greatest common divisor of a_100 and a_101.", "answer": "5"},
+  {"id": "hmmt-feb-3", "question": "In how many ways can 8 people be seated around a round table if 3 specific people must sit together?", "answer": "720"},
+  {"id": "hmmt-feb-4", "question": "Find the number of real solutions to the equation |x-1| + |x-2| + |x-3| = 4.", "answer": "2"},
+  {"id": "hmmt-feb-5", "question": "A convex polygon has exactly 5 diagonals. How many sides does the polygon have?", "answer": "5"},
+  {"id": "hmmt-feb-6", "question": "Find the minimum value of f(x) = x^2 - 6x + 10 for real x.", "answer": "1"},
+  {"id": "hmmt-feb-7", "question": "The sum of the first n terms of an arithmetic sequence is 3n^2 + 2n. Find the 10th term.", "answer": "59"},
+  {"id": "hmmt-feb-8", "question": "How many 4-digit positive integers have all digits distinct and in increasing order?", "answer": "126"},
+  {"id": "hmmt-feb-9", "question": "Find the area of the region bounded by y = x^2 and y = 2x for 0 <= x <= 2.", "answer": "4/3"},
+  {"id": "hmmt-feb-10", "question": "A committee of 5 is chosen from 8 men and 6 women. How many committees have exactly 3 men and 2 women?", "answer": "840"}
+]

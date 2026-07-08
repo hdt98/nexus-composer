@@ -16,6 +16,8 @@ use crate::proxy::usage::parser::TokenUsage;
 use crate::services::usage_stats::{
     effective_usage_log_filter, find_model_pricing, should_skip_session_insert, DedupKey,
 };
+use crate::settings::get_effective_current_provider;
+use crate::AppType;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -442,17 +444,23 @@ fn insert_session_log_entry(
         return Ok(false);
     }
 
+    // When proxy takeover is active, Claude Code reports its native model name
+    // (e.g. "claude-fable-5") in session logs, but the actual upstream model is
+    // configured in the provider's settings (e.g. "glm-5.2"). Use the provider's
+    // model for pricing so costs are calculated at the correct rate.
+    let pricing_model = resolve_pricing_model_for_session(db, &conn, &msg.model);
+
     // 计算费用
     let usage = TokenUsage {
         input_tokens: msg.input_tokens,
         output_tokens: msg.output_tokens,
         cache_read_tokens: msg.cache_read_tokens,
         cache_creation_tokens: msg.cache_creation_tokens,
-        model: Some(msg.model.clone()),
+        model: Some(pricing_model.clone()),
         message_id: None,
     };
 
-    let pricing = find_model_pricing_for_session(&conn, &msg.model);
+    let pricing = find_model_pricing_for_session(&conn, &pricing_model);
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -482,8 +490,8 @@ fn insert_session_log_entry(
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            provider_type, is_streaming, cost_multiplier, created_at, data_source, pricing_model
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![
                 request_id,
                 "_session",         // provider_id: 标记为会话来源
@@ -509,6 +517,7 @@ fn insert_session_log_entry(
                 "1.0",              // cost_multiplier
                 created_at,
                 "session_log",      // data_source
+                pricing_model,      // pricing_model: actual upstream model for cost calc
             ],
         )
         .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
@@ -519,6 +528,53 @@ fn insert_session_log_entry(
     }
 
     Ok(true)
+}
+
+
+/// Resolve the actual upstream model for pricing when proxy takeover is active.
+///
+/// When the proxy is active, Claude Code's session logs report the client-side
+/// model name (e.g. "claude-fable-5"), but the actual model serving requests is
+/// configured in the provider's `ANTHROPIC_MODEL` env var (e.g. "glm-5.2").
+/// We look up the current provider and use its configured model for pricing.
+fn resolve_pricing_model_for_session(
+    db: &Database,
+    conn: &rusqlite::Connection,
+    client_model: &str,
+) -> String {
+    // Check if proxy takeover is active for Claude (sync query on proxy_config table)
+    let takeover_active = conn
+        .query_row(
+            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude' AND enabled = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !takeover_active {
+        return client_model.to_string();
+    }
+
+    // Get the current Claude provider
+    let provider_id = match get_effective_current_provider(db, &AppType::Claude) {
+        Ok(Some(id)) => id,
+        _ => return client_model.to_string(),
+    };
+
+    // Get the provider's settings_config and extract ANTHROPIC_MODEL
+    match db.get_provider_by_id(&provider_id, "claude") {
+        Ok(Some(provider)) => {
+            if let Some(env) = provider.settings_config.get("env") {
+                if let Some(model) = env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) {
+                    if !model.is_empty() {
+                        return model.to_string();
+                    }
+                }
+            }
+            client_model.to_string()
+        }
+        _ => client_model.to_string(),
+    }
 }
 
 /// 从 model_pricing 表查找模型定价（支持模糊匹配）

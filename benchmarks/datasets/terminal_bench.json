@@ -1,0 +1,12 @@
+[
+  {"id": "tb-1", "task": "Write a Python script that reads a CSV file and outputs the number of rows and columns. The script should take a filename as a command-line argument.", "expected": "Script that uses csv module, reads file, counts rows and columns, handles errors"},
+  {"id": "tb-2", "task": "Create a bash script that finds all files in a directory tree larger than 1MB and outputs them sorted by size.", "expected": "find with -size +1M, sort by size, proper output format"},
+  {"id": "tb-3", "task": "Write a Python function that implements binary search on a sorted list. Include proper edge case handling.", "expected": "Correct binary search implementation with edge cases"},
+  {"id": "tb-4", "task": "Write a git command to find all commits made by a specific author in the last 7 days. Show the commit hash, date, and message.", "expected": "git log with --author, --since, --format flags"},
+  {"id": "tb-5", "task": "Create a Python script that parses a JSON file and extracts all key-value pairs where the value is a string containing a URL.", "expected": "json.load, recursive traversal, regex for URLs"},
+  {"id": "tb-6", "task": "Write a sed command to replace all instances of 'foo' with 'bar' in a file, but only on lines that contain 'baz'.", "expected": "sed '/baz/s/foo/bar/g'"},
+  {"id": "tb-7", "task": "Write a Python script that monitors a directory for new files and prints their names as they appear.", "expected": "Use watchdog or polling, handle new file events"},
+  {"id": "tb-8", "task": "Create a Dockerfile for a Python Flask application that listens on port 5000.", "expected": "FROM python, install flask, COPY app, EXPOSE 5000, CMD"},
+  {"id": "tb-9", "task": "Write an awk script to sum the values in the second column of a file and print the result.", "expected": "awk '{sum += $2} END {print sum}'"},
+  {"id": "tb-10", "task": "Write a Python script that takes a list of URLs from stdin, fetches each one concurrently, and prints the HTTP status code.", "expected": "asyncio or threading, requests/httpx, concurrent fetching"}
+]

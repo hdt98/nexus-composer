@@ -1,0 +1,14 @@
+[
+  {"id": "gpqa-1", "question": "In quantum mechanics, for a particle in a 1D infinite square well of width L, what is the energy of the third excited state (n=4) in terms of the ground state energy E1?", "answer": "16*E1", "choices": ["4*E1", "9*E1", "16*E1", "25*E1"]},
+  {"id": "gpqa-2", "question": "Which of the following is true about the entropy of a black hole according to the Bekenstein-Hawking formula?", "answer": "It is proportional to the area of the event horizon", "choices": ["It is proportional to the volume of the black hole", "It is proportional to the area of the event horizon", "It is proportional to the mass of the black hole", "It is proportional to the temperature of the black hole"]},
+  {"id": "gpqa-3", "question": "In organic chemistry, what is the hybridization of the carbon atom in methane (CH4)?", "answer": "sp3", "choices": ["sp", "sp2", "sp3", "sp3d"]},
+  {"id": "gpqa-4", "question": "In special relativity, if a particle moves at 0.8c relative to an observer, what is the Lorentz factor gamma?", "answer": "5/3", "choices": ["4/3", "5/3", "3/2", "5/4"]},
+  {"id": "gpqa-5", "question": "What is the pKa of acetic acid at 25 degrees Celsius?", "answer": "4.76", "choices": ["2.87", "4.76", "7.00", "9.25"]},
+  {"id": "gpqa-6", "question": "In molecular biology, which enzyme is responsible for unwinding the DNA double helix during replication?", "answer": "Helicase", "choices": ["DNA polymerase", "Helicase", "Ligase", "Primase"]},
+  {"id": "gpqa-7", "question": "In thermodynamics, for an ideal gas undergoing an isothermal expansion, which of the following is true?", "answer": "Delta U = 0", "choices": ["Delta U = 0", "Delta H = 0 but Delta U != 0", "Q = 0", "W = 0"]},
+  {"id": "gpqa-8", "question": "What is the ground state electron configuration of copper (Cu, Z=29)?", "answer": "[Ar] 3d10 4s1", "choices": ["[Ar] 3d9 4s2", "[Ar] 3d10 4s1", "[Ar] 3d8 4s2 4p1", "[Ar] 3d9 4s1 4p1"]},
+  {"id": "gpqa-9", "question": "In general relativity, the Schwarzschild radius of a black hole is given by which formula?", "answer": "2GM/c^2", "choices": ["GM/c^2", "2GM/c^2", "GM^2/c^2", "2GM^2/c^2"]},
+  {"id": "gpqa-10", "question": "In evolutionary biology, what is the Hardy-Weinberg equilibrium frequency of the heterozygote genotype if p=0.3 and q=0.7?", "answer": "0.42", "choices": ["0.09", "0.42", "0.49", "0.21"]},
+  {"id": "gpqa-11", "question": "What is the standard reduction potential (E°) for the half-reaction Zn2+ + 2e- -> Zn(s)?", "answer": "-0.76 V", "choices": ["+0.34 V", "-0.76 V", "+0.80 V", "-0.44 V"]},
+  {"id": "gpqa-12", "question": "In condensed matter physics, what type of material has a band gap between 0 and ~3 eV?", "answer": "Semiconductor", "choices": ["Conductor", "Semiconductor", "Insulator", "Superconductor"]}
+]

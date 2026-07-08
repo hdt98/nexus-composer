@@ -1,0 +1,10 @@
+[
+  {"id": "imo-1", "question": "Let a, b, c be positive real numbers such that abc = 1. Prove that (a-1+1/b)(b-1+1/c)(c-1+1/a) <= 1. What is the maximum value of the left side?", "answer": "1"},
+  {"id": "imo-2", "question": "Find all functions f: R -> R such that f(xf(y)) = f(x)y for all real x, y.", "answer": "f(x) = 0, f(x) = x, or f(x) = -x"},
+  {"id": "imo-3", "question": "In triangle ABC, the incircle touches BC, CA, AB at D, E, F respectively. If BD = 3, CE = 4, AF = 5, find the perimeter of the triangle.", "answer": "36"},
+  {"id": "imo-4", "question": "Find all pairs of positive integers (m, n) such that m^2 - n^2 = 2025.", "answer": "Multiple solutions including (1013, 1012) and others based on factorizations of 2025"},
+  {"id": "imo-5", "question": "Let p be a prime number. Prove that the numerator of 1 + 1/2 + 1/3 + ... + 1/(p-1), when written in lowest terms, is divisible by p. What is the remainder when this numerator is divided by p?", "answer": "0"},
+  {"id": "imo-6", "question": "The sequence a_n is defined by a_1 = 1, a_{n+1} = a_n + 1/a_n. Find floor(a_100).", "answer": "14"},
+  {"id": "imo-7", "question": "In a triangle with sides a, b, c and semiperimeter s, prove that the area K satisfies K <= s^2/(3*sqrt(3)). What is the equality condition?", "answer": "Equality when triangle is equilateral"},
+  {"id": "imo-8", "question": "Find the number of subsets of {1, 2, ..., 20} that contain no two consecutive integers.", "answer": "17711"}
+]

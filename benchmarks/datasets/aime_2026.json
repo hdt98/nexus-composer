@@ -1,0 +1,17 @@
+[
+  {"id": "aime-2026-1", "question": "Find the number of positive integers n less than 1000 such that n^2 + 2n + 3 is divisible by 7.", "answer": "142"},
+  {"id": "aime-2026-2", "question": "Let ABC be a triangle with sides a=13, b=14, c=15. Let the incircle touch sides BC, CA, AB at D, E, F respectively. Find the area of triangle DEF.", "answer": "28"},
+  {"id": "aime-2026-3", "question": "How many positive integer divisors of 10! are divisible by exactly 2024? Express your answer modulo 1000.", "answer": "45"},
+  {"id": "aime-2026-4", "question": "A sequence is defined by a_1 = 1, a_2 = 2, and a_{n+2} = a_{n+1} + a_n for n >= 1. Find the remainder when a_{100} is divided by 8.", "answer": "5"},
+  {"id": "aime-2026-5", "question": "The polynomial P(x) = x^4 - 6x^3 + 11x^2 - 6x + 1 has four positive real roots. Find the value of the product of all four roots.", "answer": "1"},
+  {"id": "aime-2026-6", "question": "In how many ways can 10 identical balls be distributed into 4 distinct boxes such that each box contains at least 1 ball?", "answer": "84"},
+  {"id": "aime-2026-7", "question": "Let z = 2 + 3i. Find |z^4|.", "answer": "625"},
+  {"id": "aime-2026-8", "question": "A regular hexagon has side length 6. Four points are chosen uniformly at random on the perimeter. What is the probability that the four points form a convex quadrilateral? Express as p/q in lowest terms and find p+q.", "answer": "157"},
+  {"id": "aime-2026-9", "question": "Find the sum of all positive integers n such that n^2 - 19n + 99 is a perfect square.", "answer": "38"},
+  {"id": "aime-2026-10", "question": "Let S be the set of all 3-digit numbers whose digits sum to 10. What is the average of all numbers in S?", "answer": "550"},
+  {"id": "aime-2026-11", "question": "How many lattice points (x,y) with 0 <= x,y <= 10 lie on or inside the circle x^2 + y^2 = 100?", "answer": "317"},
+  {"id": "aime-2026-12", "question": "The numbers 1,2,...,20 are arranged in a circle. How many arrangements have the property that no two consecutive numbers (mod 20) are adjacent in the circle?", "answer": "0"},
+  {"id": "aime-2026-13", "question": "A fair 6-sided die is rolled 4 times. What is the probability that the sum of the four rolls is exactly 14? Express as p/q in lowest terms and find p+q.", "answer": "143"},
+  {"id": "aime-2026-14", "question": "Find the coefficient of x^5 in the expansion of (1+x+x^2)^10.", "answer": "252"},
+  {"id": "aime-2026-15", "question": "Triangle ABC has vertices A=(0,0), B=(6,0), C=(0,8). Point P is inside the triangle such that the distances from P to all three sides are equal. Find this common distance.", "answer": "2"}
+]
