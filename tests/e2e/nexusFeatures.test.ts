@@ -49,16 +49,16 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
   it("points to the SGLang endpoint", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus Local")!;
     const env = (nexus.settingsConfig as any).env;
-    expect(env.ANTHROPIC_BASE_URL).toBe("http://127.0.0.1:30000/v1");
+    expect(env.ANTHROPIC_BASE_URL).toBe("https://glm-test-glm52-tp4.onenexus-do.cloud/v1");
   });
 
   it("uses GLM-5.2-SGLang as the model", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus Local")!;
     const env = (nexus.settingsConfig as any).env;
-    expect(env.ANTHROPIC_MODEL).toBe("GLM-5.2-SGLang");
-    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("GLM-5.2-SGLang");
-    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("GLM-5.2-SGLang");
-    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("GLM-5.2-SGLang");
+    expect(env.ANTHROPIC_MODEL).toBe("glm-5.2");
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("glm-5.2");
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe("glm-5.2");
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe("glm-5.2");
   });
 
   it("uses openai_chat format for proxy conversion", () => {
@@ -76,12 +76,12 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
 describe("Nexus GLM-5.2 Codex preset config", () => {
   it("points to the SGLang endpoint", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
-    expect(nexus.config).toContain("http://127.0.0.1:30000/v1");
+    expect(nexus.config).toContain("https://glm-test-glm52-tp4.onenexus-do.cloud/v1");
   });
 
   it("uses GLM-5.2-SGLang as the model", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
-    expect(nexus.config).toContain("GLM-5.2-SGLang");
+    expect(nexus.config).toContain("glm-5.2");
   });
 
   it("uses openai_chat format for proxy conversion", () => {
@@ -93,7 +93,7 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
     expect(nexus.modelCatalog).toBeDefined();
     expect(nexus.modelCatalog).toHaveLength(1);
-    expect(nexus.modelCatalog![0].model).toBe("GLM-5.2-SGLang");
+    expect(nexus.modelCatalog![0].model).toBe("glm-5.2");
     expect(nexus.modelCatalog![0].displayName).toBe("GLM-5.2");
     expect(nexus.modelCatalog![0].contextWindow).toBe(1048576);
   });
