@@ -1048,7 +1048,7 @@
       "openrouter": "OpenRouter",
       "deepseek": "DeepSeek",
       "together": "Together AI",
-      "nexusLocal": "Nexus GLM-5.2"
+      "nexus": "Nexus GLM-5.2"
     },
     "parameterConfig": "Parameter Config - {{name}} *",
     "mainModel": "Main Model (optional)",

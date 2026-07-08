@@ -1,0 +1,39 @@
+{
+  "timestamp": "2026-07-08T23:01:39.908422",
+  "model": "glm-5.2",
+  "endpoint": "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+  "results": [
+    {
+      "benchmark": "aime_2026",
+      "harness": "claude-cli",
+      "category": "reasoning",
+      "target_score": 99.2,
+      "score": 0.0,
+      "correct": 0,
+      "total": 3,
+      "results": [
+        {
+          "id": "aime-2026-1",
+          "correct": false,
+          "response": "Looking at this problem, I need to find positive integers n < 1000 where n\u00b2 + 2n + 3 \u2261 0 (mod 7).\n\n**Completing the square:**\n\nn\u00b2 + 2n + 3 = (n+1)\u00b2 + 2\n\nSo the condition becomes:\n\n(n+1)\u00b2 + 2 \u2261 0 (mod 7) \u27f9 (n+1)\u00b2 \u2261 5 (mod 7)\n\n**Checking if 5 is a quadratic residue mod 7:**\n\nThe squares mod 7:\n- 0\u00b2 = 0\n- 1\u00b2 = 1\n- 2\u00b2 = 4\n- 3\u00b2 = 2\n- 4\u00b2 = 2\n- 5\u00b2 = 4\n- 6\u00b2 = 1\n\nThe quadratic residues mod 7 are {0, 1, 2, 4}. Since 5 is **not** in this set, the congruence (n+1)\u00b2 \u2261 5 (mod 7) has no solutions.\n\n**Verificat",
+          "expected": "142",
+          "normalized": "0"
+        },
+        {
+          "id": "aime-2026-2",
+          "correct": false,
+          "response": "## Solution\n\n**Setup.** Triangle $ABC$ has sides $a=13$ (BC), $b=14$ (CA), $c=15$ (AB). The incircle touches BC, CA, AB at $D, E, F$ respectively; $\\triangle DEF$ is the **contact (intouch) triangle**.\n\n**Step 1: Semiperimeter and area of $\\triangle ABC$.**\n$$s = \\frac{13+14+15}{2} = 21$$\nBy Heron's formula:\n$$K = \\sqrt{s(s-a)(s-b)(s-c)} = \\sqrt{21\\cdot 8\\cdot 7\\cdot 6} = \\sqrt{7056} = 84$$\n\n**Step 2: Inradius and circumradius.**\n$$r = \\frac{K}{s} = \\frac{84}{21} = 4, \\qquad R = \\frac{abc}{4K} =",
+          "expected": "28",
+          "normalized": "\\dfrac{1344"
+        },
+        {
+          "id": "aime-2026-3",
+          "correct": false,
+          "response": "## Solution\n\n**Factor both numbers.**\n\n$$10! = 2^8 \\cdot 3^4 \\cdot 5^2 \\cdot 7$$\n\n$$2024 = 2^3 \\cdot 11 \\cdot 23$$\n\n**Check feasibility.** For a divisor $d$ of $10!$ to be divisible by $2024$, we need $2024 \\mid d$. Since $d \\mid 10!$, this forces $2024 \\mid 10!$.\n\nBut $10! = 2^8 \\cdot 3^4 \\cdot 5^2 \\cdot 7$ contains no factor of $11$ or $23$ (both primes exceed $10$, so they never appear in $1 \\cdot 2 \\cdots 10$). Since $2024 = 2^3 \\cdot 11 \\cdot 23$ *does* contain these primes, $2024 \\nmid 10!",
+          "expected": "45",
+          "normalized": "0"
+        }
+      ]
+    }
+  ]
+}

@@ -78,8 +78,8 @@ export const providerPresets: ProviderPreset[] = [
   // Completions via Nexus Composer's existing local proxy conversion layer to SGLang.
   // SGLang is an externally managed service; do not mutate its lifecycle.
   {
-    name: "Nexus Local",
-    nameKey: "providerForm.presets.nexusLocal",
+    name: "Nexus",
+    nameKey: "providerForm.presets.nexus",
     websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
     settingsConfig: {
       env: {

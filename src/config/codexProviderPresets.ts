@@ -106,8 +106,8 @@ export const codexProviderPresets: CodexProviderPreset[] = [
   // via Nexus Composer's existing local proxy conversion layer to the SGLang endpoint.
   // SGLang is an externally managed service; do not mutate its lifecycle.
   {
-    name: "Nexus Local",
-    nameKey: "providerForm.presets.nexusLocal",
+    name: "Nexus",
+    nameKey: "providerForm.presets.nexus",
     websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
     auth: generateThirdPartyAuth("onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc"),
     config: generateThirdPartyConfig(

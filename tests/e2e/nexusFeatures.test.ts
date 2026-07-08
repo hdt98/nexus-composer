@@ -15,14 +15,14 @@ describe("Nexus Composer preset arrays", () => {
   it("Claude presets contain exactly Nexus GLM-5.2 and Claude Official", () => {
     const names = providerPresets.map((p) => p.name);
     expect(names).toHaveLength(2);
-    expect(names).toContain("Nexus Local");
+    expect(names).toContain("Nexus");
     expect(names).toContain("Claude Official");
   });
 
   it("Codex presets contain exactly Nexus GLM-5.2 and OpenAI Official", () => {
     const names = codexProviderPresets.map((p) => p.name);
     expect(names).toHaveLength(2);
-    expect(names).toContain("Nexus Local");
+    expect(names).toContain("Nexus");
     expect(names).toContain("OpenAI Official");
   });
 
@@ -47,13 +47,13 @@ describe("Nexus Composer preset arrays", () => {
 
 describe("Nexus GLM-5.2 Claude preset config", () => {
   it("points to the SGLang endpoint", () => {
-    const nexus = providerPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = providerPresets.find((p) => p.name === "Nexus")!;
     const env = (nexus.settingsConfig as any).env;
     expect(env.ANTHROPIC_BASE_URL).toBe("https://glm-test-glm52-tp4.onenexus-do.cloud/v1");
   });
 
   it("uses GLM-5.2-SGLang as the model", () => {
-    const nexus = providerPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = providerPresets.find((p) => p.name === "Nexus")!;
     const env = (nexus.settingsConfig as any).env;
     expect(env.ANTHROPIC_MODEL).toBe("glm-5.2");
     expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe("glm-5.2");
@@ -62,12 +62,12 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
   });
 
   it("uses openai_chat format for proxy conversion", () => {
-    const nexus = providerPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = providerPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.apiFormat).toBe("openai_chat");
   });
 
   it("has the nexus icon", () => {
-    const nexus = providerPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = providerPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.icon).toBe("nexus");
     expect(nexus.iconColor).toBe("#6366F1");
   });
@@ -75,22 +75,22 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
 
 describe("Nexus GLM-5.2 Codex preset config", () => {
   it("points to the SGLang endpoint", () => {
-    const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = codexProviderPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.config).toContain("https://glm-test-glm52-tp4.onenexus-do.cloud/v1");
   });
 
   it("uses GLM-5.2-SGLang as the model", () => {
-    const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = codexProviderPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.config).toContain("glm-5.2");
   });
 
   it("uses openai_chat format for proxy conversion", () => {
-    const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = codexProviderPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.apiFormat).toBe("openai_chat");
   });
 
   it("has model catalog with correct context window", () => {
-    const nexus = codexProviderPresets.find((p) => p.name === "Nexus Local")!;
+    const nexus = codexProviderPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.modelCatalog).toBeDefined();
     expect(nexus.modelCatalog).toHaveLength(1);
     expect(nexus.modelCatalog![0].model).toBe("glm-5.2");
@@ -116,7 +116,7 @@ describe("Sponsor filter", () => {
   it("would hide partner presets if any existed", () => {
     const isSponsorPreset = (preset: any): boolean => {
       if (preset.isOfficial || preset.category === "official") return false;
-      if (preset.name === "Nexus Local") return false;
+      if (preset.name === "Nexus") return false;
       return !!(preset.isPartner || preset.primePartner || preset.partnerPromotionKey);
     };
 
