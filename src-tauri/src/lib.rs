@@ -486,6 +486,12 @@ pub fn run() {
 
             let app_state = AppState::new(db);
 
+            match crate::codex_config::refresh_nexus_owned_codex_model_catalog() {
+                Ok(true) => log::info!("Refreshed Nexus Codex model catalog capabilities"),
+                Ok(false) => {}
+                Err(e) => log::warn!("Failed to refresh Nexus Codex model catalog: {e}"),
+            }
+
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
 

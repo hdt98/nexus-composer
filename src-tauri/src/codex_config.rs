@@ -94,6 +94,8 @@ fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     false
 }
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
+const CODEX_SOL_MODEL_SLUG: &str = "gpt-5.6-sol";
+const NEXUS_GLM_MODEL_SLUGS: [&str; 2] = ["glm-5.2", "GLM-5.2-FP8"];
 
 /// Which Codex tool surface the generated model catalog should target.
 ///
@@ -418,6 +420,12 @@ fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
+fn is_nexus_glm_model_slug(slug: &str) -> bool {
+    NEXUS_GLM_MODEL_SLUGS
+        .iter()
+        .any(|known| slug.eq_ignore_ascii_case(known))
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
@@ -437,15 +445,36 @@ fn codex_catalog_model_entry(
     entry_obj.insert("priority".to_string(), json!(1000 + priority));
     entry_obj.insert("additional_speed_tiers".to_string(), json!([]));
     entry_obj.insert("service_tiers".to_string(), json!([]));
+    entry_obj.insert("default_service_tier".to_string(), Value::Null);
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
+    // Third-party catalogs use normal Responses and Codex's established direct
+    // tool surface. Sol's Lite/comp_hash fields are OpenAI-internal.
+    entry_obj.insert("use_responses_lite".to_string(), json!(false));
+    entry_obj.remove("comp_hash");
+    entry_obj.insert("tool_mode".to_string(), json!("direct"));
+
+    // Keep legacy Nexus GLM records safe even when their stored preset predates
+    // the inputModalities field.
+    if is_nexus_glm_model_slug(&spec.model) {
+        entry_obj.insert("input_modalities".to_string(), json!(["text"]));
+        entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+    } else if let Some(modalities) = &spec.input_modalities {
+        entry_obj.insert("input_modalities".to_string(), json!(modalities));
+        if !modalities
+            .iter()
+            .any(|modality| modality.eq_ignore_ascii_case("image"))
+        {
+            entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+        }
+    }
 
     if profile == CodexCatalogToolProfile::NativeResponses {
         // Native `/responses` gateways reject Codex's freeform `apply_patch`
         // (type=="custom") tool. Strip any key that would make Codex emit a
         // custom/freeform tool, and rely on shell_type="shell_command" for
         // edits. Defensive even though the native template is already clean
-        // (guards against template drift / an accidental gpt-5.5 clone).
+        // (guards against template drift / an accidental full Sol clone).
         //
         // NOTE: `base_instructions` is NOT stripped — Codex's catalog parser
         // treats it as a REQUIRED field and refuses to load the file without
@@ -472,9 +501,6 @@ fn codex_catalog_model_entry(
         if let Some(parallel) = spec.supports_parallel_tool_calls {
             entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
         }
-        if let Some(modalities) = &spec.input_modalities {
-            entry_obj.insert("input_modalities".to_string(), json!(modalities));
-        }
     }
 
     entry
@@ -488,8 +514,8 @@ struct CodexCatalogModelSpec {
     /// Per-row override for the native template's `supports_parallel_tool_calls`
     /// (e.g. MiniMax=true, MiMo=false). Only consulted for `NativeResponses`.
     supports_parallel_tool_calls: Option<bool>,
-    /// Per-row override for the native template's `input_modalities`
-    /// (e.g. `["text","image"]`). Only consulted for `NativeResponses`.
+    /// Per-row override for the template's `input_modalities`
+    /// (e.g. `["text","image"]`).
     input_modalities: Option<Vec<String>>,
     /// Per-row override for the native template's `base_instructions` (the
     /// model identity / system preamble). Carries each vendor's OFFICIAL value
@@ -579,33 +605,73 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     specs
 }
 
-fn find_codex_model_template(catalog: &Value) -> Option<Value> {
+fn codex_sol_capability_fields(capabilities: &Value) -> Option<(&Value, &Value)> {
+    let levels = capabilities.get("supported_reasoning_levels")?;
+    let has_ultra = levels
+        .as_array()?
+        .iter()
+        .any(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"));
+    if !has_ultra {
+        return None;
+    }
+
+    let multi_agent_version = capabilities.get("multi_agent_version")?;
+    (multi_agent_version.as_str() == Some("v2")).then_some((levels, multi_agent_version))
+}
+
+fn apply_codex_sol_capabilities(target: &mut Value, capabilities: &Value) -> Option<bool> {
+    let (levels, multi_agent_version) = codex_sol_capability_fields(capabilities)?;
+    let target = target.as_object_mut()?;
+    let changed = target.get("supported_reasoning_levels") != Some(levels)
+        || target.get("multi_agent_version") != Some(multi_agent_version);
+    target.insert("supported_reasoning_levels".to_string(), levels.clone());
+    target.insert(
+        "multi_agent_version".to_string(),
+        multi_agent_version.clone(),
+    );
+    Some(changed)
+}
+
+fn validated_codex_sol_capabilities(capabilities: Value) -> Option<Value> {
+    codex_sol_capability_fields(&capabilities)?;
+    Some(capabilities)
+}
+
+fn find_codex_model(catalog: &Value, slug: &str) -> Option<Value> {
     catalog
         .get("models")
         .and_then(|models| models.as_array())
         .and_then(|models| {
-            models.iter().find(|model| {
-                model.get("slug").and_then(|slug| slug.as_str())
-                    == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
-            })
+            models
+                .iter()
+                .find(|model| model.get("slug").and_then(Value::as_str) == Some(slug))
         })
         .cloned()
 }
 
-fn load_codex_model_template_from_cache() -> Result<Option<Value>, AppError> {
-    let path = get_codex_config_dir().join("models_cache.json");
-    if !path.exists() {
-        return Ok(None);
+fn load_codex_model_from_cache_path(path: &Path, slug: &str) -> Option<Value> {
+    let catalog = fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok());
+    if catalog.is_none() && path.exists() {
+        log::warn!(
+            "Ignoring unreadable Codex model cache at {}",
+            path.display()
+        );
     }
+    let catalog: Value = catalog?;
+    find_codex_model(&catalog, slug)
+}
 
-    let text = fs::read_to_string(&path).map_err(|e| AppError::io(&path, e))?;
-    let catalog: Value = serde_json::from_str(&text).map_err(|e| AppError::json(&path, e))?;
-    Ok(find_codex_model_template(&catalog))
+fn load_codex_model_from_cache(slug: &str) -> Option<Value> {
+    load_codex_model_from_cache_path(&get_codex_config_dir().join("models_cache.json"), slug)
 }
 
 /// Fixed candidates for locating the `codex` CLI when it is not on the process
 /// PATH (common in GUI apps launched outside a terminal).
 const CODEX_CLI_FIXED_CANDIDATES: &[&str] = &[
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "/Applications/Codex.app/Contents/Resources/codex",
     "codex",                                // PATH (all platforms)
     "/opt/homebrew/bin/codex",              // macOS Apple Silicon Homebrew
     "/usr/local/bin/codex",                 // macOS Intel Homebrew / Linux
@@ -763,7 +829,7 @@ fn codex_cli_candidates() -> Vec<PathBuf> {
     candidates
 }
 
-fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
+fn load_codex_model_from_bundled(slug: &str) -> Option<Value> {
     for candidate in codex_cli_candidates() {
         let candidate_label = candidate.to_string_lossy();
         let output = match Command::new(&candidate)
@@ -792,23 +858,37 @@ fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
                 continue;
             }
         };
-        if let Some(template) = find_codex_model_template(&catalog) {
-            return Ok(Some(template));
+        if let Some(template) = find_codex_model(&catalog, slug) {
+            return Some(template);
         }
     }
 
-    Ok(None)
+    None
 }
 
 fn load_codex_model_template_static() -> Option<Value> {
-    let text = include_str!("resources/gpt5_5_template.json");
-    match serde_json::from_str(text) {
-        Ok(template) => Some(template),
-        Err(e) => {
-            log::warn!("Failed to parse bundled gpt-5.5 template: {e}");
-            None
-        }
-    }
+    let template: Value =
+        serde_json::from_str(include_str!("resources/gpt5_5_template.json")).ok()?;
+    (template.get("slug").and_then(Value::as_str) == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG))
+        .then_some(template)
+}
+
+fn load_codex_sol_capabilities_static() -> Option<Value> {
+    let capabilities =
+        serde_json::from_str(include_str!("resources/gpt5_6_sol_capabilities.json")).ok()?;
+    validated_codex_sol_capabilities(capabilities)
+}
+
+fn load_codex_sol_capabilities(include_cli: bool) -> Option<Value> {
+    load_codex_model_from_cache(CODEX_SOL_MODEL_SLUG)
+        .and_then(validated_codex_sol_capabilities)
+        .or_else(|| {
+            include_cli
+                .then(|| load_codex_model_from_bundled(CODEX_SOL_MODEL_SLUG))
+                .flatten()
+                .and_then(validated_codex_sol_capabilities)
+        })
+        .or_else(load_codex_sol_capabilities_static)
 }
 
 /// Bundled clean template for native `/responses` providers. Unlike the
@@ -823,23 +903,83 @@ fn load_codex_native_responses_template() -> Value {
     serde_json::from_str(text).expect("bundled codex native responses template must be valid JSON")
 }
 
-fn load_codex_model_catalog_template() -> Result<Value, AppError> {
-    // ① models_cache.json (created by Codex when it connects to OpenAI)
-    if let Some(template) = load_codex_model_template_from_cache()? {
-        return Ok(template);
+fn load_codex_model_catalog_template(profile: CodexCatalogToolProfile) -> Result<Value, AppError> {
+    let mut template = match profile {
+        CodexCatalogToolProfile::NativeResponses => load_codex_native_responses_template(),
+        CodexCatalogToolProfile::ProxyChat => {
+            load_codex_model_from_cache(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
+                .or_else(|| load_codex_model_from_bundled(CODEX_MODEL_CATALOG_TEMPLATE_SLUG))
+                .or_else(load_codex_model_template_static)
+                .ok_or_else(|| {
+                    AppError::Message(format!(
+                        "Codex model catalog template `{CODEX_MODEL_CATALOG_TEMPLATE_SLUG}` not found. Please start Codex once so models_cache.json is available, or ensure the `codex` CLI is on PATH."
+                    ))
+                })?
+        }
+    };
+    let capabilities = load_codex_sol_capabilities(true).ok_or_else(|| {
+        AppError::Message("Bundled gpt-5.6-sol capability snapshot is invalid".to_string())
+    })?;
+    apply_codex_sol_capabilities(&mut template, &capabilities)
+        .ok_or_else(|| AppError::Message("Failed to apply gpt-5.6-sol capabilities".to_string()))?;
+    Ok(template)
+}
+
+fn refresh_codex_catalog_entries(catalog: &mut Value, capabilities: &Value) -> bool {
+    let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+        return false;
+    };
+
+    let mut changed = false;
+    for entry in models {
+        let before = entry.clone();
+        let _ = apply_codex_sol_capabilities(entry, capabilities);
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        object.insert("tool_mode".to_string(), json!("direct"));
+        object.insert("use_responses_lite".to_string(), json!(false));
+        object.insert("default_service_tier".to_string(), Value::Null);
+        object.remove("comp_hash");
+        if object
+            .get("slug")
+            .and_then(Value::as_str)
+            .is_some_and(is_nexus_glm_model_slug)
+        {
+            object.insert("input_modalities".to_string(), json!(["text"]));
+            object.insert("supports_image_detail_original".to_string(), json!(false));
+        }
+        changed |= *entry != before;
     }
-    // ② codex CLI (PATH + platform-specific common paths)
-    if let Some(template) = load_codex_model_template_from_bundled()? {
-        return Ok(template);
+    changed
+}
+
+/// Refresh every entry in the Nexus-owned generated catalog without touching
+/// user-owned catalog paths or invoking the Codex CLI during app startup.
+pub fn refresh_nexus_owned_codex_model_catalog() -> Result<bool, AppError> {
+    let config_path = get_codex_config_path();
+    if !config_path.exists() {
+        return Ok(false);
     }
-    // ③ Static fallback bundled at compile time
-    if let Some(template) = load_codex_model_template_static() {
-        return Ok(template);
+    let config_text =
+        fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
+    let generated_path = get_codex_model_catalog_path();
+    let Some(catalog_path) = resolve_nexus_catalog_path(&config_text, &generated_path) else {
+        return Ok(false);
+    };
+    if !catalog_path.exists() {
+        return Ok(false);
     }
 
-    Err(AppError::Message(format!(
-        "Codex model catalog template `{CODEX_MODEL_CATALOG_TEMPLATE_SLUG}` not found. Please start Codex once so models_cache.json is available, or ensure the `codex` CLI is on PATH."
-    )))
+    let mut catalog: Value = read_json_file(&catalog_path)?;
+    let capabilities = load_codex_sol_capabilities(false).ok_or_else(|| {
+        AppError::Message("Bundled gpt-5.6-sol capability snapshot is invalid".to_string())
+    })?;
+    if !refresh_codex_catalog_entries(&mut catalog, &capabilities) {
+        return Ok(false);
+    }
+    write_json_file(&catalog_path, &catalog)?;
+    Ok(true)
 }
 
 fn codex_model_catalog_from_specs(
@@ -866,13 +1006,7 @@ fn codex_model_catalog_from_settings(
         return Ok(None);
     }
 
-    // Native providers use the bundled clean template (no freeform apply_patch,
-    // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
-    // entry so the proxy can rewrite custom<->function tools as before.
-    let template = match profile {
-        CodexCatalogToolProfile::NativeResponses => load_codex_native_responses_template(),
-        CodexCatalogToolProfile::ProxyChat => load_codex_model_catalog_template()?,
-    };
+    let template = load_codex_model_catalog_template(profile)?;
     Ok(Some(codex_model_catalog_from_specs(
         &specs, &template, profile,
     )))
@@ -2285,8 +2419,18 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
+    fn nexus_glm_slug_allowlist_is_exact_and_case_insensitive() {
+        for slug in ["glm-5.2", "GLM-5.2", "GLM-5.2-FP8", "glm-5.2-fp8"] {
+            assert!(is_nexus_glm_model_slug(slug));
+        }
+        for slug in ["glm-5.2-preview", "GLM-5.2-FP8-extra"] {
+            assert!(!is_nexus_glm_model_slug(slug));
+        }
+    }
+
+    #[test]
     fn codex_model_catalog_uses_provider_models_and_context() {
-        let template = json!({
+        let mut template = json!({
             "slug": "gpt-5.5",
             "display_name": "GPT-5.5",
             "description": "Frontier model",
@@ -2299,6 +2443,11 @@ base_url = "https://production.api/v1"
                     "personality_pragmatic": ""
                 }
             },
+            "apply_patch_tool_type": "freeform",
+            "use_responses_lite": true,
+            "comp_hash": "3000",
+            "default_service_tier": "priority",
+            "supports_image_detail_original": true,
             "additional_speed_tiers": ["fast"],
             "service_tiers": [
                 {
@@ -2316,17 +2465,22 @@ base_url = "https://production.api/v1"
             "context_window": 272000,
             "max_context_window": 272000
         });
+        let capabilities = load_codex_sol_capabilities_static().expect("Sol capabilities");
+        assert_eq!(
+            apply_codex_sol_capabilities(&mut template, &capabilities),
+            Some(true)
+        );
         let settings = json!({
             "modelCatalog": {
                 "models": [
                     {
-                        "model": "deepseek-v4-flash",
-                        "displayName": "DeepSeek V4 Flash",
+                        "model": "glm-5.2",
+                        "displayName": "GLM-5.2",
                         "contextWindow": "64000"
                     },
                     {
-                        "model": "kimi-k2",
-                        "display_name": "Kimi K2"
+                        "model": "GLM-5.2-FP8",
+                        "display_name": "GLM-5.2 FP8"
                     }
                 ]
             }
@@ -2342,7 +2496,7 @@ base_url = "https://production.api/v1"
         assert_eq!(models.len(), 2);
         assert_eq!(
             models[0].get("slug").and_then(|value| value.as_str()),
-            Some("deepseek-v4-flash")
+            Some("glm-5.2")
         );
         assert_eq!(
             models[0]
@@ -2369,7 +2523,31 @@ base_url = "https://production.api/v1"
         assert_eq!(
             models[0].get("model_messages"),
             template.get("model_messages"),
-            "custom catalog entries should keep the gpt-5.5 agent template"
+            "custom catalog entries should keep the established agent template"
+        );
+        assert_eq!(models[0].get("multi_agent_version"), Some(&json!("v2")));
+        assert!(models[0]["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
+        assert_eq!(models[0].get("tool_mode"), Some(&json!("direct")));
+        assert_eq!(
+            models[0].get("apply_patch_tool_type"),
+            Some(&json!("freeform"))
+        );
+        assert_eq!(models[0].get("use_responses_lite"), Some(&json!(false)));
+        assert!(models[0].get("comp_hash").is_none());
+        assert!(models[0]
+            .get("default_service_tier")
+            .is_some_and(Value::is_null));
+        assert_eq!(models[0].get("input_modalities"), Some(&json!(["text"])));
+        assert_eq!(
+            models[0].get("supports_image_detail_original"),
+            Some(&json!(false))
+        );
+        assert_eq!(models[1].get("input_modalities"), Some(&json!(["text"])));
+        assert_eq!(
+            models[1].get("supports_image_detail_original"),
+            Some(&json!(false))
         );
         assert_eq!(
             models[0].get("additional_speed_tiers"),
@@ -2380,7 +2558,7 @@ base_url = "https://production.api/v1"
             models[0]
                 .get("availability_nux")
                 .is_some_and(|value| value.is_null()),
-            "generated third-party entries should not inherit GPT-5.5 launch messaging"
+            "generated third-party entries should not inherit launch messaging"
         );
     }
 
@@ -2449,6 +2627,13 @@ base_url = "https://production.api/v1"
             Some(&json!(["text", "image"])),
             "per-row inputModalities override must apply"
         );
+        assert_eq!(entry.get("multi_agent_version"), Some(&json!("v2")));
+        assert_eq!(entry.get("tool_mode"), Some(&json!("direct")));
+        assert_eq!(entry.get("use_responses_lite"), Some(&json!(false)));
+        assert!(entry.get("comp_hash").is_none());
+        assert!(entry["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
         assert_eq!(
             entry.get("context_window").and_then(|v| v.as_u64()),
             Some(1_000_000)
@@ -2501,6 +2686,9 @@ base_url = "https://production.api/v1"
         // one with the field present to prove ProxyChat leaves it intact.)
         let mut proxy_template = template.clone();
         proxy_template["apply_patch_tool_type"] = json!("freeform");
+        let capabilities = load_codex_sol_capabilities_static().expect("Sol capabilities");
+        apply_codex_sol_capabilities(&mut proxy_template, &capabilities)
+            .expect("apply Sol capabilities");
         let catalog = codex_model_catalog_from_specs(
             &specs,
             &proxy_template,
@@ -2513,6 +2701,57 @@ base_url = "https://production.api/v1"
             Some("freeform"),
             "ProxyChat must preserve apply_patch_tool_type (no native stripping)"
         );
+        assert_eq!(catalog["models"][0]["tool_mode"], "direct");
+        assert_eq!(catalog["models"][0]["multi_agent_version"], "v2");
+        assert!(catalog["models"][0]["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
+    }
+
+    #[test]
+    fn refresh_normalizes_all_generated_entries_and_is_idempotent() {
+        let capabilities = load_codex_sol_capabilities_static().expect("Sol capabilities");
+        let mut catalog = json!({
+            "models": [
+                {
+                    "slug": "glm-5.2",
+                    "apply_patch_tool_type": "freeform",
+                    "supported_reasoning_levels": [{"effort": "high", "description": "High"}],
+                    "tool_mode": "code_mode_only",
+                    "use_responses_lite": true,
+                    "comp_hash": "proxy",
+                    "default_service_tier": "priority",
+                    "supports_image_detail_original": true
+                },
+                {
+                    "slug": "GLM-5.2-FP8",
+                    "shell_type": "shell_command",
+                    "use_responses_lite": true,
+                    "comp_hash": "native",
+                    "default_service_tier": "priority",
+                    "supported_reasoning_levels": [
+                        {"effort": "none", "description": "Disable Thinking"},
+                        {"effort": "high", "description": "Enabled Thinking"}
+                    ]
+                }
+            ]
+        });
+        assert!(refresh_codex_catalog_entries(&mut catalog, &capabilities));
+        for entry in catalog["models"].as_array().unwrap() {
+            assert_eq!(entry["multi_agent_version"], "v2");
+            assert_eq!(entry["tool_mode"], "direct");
+            assert_eq!(entry["use_responses_lite"], false);
+            assert!(entry["default_service_tier"].is_null());
+            assert!(entry.get("comp_hash").is_none());
+            assert!(entry["supported_reasoning_levels"]
+                .as_array()
+                .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
+            assert_eq!(entry["input_modalities"], json!(["text"]));
+            assert_eq!(entry["supports_image_detail_original"], false);
+        }
+        assert_eq!(catalog["models"][1]["shell_type"], "shell_command");
+        assert!(catalog["models"][1].get("apply_patch_tool_type").is_none());
+        assert!(!refresh_codex_catalog_entries(&mut catalog, &capabilities));
     }
 
     #[test]
@@ -2789,6 +3028,9 @@ web_search = "disabled"
     #[test]
     fn codex_cli_candidates_are_non_empty() {
         let candidates = codex_cli_candidates();
+        for path in CODEX_CLI_FIXED_CANDIDATES.iter().take(2) {
+            assert!(candidates.contains(&PathBuf::from(path)));
+        }
         assert!(
             candidates
                 .iter()
@@ -2850,14 +3092,70 @@ web_search = "disabled"
     }
 
     #[test]
-    fn static_template_is_valid_json_with_slug() {
+    fn malformed_cache_allows_static_sol_fallback() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cache_path = temp.path().join("models_cache.json");
+        std::fs::write(&cache_path, "{not json").expect("write malformed cache");
+
+        let capabilities = load_codex_model_from_cache_path(&cache_path, CODEX_SOL_MODEL_SLUG)
+            .and_then(validated_codex_sol_capabilities)
+            .or_else(load_codex_sol_capabilities_static)
+            .expect("static Sol fallback should remain available");
+        assert!(codex_sol_capability_fields(&capabilities).is_some());
+    }
+
+    #[test]
+    fn static_template_is_valid_compatibility_base() {
         let template =
             load_codex_model_template_static().expect("static template must parse as valid JSON");
         assert_eq!(
             template.get("slug").and_then(|v| v.as_str()),
             Some("gpt-5.5"),
-            "static template slug must be gpt-5.5"
+            "static compatibility template slug must be gpt-5.5"
         );
+    }
+
+    #[test]
+    fn sol_capability_snapshot_is_source_exact() {
+        let capabilities =
+            load_codex_sol_capabilities_static().expect("Sol capabilities must parse");
+        assert_eq!(
+            capabilities["supported_reasoning_levels"]
+                .as_array()
+                .expect("reasoning levels")
+                .iter()
+                .filter_map(|level| level["effort"].as_str())
+                .collect::<Vec<_>>(),
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        assert_eq!(capabilities["multi_agent_version"], "v2");
+        assert_eq!(
+            capabilities["supported_reasoning_levels"][5]["description"],
+            "Maximum reasoning with automatic task delegation"
+        );
+        assert_eq!(
+            capabilities["provenance"]["command"],
+            "codex debug models --bundled"
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_sol_capabilities() {
+        let capabilities =
+            load_codex_sol_capabilities_static().expect("Sol capabilities must parse");
+        let mut missing_v2 = capabilities.clone();
+        missing_v2
+            .as_object_mut()
+            .unwrap()
+            .remove("multi_agent_version");
+        assert!(codex_sol_capability_fields(&missing_v2).is_none());
+
+        let mut missing_ultra = capabilities;
+        missing_ultra["supported_reasoning_levels"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+        assert!(codex_sol_capability_fields(&missing_ultra).is_none());
     }
 
     #[test]

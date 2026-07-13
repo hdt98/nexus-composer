@@ -1,0 +1,35 @@
+{
+  "provenance": {
+    "source": "Codex Desktop 0.144.2",
+    "command": "codex debug models --bundled",
+    "slug": "gpt-5.6-sol",
+    "capability_sha256": "b66e4cca301512db2dce7dd808d78209b59f880259e3eca48656fa0539825440"
+  },
+  "supported_reasoning_levels": [
+    {
+      "effort": "low",
+      "description": "Fast responses with lighter reasoning"
+    },
+    {
+      "effort": "medium",
+      "description": "Balances speed and reasoning depth for everyday tasks"
+    },
+    {
+      "effort": "high",
+      "description": "Greater reasoning depth for complex problems"
+    },
+    {
+      "effort": "xhigh",
+      "description": "Extra high reasoning depth for complex problems"
+    },
+    {
+      "effort": "max",
+      "description": "Maximum reasoning depth for the hardest problems"
+    },
+    {
+      "effort": "ultra",
+      "description": "Maximum reasoning with automatic task delegation"
+    }
+  ],
+  "multi_agent_version": "v2"
+}
