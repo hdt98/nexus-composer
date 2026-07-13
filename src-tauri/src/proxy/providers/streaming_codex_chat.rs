@@ -978,9 +978,16 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                     }
                 }
                 Err(e) => {
+                    let error_type = (&e as &(dyn std::error::Error + 'static))
+                        .downcast_ref::<std::io::Error>()
+                        .map_or("stream_error", |error| match error.kind() {
+                            std::io::ErrorKind::UnexpectedEof => "stream_truncated",
+                            std::io::ErrorKind::InvalidData => "invalid_upstream_output",
+                            _ => "stream_error",
+                        });
                     yield Ok(state.failed_event(
                         format!("Stream error: {e}"),
-                        Some("stream_error".to_string()),
+                        Some(error_type.to_string()),
                     ));
                     stream_failed = true;
                     break;
@@ -1266,15 +1273,23 @@ mod tests {
 
     #[tokio::test]
     async fn stream_error_emits_failed_without_completed() {
-        let upstream = stream::iter(vec![Err::<Bytes, std::io::Error>(std::io::Error::other(
-            "boom",
-        ))]);
-        let converted = create_responses_sse_stream_from_chat(upstream);
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("event: response.failed"));
-        assert!(!output.contains("event: response.completed"));
+        for (kind, code) in [
+            (std::io::ErrorKind::Other, "stream_error"),
+            (std::io::ErrorKind::UnexpectedEof, "stream_truncated"),
+            (std::io::ErrorKind::InvalidData, "invalid_upstream_output"),
+        ] {
+            let upstream = stream::iter([Err::<Bytes, _>(std::io::Error::new(kind, "boom"))]);
+            let converted = create_responses_sse_stream_from_chat(upstream);
+            let output = converted
+                .map(|item| item.unwrap())
+                .collect::<Vec<_>>()
+                .await
+                .concat();
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("event: response.failed"));
+            assert!(output.contains(code));
+            assert!(!output.contains("event: response.completed"));
+        }
     }
 
     #[tokio::test]

@@ -627,10 +627,17 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                 Err(e) => {
                     log::error!("Stream error: {e}");
                     stream_ended_with_error = true;
+                    let error_type = (&e as &(dyn std::error::Error + 'static))
+                        .downcast_ref::<std::io::Error>()
+                        .map_or("stream_error", |error| match error.kind() {
+                            std::io::ErrorKind::UnexpectedEof => "stream_truncated",
+                            std::io::ErrorKind::InvalidData => "invalid_upstream_output",
+                            _ => "stream_error",
+                        });
                     let error_event = json!({
                         "type": "error",
                         "error": {
-                            "type": "stream_error",
+                            "type": error_type,
                             "message": format!("Stream error: {e}")
                         }
                     });
@@ -1200,35 +1207,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_stream_error_does_not_emit_success_terminal_events() {
-        let upstream = stream::iter(vec![Err::<Bytes, _>(std::io::Error::other(
-            "upstream disconnected",
-        ))]);
-        let converted = create_anthropic_sse_stream(upstream);
-        let chunks: Vec<_> = converted.collect().await;
-
-        let merged = chunks
-            .into_iter()
-            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
-            .collect::<String>();
-
-        let events: Vec<Value> = merged
-            .split("\n\n")
-            .filter_map(|block| {
-                let data = block
-                    .lines()
-                    .find_map(|line| strip_sse_field(line, "data"))?;
-                serde_json::from_str::<Value>(data).ok()
-            })
-            .collect();
-
-        assert!(events
-            .iter()
-            .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("error")));
-        assert!(!events
-            .iter()
-            .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("message_delta")));
-        assert!(!events
-            .iter()
-            .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("message_stop")));
+        for (kind, expected) in [
+            (std::io::ErrorKind::Other, "stream_error"),
+            (std::io::ErrorKind::UnexpectedEof, "stream_truncated"),
+            (std::io::ErrorKind::InvalidData, "invalid_upstream_output"),
+        ] {
+            let upstream = stream::iter([Err::<Bytes, _>(std::io::Error::new(kind, "boom"))]);
+            let events = create_anthropic_sse_stream(upstream)
+                .collect::<Vec<_>>()
+                .await
+                .into_iter()
+                .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+                .collect::<String>()
+                .split("\n\n")
+                .filter_map(|block| {
+                    let data = block
+                        .lines()
+                        .find_map(|line| strip_sse_field(line, "data"))?;
+                    serde_json::from_str::<Value>(data).ok()
+                })
+                .collect::<Vec<_>>();
+            assert!(events.iter().any(|event| {
+                event_type(event) == Some("error")
+                    && event.pointer("/error/type").and_then(Value::as_str) == Some(expected)
+            }));
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event_type(event), Some("message_delta" | "message_stop"))));
+        }
     }
 }

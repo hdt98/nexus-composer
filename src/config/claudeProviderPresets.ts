@@ -82,6 +82,7 @@ export const providerPresets: ProviderPreset[] = [
     nameKey: "providerForm.presets.nexus",
     websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
     settingsConfig: {
+      nexusCapabilities: { reasoningBoundary: "think_close" },
       env: {
         ANTHROPIC_BASE_URL: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
         ANTHROPIC_AUTH_TOKEN: "onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc",

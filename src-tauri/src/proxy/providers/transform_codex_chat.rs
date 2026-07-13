@@ -9,6 +9,7 @@ use super::codex_chat_common::{
     response_function_call_item, response_function_call_item_with_namespace,
     split_leading_think_block,
 };
+use super::reasoning_boundary::ReasoningPolicy;
 use crate::provider::CodexChatReasoningConfig;
 use crate::proxy::{
     error::ProxyError,
@@ -248,17 +249,28 @@ pub(crate) fn build_codex_tool_context_from_request(body: &Value) -> CodexToolCo
 /// Convert an OpenAI Responses request into an OpenAI Chat Completions request.
 #[allow(dead_code)]
 pub fn responses_to_chat_completions(body: Value) -> Result<Value, ProxyError> {
-    responses_to_chat_completions_with_reasoning(body, None)
+    responses_to_chat_completions_with_policy(body, None, ReasoningPolicy::ToolPlaceholder)
 }
 
 /// Convert an OpenAI Responses request into an OpenAI Chat Completions request,
 /// using provider-declared Codex Chat reasoning capabilities when available.
+#[cfg(test)]
 pub fn responses_to_chat_completions_with_reasoning(
     body: Value,
     reasoning_config: Option<&CodexChatReasoningConfig>,
 ) -> Result<Value, ProxyError> {
+    let reasoning_policy = ReasoningPolicy::resolve(reasoning_config);
+    responses_to_chat_completions_with_policy(body, reasoning_config, reasoning_policy)
+}
+
+pub(crate) fn responses_to_chat_completions_with_policy(
+    body: Value,
+    reasoning_config: Option<&CodexChatReasoningConfig>,
+    reasoning_policy: ReasoningPolicy,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
+    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
 
     if let Some(model) = body.get("model") {
         result["model"] = model.clone();
@@ -276,12 +288,16 @@ pub fn responses_to_chat_completions_with_reasoning(
     }
 
     if let Some(input) = body.get("input") {
-        append_responses_input_as_chat_messages(input, &mut messages, &tool_context)?;
+        append_responses_input_as_chat_messages(
+            input,
+            &mut messages,
+            &tool_context,
+            reasoning_policy,
+        )?;
     }
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
 
-    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(max_tokens) = body.get("max_output_tokens") {
         if super::transform::is_openai_o_series(model) {
             result["max_completion_tokens"] = max_tokens.clone();
@@ -382,6 +398,9 @@ fn apply_reasoning_options(
             }
             "reasoning_split" => {
                 result["reasoning_split"] = json!(reasoning_enabled);
+            }
+            "chat_template_kwargs.enable_thinking" => {
+                result["chat_template_kwargs"] = json!({"enable_thinking": reasoning_enabled});
             }
             _ => {}
         }
@@ -539,6 +558,7 @@ fn append_responses_input_as_chat_messages(
     input: &Value,
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
+    reasoning_policy: ReasoningPolicy,
 ) -> Result<(), ProxyError> {
     let mut pending_tool_calls = Vec::new();
     let mut pending_reasoning: Option<String> = None;
@@ -553,6 +573,14 @@ fn append_responses_input_as_chat_messages(
         }
         Value::Array(items) => {
             for item in items {
+                if reasoning_policy.adapts_boundaries() && ends_pending_reasoning(item) {
+                    settle_pending_reasoning(
+                        messages,
+                        last_assistant_index,
+                        &pending_tool_calls,
+                        &mut pending_reasoning,
+                    );
+                }
                 append_responses_item_as_chat_message(
                     item,
                     messages,
@@ -560,6 +588,7 @@ fn append_responses_input_as_chat_messages(
                     &mut pending_reasoning,
                     &mut last_assistant_index,
                     tool_context,
+                    reasoning_policy,
                 )?;
             }
         }
@@ -571,19 +600,56 @@ fn append_responses_input_as_chat_messages(
                 &mut pending_reasoning,
                 &mut last_assistant_index,
                 tool_context,
+                reasoning_policy,
             )?;
         }
         _ => {}
     }
 
+    if reasoning_policy.adapts_boundaries() {
+        settle_pending_reasoning(
+            messages,
+            last_assistant_index,
+            &pending_tool_calls,
+            &mut pending_reasoning,
+        );
+    }
     flush_pending_tool_calls(
         messages,
         &mut pending_tool_calls,
         &mut pending_reasoning,
         &mut last_assistant_index,
     );
-    backfill_tool_call_reasoning_placeholders(messages);
+    match reasoning_policy {
+        ReasoningPolicy::GlmBoundary => remove_legacy_tool_call_placeholders(messages),
+        ReasoningPolicy::ToolPlaceholder => backfill_tool_call_reasoning_placeholders(messages),
+    }
     Ok(())
+}
+
+fn settle_pending_reasoning(
+    messages: &mut [Value],
+    last_assistant: Option<usize>,
+    pending_calls: &[Value],
+    reasoning: &mut Option<String>,
+) {
+    if pending_calls.is_empty()
+        && attach_reasoning_to_last_assistant(messages, last_assistant, reasoning)
+    {
+        reasoning.take();
+    }
+}
+
+fn ends_pending_reasoning(item: &Value) -> bool {
+    let item_type = item.get("type").and_then(Value::as_str);
+    let role = item.get("role").and_then(Value::as_str);
+    matches!(
+        item_type,
+        Some("function_call_output" | "custom_tool_call_output" | "tool_search_output")
+    ) || (matches!(
+        item_type,
+        Some("message" | "input_text" | "input_image" | "input_file" | "input_audio") | None
+    ) && role != Some("assistant"))
 }
 
 fn append_responses_item_as_chat_message(
@@ -593,6 +659,7 @@ fn append_responses_item_as_chat_message(
     pending_reasoning: &mut Option<String>,
     last_assistant_index: &mut Option<usize>,
     tool_context: &CodexToolContext,
+    reasoning_policy: ReasoningPolicy,
 ) -> Result<(), ProxyError> {
     let item_type = item.get("type").and_then(|v| v.as_str());
     match item_type {
@@ -647,7 +714,8 @@ fn append_responses_item_as_chat_message(
         }
         Some("reasoning") => {
             let reasoning = responses_reasoning_item_text(item);
-            let attached_to_previous = pending_tool_calls.is_empty()
+            let attached_to_previous = !reasoning_policy.adapts_boundaries()
+                && pending_tool_calls.is_empty()
                 && attach_reasoning_to_last_assistant(messages, *last_assistant_index, &reasoning);
             if !attached_to_previous {
                 append_pending_reasoning(pending_reasoning, reasoning);
@@ -695,13 +763,16 @@ fn append_responses_item_as_chat_message(
             }
         }
         _ => {
-            flush_pending_tool_calls(
-                messages,
-                pending_tool_calls,
-                pending_reasoning,
-                last_assistant_index,
-            );
-            if item.get("role").is_some() || item.get("content").is_some() {
+            let is_message = item.get("role").is_some() || item.get("content").is_some();
+            if !reasoning_policy.adapts_boundaries() || is_message {
+                flush_pending_tool_calls(
+                    messages,
+                    pending_tool_calls,
+                    pending_reasoning,
+                    last_assistant_index,
+                );
+            }
+            if is_message {
                 let message = responses_message_item_to_chat_message(item, pending_reasoning);
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
@@ -859,6 +930,52 @@ fn backfill_tool_call_reasoning_placeholders(messages: &mut [Value]) {
         if is_assistant_tool_call {
             ensure_tool_call_reasoning_content(message);
         }
+    }
+}
+
+// Remove repeated exact placeholders Nexus previously injected into tool-call
+// history. Requiring at least two avoids stripping genuine single-paragraph
+// reasoning with the same words.
+fn remove_legacy_tool_call_placeholders(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant")
+            || message["tool_calls"].as_array().is_none_or(Vec::is_empty)
+        {
+            continue;
+        }
+        let Some(remainder) = message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .and_then(strip_leading_tool_call_placeholders)
+            .map(ToString::to_string)
+        else {
+            continue;
+        };
+        let Some(message) = message.as_object_mut() else {
+            continue;
+        };
+        match remainder.as_str() {
+            "" => _ = message.remove("reasoning_content"),
+            _ => _ = message.insert("reasoning_content".into(), remainder.into()),
+        }
+    }
+}
+
+fn strip_leading_tool_call_placeholders(mut text: &str) -> Option<&str> {
+    let mut count = 0;
+    loop {
+        if text == "tool call" {
+            count += 1;
+            return (count >= 2).then_some("");
+        }
+        let Some(rest) = text
+            .strip_prefix("tool call\n\n")
+            .or_else(|| text.strip_prefix("tool call\r\n\r\n"))
+        else {
+            return (count >= 2).then_some(text);
+        };
+        count += 1;
+        text = rest;
     }
 }
 
@@ -1750,6 +1867,23 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 mod tests {
     use super::*;
 
+    fn glm_reasoning_config() -> CodexChatReasoningConfig {
+        CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            thinking_param: Some("chat_template_kwargs.enable_thinking".into()),
+            output_format: Some("reasoning_content".into()),
+            ..Default::default()
+        }
+    }
+
+    fn convert_glm(input: Value) -> Value {
+        responses_to_chat_completions_with_reasoning(
+            json!({"model": "glm-5.2", "input": input}),
+            Some(&glm_reasoning_config()),
+        )
+        .unwrap()
+    }
+
     #[test]
     fn responses_request_with_stream_injects_include_usage() {
         let input = json!({
@@ -2563,6 +2697,149 @@ mod tests {
         assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
         assert_eq!(messages[0]["reasoning_content"], "tool call");
         assert_eq!(messages[1]["role"], "tool");
+    }
+
+    #[test]
+    fn tool_reasoning_placeholders_follow_resolved_provider_config() {
+        let input = json!([
+            {"type": "function_call", "call_id": "call_1", "name": "read_file", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+        ]);
+        let convert = |thinking_param: &str| {
+            responses_to_chat_completions_with_reasoning(
+                json!({"model": "glm-5.2", "input": input}),
+                Some(&CodexChatReasoningConfig {
+                    supports_thinking: Some(true),
+                    thinking_param: Some(thinking_param.into()),
+                    output_format: Some("reasoning_content".into()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap()
+        };
+
+        let glm = convert("chat_template_kwargs.enable_thinking");
+        assert!(glm["messages"][0].get("reasoning_content").is_none());
+        let kimi = convert(" thinking ");
+        assert_eq!(kimi["messages"][0]["reasoning_content"], "tool call");
+    }
+
+    #[test]
+    fn explicit_glm_policy_also_normalizes_request_history() {
+        let contaminated = std::iter::repeat_n("tool call", 60)
+            .chain(["Current reasoning"])
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let result = responses_to_chat_completions_with_policy(
+            json!({
+                "model": "custom-model",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "read_file",
+                        "arguments": "{}",
+                        "reasoning_content": contaminated
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "ok"
+                    }
+                ]
+            }),
+            None,
+            ReasoningPolicy::GlmBoundary,
+        )
+        .unwrap();
+
+        assert_eq!(
+            result["messages"][0]["reasoning_content"],
+            "Current reasoning"
+        );
+    }
+
+    #[test]
+    fn glm_placeholder_migration_is_exact_and_linear() {
+        let genuine = "tool call\n\nGenuine model reasoning";
+        let result = convert_glm(json!([
+            {
+                "type": "function_call", "call_id": "call_1", "name": "read",
+                "arguments": "{}", "reasoning_content": genuine
+            },
+            {"type": "function_call_output", "call_id": "call_1", "output": "ok"}
+        ]));
+        assert_eq!(result["messages"][0]["reasoning_content"], genuine);
+
+        let repeated = std::iter::repeat_n("tool call", 64)
+            .chain(["Current reasoning"])
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        assert_eq!(
+            strip_leading_tool_call_placeholders(&repeated),
+            Some("Current reasoning")
+        );
+        assert_eq!(
+            strip_leading_tool_call_placeholders("tool call\nreasoning"),
+            None
+        );
+        assert_eq!(
+            strip_leading_tool_call_placeholders("tool call\n\nreasoning"),
+            None
+        );
+    }
+
+    #[test]
+    fn glm_leading_reasoning_after_tool_output_attaches_to_next_calls() {
+        let convert = |with_history| {
+            let mut input = Vec::new();
+            if with_history {
+                input.extend([
+                    json!({"type": "function_call", "call_id": "old", "name": "old_call", "arguments": "{}"}),
+                    json!({"type": "function_call_output", "call_id": "old", "output": "old result"}),
+                ]);
+            }
+            input.extend([
+                json!({"type": "reasoning", "summary": "tool call\n\ntool call\n\ntool call\n\ntool call\n\ntool call\n\nCurrent real reasoning mentions tool call later"}),
+                json!({"type": "function_call", "call_id": "new_1", "name": "first", "arguments": "{}"}),
+                json!({"type": "opaque_metadata", "id": "meta"}),
+                json!({"type": "function_call", "call_id": "new_2", "name": "second", "arguments": "{}"}),
+                json!({"type": "function_call_output", "call_id": "new_1", "output": "one"}),
+                json!({"type": "function_call_output", "call_id": "new_2", "output": "two"}),
+            ]);
+            convert_glm(json!(input))
+        };
+        let desktop = convert(true);
+        let messages = desktop["messages"].as_array().unwrap();
+
+        assert!(messages[0].get("reasoning_content").is_none());
+        assert_eq!(
+            messages[2]["reasoning_content"],
+            "Current real reasoning mentions tool call later"
+        );
+        assert_eq!(messages[2]["tool_calls"].as_array().unwrap().len(), 2);
+        let cli = convert(false);
+        assert_eq!(desktop["messages"][2], cli["messages"][0]);
+
+        let baseline = responses_to_chat_completions_with_policy(
+            json!({"model": "other", "input": [
+                {"type": "function_call", "call_id": "one", "name": "first", "arguments": "{}"},
+                {"type": "opaque_metadata", "id": "meta"},
+                {"type": "function_call", "call_id": "two", "name": "second", "arguments": "{}"}
+            ]}),
+            None,
+            ReasoningPolicy::ToolPlaceholder,
+        )
+        .unwrap();
+        let assistants = baseline["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect::<Vec<_>>();
+        assert_eq!(assistants.len(), 2);
+        assert_eq!(assistants[0]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(assistants[1]["tool_calls"].as_array().unwrap().len(), 1);
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
         obj.remove("apiFormat");
         obj.remove("openrouter_compat_mode");
         obj.remove("openrouterCompatMode");
+        obj.remove("nexusCapabilities");
     }
     v
 }
@@ -1607,6 +1608,21 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_live_settings_exclude_internal_capabilities() {
+        let stored = json!({
+            "nexusCapabilities": {"reasoningBoundary": "think_close"},
+            "env": {"ANTHROPIC_MODEL": "glm-5.2"}
+        });
+        let live = sanitize_claude_settings_for_live(&stored);
+        assert!(live.get("nexusCapabilities").is_none());
+        assert_eq!(
+            live["env"]["ANTHROPIC_MODEL"],
+            stored["env"]["ANTHROPIC_MODEL"]
+        );
+        assert!(stored.get("nexusCapabilities").is_some());
+    }
 
     #[test]
     fn claude_common_config_apply_and_remove_roundtrip_for_non_overlapping_fields() {

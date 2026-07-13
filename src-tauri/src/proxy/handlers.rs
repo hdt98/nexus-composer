@@ -18,12 +18,14 @@ use super::{
     handler_context::RequestContext,
     providers::{
         codex_chat_common::extract_reasoning_field_text,
-        codex_chat_history::record_responses_sse_stream, get_adapter, get_claude_api_format,
+        codex_chat_history::record_responses_sse_stream,
+        get_adapter, get_claude_api_format,
+        reasoning_boundary::{adapt_chat_completion, adapt_chat_sse_stream, ReasoningPolicy},
         streaming::create_anthropic_sse_stream,
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
-        streaming_responses::create_anthropic_sse_stream_from_responses, transform,
-        transform_codex_chat, transform_gemini, transform_responses,
+        streaming_responses::create_anthropic_sse_stream_from_responses,
+        transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, process_response, read_decoded_body,
@@ -42,6 +44,10 @@ use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+
+fn adapts_reasoning_boundaries(ctx: &RequestContext) -> bool {
+    ReasoningPolicy::from_provider(&ctx.provider).adapts_boundaries()
+}
 
 // ============================================================================
 // 健康检查和状态查询（简单端点）
@@ -328,6 +334,10 @@ async fn handle_claude_transform(
                 Some(ctx.session_id.clone()),
                 tool_schema_hints.clone(),
             )))
+        } else if adapts_reasoning_boundaries(ctx) {
+            Box::new(Box::pin(create_anthropic_sse_stream(
+                adapt_chat_sse_stream(stream),
+            )))
         } else {
             Box::new(Box::pin(create_anthropic_sse_stream(stream)))
         };
@@ -430,7 +440,7 @@ async fn handle_claude_transform(
 
     let body_str = String::from_utf8_lossy(&body_bytes);
 
-    let upstream_response: Value = if aggregate_codex_oauth_responses_sse {
+    let mut upstream_response: Value = if aggregate_codex_oauth_responses_sse {
         responses_sse_to_response_value(&body_str)?
     } else {
         match serde_json::from_slice(&body_bytes) {
@@ -467,6 +477,12 @@ async fn handle_claude_transform(
             }
         }
     };
+
+    if api_format == "openai_chat" && adapts_reasoning_boundaries(ctx) {
+        adapt_chat_completion(&mut upstream_response).map_err(|error| {
+            ProxyError::TransformError(format!("Nexus rejected upstream output: {error}"))
+        })?;
+    }
 
     // 根据 api_format 选择非流式转换器
     let anthropic_response = if api_format == "openai_responses" {
@@ -859,7 +875,20 @@ async fn handle_codex_chat_to_responses_transform(
 
     if is_stream || response.is_sse() {
         let stream = response.bytes_stream();
-        let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
+        let sse_stream: Box<
+            dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
+        > = if adapts_reasoning_boundaries(ctx) {
+            Box::new(Box::pin(
+                create_responses_sse_stream_from_chat_with_context(
+                    adapt_chat_sse_stream(stream),
+                    tool_context,
+                ),
+            ))
+        } else {
+            Box::new(Box::pin(
+                create_responses_sse_stream_from_chat_with_context(stream, tool_context),
+            ))
+        };
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
         let usage_collector = if usage_logging_enabled(state) {
@@ -958,7 +987,7 @@ async fn handle_codex_chat_to_responses_transform(
     let (mut response_headers, status, body_bytes) =
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     let body_str = String::from_utf8_lossy(&body_bytes);
-    let chat_response: Value = match serde_json::from_slice(&body_bytes) {
+    let mut chat_response: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
         // 与 Claude 侧 handle_claude_transform 对称的兜底嗅探（#2234）：
         // 上游对 stream:false 返回未标记 Content-Type 的 SSE 体时按 SSE 聚合。
@@ -980,6 +1009,11 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
+    if adapts_reasoning_boundaries(ctx) {
+        adapt_chat_completion(&mut chat_response).map_err(|error| {
+            ProxyError::TransformError(format!("Nexus rejected upstream output: {error}"))
+        })?;
+    }
     let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
         &tool_context,

@@ -117,6 +117,13 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     ),
     endpointCandidates: ["https://glm-test-glm52-tp4.onenexus-do.cloud/v1"],
     apiFormat: "openai_chat",
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: false,
+      thinkingParam: "chat_template_kwargs.enable_thinking",
+      effortParam: "none",
+      outputFormat: "reasoning_content",
+    },
     modelCatalog: modelCatalog([
       {
         model: "glm-5.2",

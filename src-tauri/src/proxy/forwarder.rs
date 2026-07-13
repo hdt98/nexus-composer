@@ -1368,9 +1368,12 @@ impl RequestForwarder {
             super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
-            super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+            let reasoning_policy =
+                super::providers::reasoning_boundary::ReasoningPolicy::from_provider(provider);
+            super::providers::transform_codex_chat::responses_to_chat_completions_with_policy(
                 mapped_body,
                 reasoning_config.as_ref(),
+                reasoning_policy,
             )?
         } else if needs_transform {
             if adapter.name() == "Claude" {
