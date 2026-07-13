@@ -168,6 +168,10 @@ export const usageApi = {
     return invoke("delete_model_pricing", { modelId });
   },
 
+  resetModelPricingToDefaults: async (): Promise<void> => {
+    return invoke("reset_model_pricing_to_defaults");
+  },
+
   checkProviderLimits: async (
     providerId: string,
     appType: string,

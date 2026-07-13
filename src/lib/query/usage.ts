@@ -149,7 +149,7 @@ export const usageKeys = {
     [...usageKeys.all, providerId, appType] as const,
 };
 
-/** 把 UI 侧的 "all" 哨兵归一成 undefined（后端语义：不过滤）。 */
+/** Normalize the UI "all" sentinel to the backend's unfiltered undefined value. */
 function normalizeScopeFilters(filters?: UsageScopeFilters): UsageScopeFilters {
   return {
     appType: filters?.appType === "all" ? undefined : filters?.appType,
@@ -326,7 +326,7 @@ export function useRequestLogs({
       const effectiveFilters = { ...filters, ...resolveUsageRange(range) };
       return usageApi.getRequestLogs(effectiveFilters, page, pageSize);
     },
-    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS, // 每30秒自动刷新
+    refetchInterval: options?.refetchInterval ?? DEFAULT_REFETCH_INTERVAL_MS,
     refetchIntervalInBackground: options?.refetchIntervalInBackground ?? false,
   });
 }
@@ -385,6 +385,17 @@ export function useDeleteModelPricing() {
 
   return useMutation({
     mutationFn: (modelId: string) => usageApi.deleteModelPricing(modelId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: usageKeys.all });
+    },
+  });
+}
+
+export function useResetModelPricing() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: usageApi.resetModelPricingToDefaults,
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: usageKeys.all });
     },

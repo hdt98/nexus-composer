@@ -1,6 +1,6 @@
-//! 请求上下文模块
+//! Request context.
 //!
-//! 提供请求生命周期的上下文管理，封装通用初始化逻辑
+//! Manages request-lifecycle context and shared initialization.
 
 use crate::app_config::AppType;
 use crate::provider::Provider;
@@ -14,77 +14,73 @@ use crate::proxy::{
 use axum::http::HeaderMap;
 use std::time::Instant;
 
-/// 流式超时配置
+/// Streaming-timeout configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct StreamingTimeoutConfig {
-    /// 首字节超时（秒），0 表示禁用
+    /// Time to first byte in seconds; zero disables it.
     pub first_byte_timeout: u64,
-    /// 静默期超时（秒），0 表示禁用
+    /// Idle timeout in seconds; zero disables it.
     pub idle_timeout: u64,
 }
 
-/// 请求上下文
+/// Request context.
 ///
-/// 贯穿整个请求生命周期，包含：
-/// - 计时信息
-/// - 应用级代理配置（per-app）
-/// - 选中的 Provider 列表（用于故障转移）
-/// - 请求模型名称
-/// - 日志标签
-/// - Session ID（用于日志关联）
+/// Spans the request lifecycle with timing, per-application proxy settings,
+/// failover providers, requested model, log label, and correlation session ID.
 pub struct RequestContext {
-    /// 请求开始时间
+    /// Request start time.
     pub start_time: Instant,
-    /// 应用级代理配置（per-app，包含重试次数和超时配置）
+    /// Per-application proxy settings, including retries and timeouts.
     pub app_config: AppProxyConfig,
-    /// 选中的 Provider（故障转移链的第一个）
+    /// Selected provider, first in the failover chain.
     pub provider: Provider,
-    /// 完整的 Provider 列表（用于故障转移）
+    /// Complete provider list for failover.
     providers: Vec<Provider>,
-    /// 请求开始时的"当前供应商"（用于判断是否需要同步 UI/托盘）
+    /// Current provider at request start, used to decide whether UI/tray must synchronize.
     ///
-    /// 这里使用本地 settings 的设备级 current provider。
-    /// 代理模式下如果实际使用的 provider 与此不一致，会触发切换以确保 UI 始终准确。
+    /// Uses the device-level current provider from local settings. If proxy mode
+    /// actually selects another provider, switching keeps the UI accurate.
     pub current_provider_id: String,
-    /// 请求中的模型名称
+    /// Model name in the request.
     pub request_model: String,
-    /// 实际发往上游的模型名（路由接管/模型映射后的真值，forward 成功后回填）。
+    /// Model sent upstream after takeover/mapping, populated after forwarding succeeds.
     ///
-    /// usage 归因的兜底顺序：上游响应回显 → outbound_model → request_model。
-    /// 不能直接用 request_model 兜底：接管场景下它是映射前的客户端别名。
+    /// Usage attribution falls back from upstream response to outbound_model and
+    /// then request_model. request_model alone is a pre-mapping client alias under takeover.
     pub outbound_model: Option<String>,
-    /// 日志标签（如 "Claude"、"Codex"、"Gemini"）
+    /// Log label such as Claude, Codex, or Gemini.
     pub tag: &'static str,
-    /// 应用类型字符串（如 "claude"、"codex"、"gemini"）
+    /// Application-type string such as claude, codex, or gemini.
     pub app_type_str: &'static str,
-    /// 应用类型（预留，目前通过 app_type_str 使用）
+    /// Reserved application type; currently app_type_str is used.
     #[allow(dead_code)]
     pub app_type: AppType,
-    /// Session ID（从客户端请求提取或新生成）
+    /// Session ID extracted from the client or generated.
     pub session_id: String,
-    /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
+    /// Whether the client supplied the session ID. A generated UUID cannot be an
+    /// upstream cache key because it changes on every request.
     pub session_client_provided: bool,
-    /// 整流器配置
+    /// Rectifier configuration.
     pub rectifier_config: RectifierConfig,
-    /// 优化器配置
+    /// Optimizer configuration.
     pub optimizer_config: OptimizerConfig,
-    /// Copilot 优化器配置
+    /// Copilot optimizer configuration.
     pub copilot_optimizer_config: CopilotOptimizerConfig,
 }
 
 impl RequestContext {
-    /// 创建请求上下文
+    /// Creates a request context.
     ///
     /// # Arguments
-    /// * `state` - 代理服务器状态
-    /// * `body` - 请求体 JSON
-    /// * `headers` - 请求头（用于提取 Session ID）
-    /// * `app_type` - 应用类型
-    /// * `tag` - 日志标签
-    /// * `app_type_str` - 应用类型字符串
+    /// * `state` - proxy-server state;
+    /// * `body` - JSON request body;
+    /// * `headers` - request headers used for session extraction;
+    /// * `app_type` - application type;
+    /// * `tag` - log label;
+    /// * `app_type_str` - application-type string.
     ///
     /// # Errors
-    /// 返回 `ProxyError` 如果 Provider 选择失败
+    /// Returns ProxyError when provider selection fails.
     pub async fn new(
         state: &ProxyState,
         body: &serde_json::Value,
@@ -95,14 +91,14 @@ impl RequestContext {
     ) -> Result<Self, ProxyError> {
         let start_time = Instant::now();
 
-        // 从数据库读取应用级代理配置（per-app）
+        // Read per-application proxy settings.
         let app_config = state
             .db
             .get_proxy_config_for_app(app_type_str)
             .await
             .map_err(|e| ProxyError::DatabaseError(e.to_string()))?;
 
-        // 从数据库读取整流器配置
+        // Read rectifier configuration.
         let rectifier_config = state.db.get_rectifier_config().unwrap_or_default();
         let optimizer_config = state.db.get_optimizer_config().unwrap_or_default();
         let copilot_optimizer_config = state.db.get_copilot_optimizer_config().unwrap_or_default();
@@ -110,14 +106,14 @@ impl RequestContext {
         let current_provider_id =
             crate::settings::get_current_provider(&app_type).unwrap_or_default();
 
-        // 从请求体提取模型名称
+        // Extract model name from the request body.
         let request_model = body
             .get("model")
             .and_then(|m| m.as_str())
             .unwrap_or("unknown")
             .to_string();
 
-        // 提取 Session ID
+        // Extract session ID.
         let session_result = extract_session_id(headers, body, app_type_str);
         let session_id = session_result.session_id.clone();
 
@@ -129,8 +125,8 @@ impl RequestContext {
             session_result.client_provided
         );
 
-        // 使用共享的 ProviderRouter 选择 Provider（熔断器状态跨请求保持）
-        // 注意：只在这里调用一次，结果传递给 forwarder，避免重复消耗 HalfOpen 名额
+        // Select through the shared ProviderRouter so circuit state persists. Call
+        // once and pass the result to the forwarder to avoid consuming two HalfOpen permits.
         let providers = state
             .provider_router
             .select_providers(app_type_str)
@@ -176,13 +172,13 @@ impl RequestContext {
         })
     }
 
-    /// 从 URI 提取模型名称（Gemini 专用）
+    /// Extracts a Gemini model name from the URI.
     ///
-    /// Gemini API 的模型名称在 URI 中，格式如：
+    /// Gemini model names appear in URI forms such as:
     /// `/v1beta/models/gemini-pro:generateContent`
     pub fn with_model_from_uri(mut self, uri: &axum::http::Uri) -> Self {
-        // 用 path() 而不是 path_and_query()：模型名必须从路径段中解析，
-        // 否则 GET /v1beta/models/<id>?key=... 会把 query 拼到 request_model 上。
+        // Parse path rather than path_and_query so a GET query cannot become part
+        // of request_model.
         let endpoint = uri.path();
 
         self.request_model =
@@ -191,24 +187,23 @@ impl RequestContext {
         self
     }
 
-    /// 创建 RequestForwarder
+    /// Creates a RequestForwarder.
     ///
-    /// 使用共享的 ProviderRouter，确保熔断器状态跨请求保持
+    /// Uses the shared ProviderRouter so circuit state persists across requests.
     ///
-    /// 配置生效规则：
-    /// - 故障转移开启：超时配置正常生效（0 表示禁用超时）
-    /// - 故障转移关闭：超时配置不生效（全部传入 0）
+    /// Timeouts apply only when failover is enabled, with zero disabling a timeout.
+    /// When failover is disabled, all timeout values are passed as zero.
     pub fn create_forwarder(&self, state: &ProxyState) -> RequestForwarder {
         let (non_streaming_timeout, first_byte_timeout, idle_timeout) =
             if self.app_config.auto_failover_enabled {
-                // 故障转移开启：使用配置的值（0 = 禁用超时）
+                // Failover enabled: use configured values; zero disables timeout.
                 (
                     self.app_config.non_streaming_timeout as u64,
                     self.app_config.streaming_first_byte_timeout as u64,
                     self.app_config.streaming_idle_timeout as u64,
                 )
             } else {
-                // 故障转移关闭：不启用超时配置
+                // Failover disabled: disable timeout configuration.
                 log::debug!(
                     "[{}] Failover disabled, timeout configs are bypassed",
                     self.tag
@@ -216,11 +211,14 @@ impl RequestContext {
                 (0, 0, 0)
             };
 
-        // 故障转移关闭时强制 max_retries=0（仅尝试 1 个 provider），与「不超时 + 不切换」语义一致。
+        // Without failover, keep at most one same-provider retry for transient
+        // pre-stream transport failures. This does not enable provider switching
+        // or response timeouts, and the forwarder gates the retry so model/parser
+        // failures stay visible.
         let max_retries = if self.app_config.auto_failover_enabled {
             self.app_config.max_retries
         } else {
-            0
+            self.app_config.max_retries.min(1)
         };
 
         RequestForwarder::new(
@@ -244,34 +242,33 @@ impl RequestContext {
         )
     }
 
-    /// 获取 Provider 列表（用于故障转移）
+    /// Returns the provider list for failover.
     ///
-    /// 返回在创建上下文时已选择的 providers，避免重复调用 select_providers()
+    /// Reuses providers selected during context creation instead of selecting again.
     pub fn get_providers(&self) -> Vec<Provider> {
         self.providers.clone()
     }
 
-    /// 计算请求延迟（毫秒）
+    /// Returns request latency in milliseconds.
     #[inline]
     pub fn latency_ms(&self) -> u64 {
         self.start_time.elapsed().as_millis() as u64
     }
 
-    /// 获取流式超时配置
+    /// Returns streaming-timeout configuration.
     ///
-    /// 配置生效规则：
-    /// - 故障转移开启：返回配置的值（0 表示禁用超时检查）
-    /// - 故障转移关闭：返回 0（禁用超时检查）
+    /// Returns configured values when failover is enabled, with zero disabling a
+    /// check. Returns zero for every check when failover is disabled.
     #[inline]
     pub fn streaming_timeout_config(&self) -> StreamingTimeoutConfig {
         if self.app_config.auto_failover_enabled {
-            // 故障转移开启：使用配置的值（0 = 禁用超时）
+            // Failover enabled: use configured values; zero disables a check.
             StreamingTimeoutConfig {
                 first_byte_timeout: self.app_config.streaming_first_byte_timeout as u64,
                 idle_timeout: self.app_config.streaming_idle_timeout as u64,
             }
         } else {
-            // 故障转移关闭：禁用流式超时检查
+            // Failover disabled: disable streaming timeouts.
             StreamingTimeoutConfig {
                 first_byte_timeout: 0,
                 idle_timeout: 0,
@@ -291,7 +288,7 @@ pub(crate) fn extract_gemini_model_from_path(endpoint: &str) -> Option<String> {
         .iter()
         .position(|s| *s == "models")
         .and_then(|i| segments.get(i + 1).copied())
-        // 防御性裁剪：即便调用方传入带 ? 或 :action 的字符串，也只保留 model id 本身
+        // Defensively retain only the model ID even if input contains a query or action.
         .map(|s| s.split('?').next().unwrap_or(s))
         .map(|s| s.split(':').next().unwrap_or(s))
         .filter(|s| !s.is_empty())
@@ -352,14 +349,14 @@ mod tests {
 
     #[test]
     fn extract_model_trailing_models_segment() {
-        // `/v1beta/models` (list endpoint) has no following segment → None.
+        // `/v1beta/models` (list endpoint) has no following segment, so return None.
         assert_eq!(extract_gemini_model_from_path("/v1beta/models"), None);
     }
 
     #[test]
     fn extract_model_get_with_query_only() {
-        // GET /v1beta/models/<id>?key=... 无 action verb，仅靠 ':' 拆分会把 query 带进 model 名。
-        // 修复后应该把 query 剥掉。
+        // GET /v1beta/models/<id>?key=... has no action verb, so colon splitting
+        // alone would retain the query. Ensure the query is removed.
         assert_eq!(
             extract_gemini_model_from_path("/v1beta/models/gemini-pro?key=abc").as_deref(),
             Some("gemini-pro"),

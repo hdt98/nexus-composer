@@ -1,7 +1,10 @@
-//! 流式响应转换模块
+//! Streaming-response transformation.
 //!
-//! 实现 OpenAI SSE → Anthropic SSE 格式转换
+//! Converts OpenAI SSE into Anthropic SSE.
 
+use super::codex_chat_common::{
+    normalize_glm_think_open_alias_for_literal, strip_glm_think_open_alias_from_reasoning,
+};
 use crate::proxy::sse::{strip_sse_field, take_sse_block};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
@@ -9,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-/// OpenAI 流式响应数据结构
+/// OpenAI streaming-response structure.
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
     #[serde(default)]
@@ -33,7 +36,7 @@ struct StreamChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
-    // OpenRouter/Kimi/其它 使用 reasoning，DeepSeek 使用 reasoning_content
+    // OpenRouter, Kimi, and others use reasoning; DeepSeek uses reasoning_content.
     #[serde(default, alias = "reasoning_content")]
     reasoning: Option<String>,
     #[serde(default)]
@@ -59,7 +62,7 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-/// OpenAI 流式响应的 usage 信息（完整版）
+/// Complete usage information from an OpenAI streaming response.
 #[derive(Debug, Deserialize)]
 struct Usage {
     #[serde(default)]
@@ -89,19 +92,78 @@ struct ToolBlockState {
     name: String,
     started: bool,
     pending_args: String,
-    /// 连续空白字符计数 — 用于检测 Copilot 无限换行 bug
-    /// 当 function call 参数中的连续空白字符达到阈值时，强制终止流
+    /// Consecutive whitespace count used to detect Copilot's infinite-newline bug.
+    /// Stop the stream when function-call arguments reach the threshold.
     consecutive_whitespace: usize,
-    /// 是否已因无限空白 bug 被中止
+    /// Whether the stream was stopped for infinite whitespace.
     aborted: bool,
 }
 
-/// 无限空白 bug 的连续空白字符阈值
+/// Consecutive-whitespace threshold for the infinite-whitespace bug.
 const INFINITE_WHITESPACE_THRESHOLD: usize = 500;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OpenAIToAnthropicStreamOptions {
+    pub(crate) repair_glm_special_token_aliases: bool,
+    pub(crate) quarantine_glm_visible_output_corruption: bool,
+}
+
+const UPSTREAM_VISIBLE_OUTPUT_CORRUPTION_TYPE: &str = "upstream_visible_output_corruption";
+
+fn visible_output_corruption_message(text: &str) -> Option<&'static str> {
+    if text.contains('\u{FFFD}') {
+        return Some("Upstream response emitted invalid replacement characters in assistant-visible output");
+    }
+
+    if contains_raw_reasoning_marker(text) {
+        return Some("Upstream response leaked a raw reasoning delimiter into assistant-visible output");
+    }
+
+    None
+}
+
+fn contains_raw_reasoning_marker(text: &str) -> bool {
+    ["<think", "</think", "<thinking", "</thinking"]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+fn strip_recoverable_visible_boundary_artifact(text: &str) -> Option<String> {
+    if text.contains("<think>") || text.contains("<thinking>") {
+        return None;
+    }
+
+    let trimmed_end = text.trim_end_matches(['\r', '\n', '\t', ' ']);
+    for close_tag in ["</thinking>", "</think>"] {
+        if let Some(prefix) = trimmed_end.strip_suffix(close_tag) {
+            if prefix.contains("</think>") || prefix.contains("</thinking>") {
+                return None;
+            }
+            return Some(prefix.to_string());
+        }
+    }
+
+    None
+}
+
+fn anthropic_error_sse(error_type: &str, message: &str) -> Bytes {
+    let event = json!({
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message
+        }
+    });
+    Bytes::from(format!(
+        "event: error\ndata: {}\n\n",
+        serde_json::to_string(&event).unwrap_or_default()
+    ))
+}
+
 fn build_anthropic_usage_json(usage: &Usage) -> Value {
-    // OpenAI prompt_tokens 含缓存，Anthropic input_tokens 不含，需减去 cache_read 与 cache_creation
-    // （三桶互斥，恒等 input + cache_read + cache_creation == prompt_tokens）。
+    // OpenAI prompt_tokens include cache buckets, while Anthropic input_tokens do
+    // not. Subtract cache_read and cache_creation; the three exclusive buckets must
+    // satisfy input + cache_read + cache_creation == prompt_tokens.
     let cached = extract_cache_read_tokens(usage).unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
     let input_tokens = usage
@@ -143,9 +205,16 @@ fn build_message_delta_event(stop_reason: Option<String>, usage_json: Option<Val
     })
 }
 
-/// 创建 Anthropic SSE 流
-pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
+#[cfg(test)]
+fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_anthropic_sse_stream_with_options(stream, OpenAIToAnthropicStreamOptions::default())
+}
+
+pub(crate) fn create_anthropic_sse_stream_with_options<E: std::error::Error + Send + 'static>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    options: OpenAIToAnthropicStreamOptions,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
@@ -154,11 +223,10 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
         let mut current_model = None;
         let mut next_content_index: u32 = 0;
         let mut has_sent_message_start = false;
-        // 某些上游 provider（如 OpenRouter 的 kimi-k2.6）会在 tool_use 后发送多个
-        // 带 finish_reason 的 SSE chunk。Anthropic 协议要求每个消息流只能有一个
-        // message_delta，重复会导致 Claude Code abort 连接。因此需要：
-        // 1) has_emitted_message_delta: 去重，只处理第一个 finish_reason
-        // 2) pending_message_delta: 缓存延迟到 [DONE] 发送，确保 usage 完整
+        // Some upstreams, such as OpenRouter's kimi-k2.6, send multiple chunks with
+        // finish_reason after tool_use. Anthropic permits one message_delta; duplicates
+        // make Claude Code abort. Deduplicate finish_reason and defer a pending delta
+        // until [DONE] so it includes complete usage.
         let mut has_emitted_message_delta = false;
         let mut pending_message_delta: Option<(Option<String>, Option<Value>)> = None;
         let mut has_sent_message_stop = false;
@@ -171,7 +239,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
 
         tokio::pin!(stream);
 
-        while let Some(chunk) = stream.next().await {
+        'stream_loop: while let Some(chunk) = stream.next().await {
             match chunk {
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
@@ -186,7 +254,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                 if data.trim() == "[DONE]" {
                                     log::debug!("[Claude/OpenRouter] <<< OpenAI SSE: [DONE]");
 
-                                    // 流正常结束，发出缓存的 message_delta（含完整 usage）。
+                                    // Normal completion: emit the cached delta with complete usage.
                                     if let Some((stop_reason, usage_json)) = pending_message_delta.take() {
                                         let event = build_message_delta_event(stop_reason, usage_json);
                                         let sse_data = format!("event: message_delta\ndata: {}\n\n",
@@ -264,53 +332,103 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                             has_sent_message_start = true;
                                         }
 
-                                        // 处理 reasoning（thinking）
+                                        // Process reasoning/thinking.
                                         if let Some(reasoning) = &choice.delta.reasoning {
-                                            if current_non_tool_block_type != Some("thinking") {
-                                                if let Some(index) = current_non_tool_block_index.take() {
+                                            let reasoning = if options.repair_glm_special_token_aliases {
+                                                strip_glm_think_open_alias_from_reasoning(reasoning)
+                                            } else {
+                                                std::borrow::Cow::Borrowed(reasoning.as_str())
+                                            };
+                                            let reasoning = reasoning.as_ref();
+                                            if !reasoning.is_empty() {
+                                                if options.quarantine_glm_visible_output_corruption {
+                                                    if let Some(message) =
+                                                        visible_output_corruption_message(reasoning)
+                                                    {
+                                                        log::warn!(
+                                                            "[Claude/OpenRouter] Quarantining corrupted reasoning delta: {message}"
+                                                        );
+                                                        stream_ended_with_error = true;
+                                                        yield Ok(anthropic_error_sse(
+                                                            UPSTREAM_VISIBLE_OUTPUT_CORRUPTION_TYPE,
+                                                            message,
+                                                        ));
+                                                        break 'stream_loop;
+                                                    }
+                                                }
+                                                if current_non_tool_block_type != Some("thinking") {
+                                                    if let Some(index) = current_non_tool_block_index.take() {
+                                                        let event = json!({
+                                                            "type": "content_block_stop",
+                                                            "index": index
+                                                        });
+                                                        let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                            serde_json::to_string(&event).unwrap_or_default());
+                                                        yield Ok(Bytes::from(sse_data));
+                                                    }
+                                                    let index = next_content_index;
+                                                    next_content_index += 1;
                                                     let event = json!({
-                                                        "type": "content_block_stop",
-                                                        "index": index
+                                                        "type": "content_block_start",
+                                                        "index": index,
+                                                        "content_block": {
+                                                            "type": "thinking",
+                                                            "thinking": ""
+                                                        }
                                                     });
-                                                    let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                    let sse_data = format!("event: content_block_start\ndata: {}\n\n",
+                                                        serde_json::to_string(&event).unwrap_or_default());
+                                                    yield Ok(Bytes::from(sse_data));
+                                                    current_non_tool_block_type = Some("thinking");
+                                                    current_non_tool_block_index = Some(index);
+                                                }
+                                                if let Some(index) = current_non_tool_block_index {
+                                                    let event = json!({
+                                                        "type": "content_block_delta",
+                                                        "index": index,
+                                                        "delta": {
+                                                            "type": "thinking_delta",
+                                                            "thinking": reasoning
+                                                        }
+                                                    });
+                                                    let sse_data = format!("event: content_block_delta\ndata: {}\n\n",
                                                         serde_json::to_string(&event).unwrap_or_default());
                                                     yield Ok(Bytes::from(sse_data));
                                                 }
-                                                let index = next_content_index;
-                                                next_content_index += 1;
-                                                let event = json!({
-                                                    "type": "content_block_start",
-                                                    "index": index,
-                                                    "content_block": {
-                                                        "type": "thinking",
-                                                        "thinking": ""
-                                                    }
-                                                });
-                                                let sse_data = format!("event: content_block_start\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
-                                                current_non_tool_block_type = Some("thinking");
-                                                current_non_tool_block_index = Some(index);
-                                            }
-
-                                            if let Some(index) = current_non_tool_block_index {
-                                                let event = json!({
-                                                    "type": "content_block_delta",
-                                                    "index": index,
-                                                    "delta": {
-                                                        "type": "thinking_delta",
-                                                        "thinking": reasoning
-                                                    }
-                                                });
-                                                let sse_data = format!("event: content_block_delta\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
                                             }
                                         }
 
-                                        // 处理文本内容
+                                        // Process text content.
                                         if let Some(content) = &choice.delta.content {
+                                            let repaired_content;
+                                            let content = if options.quarantine_glm_visible_output_corruption {
+                                                if let Some(repaired) =
+                                                    strip_recoverable_visible_boundary_artifact(content)
+                                                {
+                                                    repaired_content = repaired;
+                                                    repaired_content.as_str()
+                                                } else {
+                                                    content.as_str()
+                                                }
+                                            } else {
+                                                content.as_str()
+                                            };
                                             if !content.is_empty() {
+                                                if options.quarantine_glm_visible_output_corruption {
+                                                    if let Some(message) =
+                                                        visible_output_corruption_message(content)
+                                                    {
+                                                        log::warn!(
+                                                            "[Claude/OpenRouter] Quarantining corrupted content delta: {message}"
+                                                        );
+                                                        stream_ended_with_error = true;
+                                                        yield Ok(anthropic_error_sse(
+                                                            UPSTREAM_VISIBLE_OUTPUT_CORRUPTION_TYPE,
+                                                            message,
+                                                        ));
+                                                        break 'stream_loop;
+                                                    }
+                                                }
                                                 if current_non_tool_block_type != Some("text") {
                                                     if let Some(index) = current_non_tool_block_index.take() {
                                                         let event = json!({
@@ -355,7 +473,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                             }
                                         }
 
-                                        // 处理工具调用
+                                        // Process tool calls.
                                         if let Some(tool_calls) = &choice.delta.tool_calls {
                                             if !tool_calls.is_empty() {
                                                 if let Some(index) = current_non_tool_block_index.take() {
@@ -394,7 +512,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                                                 }
                                                             });
 
-                                                        // 如果此 tool call 已被中止（无限空白 bug），跳过后续处理
+                                                        // Skip a tool call stopped for infinite whitespace.
                                                         if state.aborted {
                                                             continue;
                                                         }
@@ -427,7 +545,12 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                                             .as_ref()
                                                             .and_then(|f| f.arguments.clone());
                                                         let immediate_delta = if let Some(args) = args_delta {
-                                                            // 无限空白 bug 检测：跟踪连续空白字符
+                                                            let args = if options.repair_glm_special_token_aliases {
+                                                                normalize_glm_think_open_alias_for_literal(&args).into_owned()
+                                                            } else {
+                                                                args
+                                                            };
+                                                            // Detect infinite whitespace by tracking consecutive characters.
                                                             for ch in args.chars() {
                                                                 if ch.is_whitespace() {
                                                                     state.consecutive_whitespace += 1;
@@ -437,7 +560,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                                             }
                                                             if state.consecutive_whitespace >= INFINITE_WHITESPACE_THRESHOLD {
                                                                 log::warn!(
-                                                                    "[Copilot] 检测到无限空白 bug (tool: {}), 中止此 tool call 流",
+                                                                    "[Copilot] Detected infinite whitespace (tool: {}); stopping this tool-call stream",
                                                                     state.name
                                                                 );
                                                                 state.aborted = true;
@@ -508,17 +631,17 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                             }
                                         }
 
-                                        // 处理 finish_reason。
-                                        // 注意：OpenRouter 某些 provider 会发送多个带 finish_reason 的 chunk
-                                        // （第一个 usage 为 null，后续才补全）。此处只做缓存，不立即发送，
-                                        // 等到 [DONE] 或流末尾再统一发出，确保 usage 完整且只发一次。
+                                        // Cache finish_reason rather than emitting it immediately.
+                                        // Some OpenRouter providers send multiple chunks, with usage
+                                        // absent in the first and completed later. Emit once at [DONE]
+                                        // or stream end with complete usage.
                                         if let Some(finish_reason) = &choice.finish_reason {
                                             let stop_reason = map_stop_reason(Some(finish_reason));
                                             let usage_json =
                                                 chunk_usage_json.clone().or_else(|| latest_usage.clone());
 
                                             if has_emitted_message_delta {
-                                                // 更新缓存的 message_delta usage（如果有更完整的 usage）
+                                                // Update cached delta usage when more complete data arrives.
                                                 if let (Some((_, ref mut usage)), Some(uj)) = (&mut pending_message_delta, usage_json) {
                                                     *usage = Some(uj);
                                                 }
@@ -615,7 +738,7 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                                                 open_tool_block_indices.clear();
                                             }
 
-                                            // 缓存 message_delta，等到 [DONE] 时发送（以便收集完整的 usage）
+                                            // Cache message_delta until [DONE] to collect complete usage.
                                             pending_message_delta = Some((stop_reason, usage_json));
                                         }
                                     }
@@ -627,23 +750,16 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                 Err(e) => {
                     log::error!("Stream error: {e}");
                     stream_ended_with_error = true;
-                    let error_event = json!({
-                        "type": "error",
-                        "error": {
-                            "type": "stream_error",
-                            "message": format!("Stream error: {e}")
-                        }
-                    });
-                    let sse_data = format!("event: error\ndata: {}\n\n",
-                        serde_json::to_string(&error_event).unwrap_or_default());
-                    yield Ok(Bytes::from(sse_data));
+                    let message = format!("Stream error: {e}");
+                    yield Ok(anthropic_error_sse("stream_error", &message));
                     break;
                 }
             }
         }
 
-        // 流自然结束但未收到 [DONE] 时，确保发送缓存的 message_delta 和 message_stop。
-        // 若上游已显式报错，则只保留 error 事件，避免把失败伪装成成功完成。
+        // If a stream ends without [DONE], emit cached message_delta and message_stop.
+        // When upstream emitted an explicit error, retain only the error rather than
+        // disguising failure as successful completion.
         if !stream_ended_with_error {
             let emitted_pending_message_delta = if let Some((stop_reason, usage_json)) =
                 pending_message_delta.take()
@@ -683,7 +799,7 @@ fn extract_cache_read_tokens(usage: &Usage) -> Option<u32> {
         .filter(|&v| v > 0)
 }
 
-/// 映射停止原因
+/// Maps a stop reason.
 fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
     finish_reason.map(|r| {
         match r {
@@ -703,16 +819,25 @@ fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::providers::codex_chat_common::glm_think_open_alias_char;
     use futures::stream;
     use futures::StreamExt;
     use serde_json::Value;
     use std::collections::HashMap;
 
     async fn collect_anthropic_events(input: &str) -> Vec<Value> {
+        collect_anthropic_events_with_options(input, OpenAIToAnthropicStreamOptions::default())
+            .await
+    }
+
+    async fn collect_anthropic_events_with_options(
+        input: &str,
+        options: OpenAIToAnthropicStreamOptions,
+    ) -> Vec<Value> {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_options(upstream, options);
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
             .into_iter()
@@ -911,19 +1036,152 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_streaming_chinese_split_across_chunks_no_replacement_chars() {
-        // "你好" split across two TCP chunks inside a streaming text delta.
+    async fn test_glm_alias_repair_normalizes_streamed_tool_args_and_strips_thinking_glyph() {
+        let alias = glm_think_open_alias_char();
+        let input = format!(
+            "data: {{\"id\":\"chatcmpl_glm_alias\",\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"reasoning_content\":\"Need literal {alias} syntax.\"}}}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl_glm_alias\",\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{{\"name\":\"edit_file\"}}}}]}}}}]}}\n\n\
+             data: {{\"id\":\"chatcmpl_glm_alias\",\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{{\\\"text\\\":\\\"{alias}\\\"}}\"}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}\n\n\
+             data: [DONE]\n\n"
+        );
+
+        let events = collect_anthropic_events_with_options(
+            &input,
+            OpenAIToAnthropicStreamOptions {
+                repair_glm_special_token_aliases: true,
+                quarantine_glm_visible_output_corruption: false,
+            },
+        )
+        .await;
+        let merged = serde_json::to_string(&events).unwrap();
+
+        assert!(!merged.contains(alias));
+        assert!(merged.contains(r#""thinking":"Need literal  syntax.""#));
+        assert!(merged.contains(r#""partial_json":"{\"text\":\"<think>\"}""#));
+    }
+
+    #[tokio::test]
+    async fn quarantines_glm_raw_reasoning_marker_for_claude_stream() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_glm_marker\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</think>The test is making progress.\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_marker\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_anthropic_events_with_options(
+            input,
+            OpenAIToAnthropicStreamOptions {
+                repair_glm_special_token_aliases: true,
+                quarantine_glm_visible_output_corruption: true,
+            },
+        )
+        .await;
+
+        let error = events
+            .iter()
+            .find(|event| event_type(event) == Some("error"))
+            .expect("raw marker should produce an Anthropic error event");
+        assert_eq!(
+            error.pointer("/error/type").and_then(Value::as_str),
+            Some(UPSTREAM_VISIBLE_OUTPUT_CORRUPTION_TYPE)
+        );
+        assert!(error
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("raw reasoning delimiter"));
+        assert!(!events.iter().any(|event| event
+            .pointer("/delta/text")
+            .and_then(Value::as_str)
+            == Some("</think>The test is making progress.")));
+        assert!(!events
+            .iter()
+            .any(|event| event_type(event) == Some("message_stop")));
+    }
+
+    #[tokio::test]
+    async fn strips_single_standalone_glm_boundary_marker_before_claude_tool_call() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_glm_boundary\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"The test is making progress.\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_boundary\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</think>\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_boundary\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"inspect\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_anthropic_events_with_options(
+            input,
+            OpenAIToAnthropicStreamOptions {
+                repair_glm_special_token_aliases: true,
+                quarantine_glm_visible_output_corruption: true,
+            },
+        )
+        .await;
+
+        assert!(!events.iter().any(|event| event_type(event) == Some("error")));
+        assert!(!serde_json::to_string(&events)
+            .unwrap()
+            .contains("</think>"));
+        assert!(events.iter().any(|event| {
+            event_type(event) == Some("content_block_start")
+                && event.pointer("/content_block/type").and_then(Value::as_str)
+                    == Some("tool_use")
+                && event.pointer("/content_block/name").and_then(Value::as_str)
+                    == Some("inspect")
+        }));
+        assert!(events
+            .iter()
+            .any(|event| event_type(event) == Some("message_stop")));
+    }
+
+    #[tokio::test]
+    async fn quarantines_glm_replacement_character_for_claude_stream() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_glm_replacement\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"bad � bytes\"}}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let events = collect_anthropic_events_with_options(
+            input,
+            OpenAIToAnthropicStreamOptions {
+                repair_glm_special_token_aliases: true,
+                quarantine_glm_visible_output_corruption: true,
+            },
+        )
+        .await;
+
+        let error = events
+            .iter()
+            .find(|event| event_type(event) == Some("error"))
+            .expect("replacement character should produce an Anthropic error event");
+        assert_eq!(
+            error.pointer("/error/type").and_then(Value::as_str),
+            Some(UPSTREAM_VISIBLE_OUTPUT_CORRUPTION_TYPE)
+        );
+        assert!(error
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("replacement characters"));
+        assert!(!events.iter().any(|event| event
+            .pointer("/delta/thinking")
+            .and_then(Value::as_str)
+            .is_some_and(|text| text.contains('�'))));
+    }
+
+    #[tokio::test]
+    async fn test_streaming_vietnamese_split_across_chunks_no_replacement_chars() {
+        // A multibyte fixture split across TCP chunks inside a text delta.
         // Before the fix, from_utf8_lossy would produce U+FFFD for each half.
         let full = concat!(
-            "data: {\"id\":\"chatcmpl_3\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_3\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"Việt\"}}]}\n\n",
             "data: {\"id\":\"chatcmpl_3\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
             "data: [DONE]\n\n"
         );
         let bytes = full.as_bytes();
 
-        // Find "你" in the byte stream and split inside it
-        let ni_start = bytes.windows(3).position(|w| w == "你".as_bytes()).unwrap();
-        let split_point = ni_start + 1; // split after first byte of "你"
+        // Find the three-byte Vietnamese character and split after its first byte.
+        let multibyte_start = bytes.windows(3).position(|w| w == "ệ".as_bytes()).unwrap();
+        let split_point = multibyte_start + 1;
 
         let chunk1 = Bytes::from(bytes[..split_point].to_vec());
         let chunk2 = Bytes::from(bytes[split_point..].to_vec());
@@ -940,10 +1198,10 @@ mod tests {
             .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
             .collect::<String>();
 
-        // Must contain the original Chinese characters, not replacement chars
+        // Must contain the original Vietnamese text, not replacement characters.
         assert!(
-            merged.contains("你好"),
-            "expected '你好' in output, got replacement chars (U+FFFD)"
+            merged.contains("Việt"),
+            "expected the multibyte fixture in output, got replacement characters (U+FFFD)"
         );
         assert!(
             !merged.contains('\u{FFFD}'),
@@ -1056,8 +1314,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_usage_chunk_subtracts_cache_read_and_creation_from_input() {
-        // prompt_tokens(1000) 含 cache_read(600) 与 cache_creation(300)；转 Anthropic 后
-        // input 应为 fresh，守恒：input(100) + cache_read(600) + cache_creation(300) == prompt(1000)。
+        // prompt_tokens(1000) includes cache_read(600) and cache_creation(300).
+        // Anthropic fresh input conserves 100 + 600 + 300 == 1000.
         let input = concat!(
             "data: {\"id\":\"chatcmpl_cc\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tool-1\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_cc\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -1094,8 +1352,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_usage_chunk_clamps_input_to_zero_when_cache_exceeds_prompt() {
-        // prompt(100) < cache_read(80)+cache_creation(50)=130：saturating 钳到 0，防下溢。
-        // 钉桩：阻止未来把 saturating_sub 误改成普通减法(debug panic / release wrap)。
+        // prompt(100) is below cache_read(80) + cache_creation(50). Saturation clamps
+        // to zero and prevents underflow; keep this test against ordinary subtraction.
         let input = concat!(
             "data: {\"id\":\"chatcmpl_uf\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tool-1\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_uf\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",

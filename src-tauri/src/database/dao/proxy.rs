@@ -1,8 +1,8 @@
-//! 代理功能数据访问层
+//! Proxy data-access layer.
 //!
-//! 处理代理配置、Provider健康状态和使用统计的数据库操作
+//! Handles database operations for proxy configuration, provider health, and usage.
 
-use std::str::FromStr;
+use std::{collections::HashSet, str::FromStr};
 
 use crate::error::AppError;
 use crate::proxy::types::*;
@@ -18,21 +18,21 @@ pub(crate) fn validate_cost_multiplier(value: &str) -> Result<Decimal, AppError>
     if trimmed.is_empty() {
         return Err(AppError::localized(
             "error.multiplierEmpty",
-            "倍率不能为空",
+            "Multiplier cannot be empty",
             "Multiplier cannot be empty",
         ));
     }
     let parsed = Decimal::from_str(trimmed).map_err(|e| {
         AppError::localized(
             "error.invalidMultiplier",
-            format!("无效倍率: {value} - {e}"),
+            format!("Invalid multiplier: {value} - {e}"),
             format!("Invalid multiplier: {value} - {e}"),
         )
     })?;
     if parsed < Decimal::ZERO {
         return Err(AppError::localized(
             "error.invalidMultiplier",
-            format!("无效倍率: {value} - 倍率不能为负数"),
+            format!("Invalid multiplier: {value} - multiplier cannot be negative"),
             format!("Invalid multiplier: {value} - multiplier cannot be negative"),
         ));
     }
@@ -46,7 +46,7 @@ pub(crate) fn validate_pricing_source(value: &str) -> Result<&str, AppError> {
     } else {
         Err(AppError::localized(
             "error.invalidPricingMode",
-            format!("无效计费模式: {value}"),
+            format!("Invalid pricing mode: {value}"),
             format!("Invalid pricing mode: {value}"),
         ))
     }
@@ -55,11 +55,11 @@ pub(crate) fn validate_pricing_source(value: &str) -> Result<&str, AppError> {
 impl Database {
     // ==================== Global Proxy Config ====================
 
-    /// 获取全局代理配置（统一字段）
+    /// Returns global proxy configuration fields.
     ///
-    /// 从 claude 行读取（三行镜像一致）
+    /// Reads from the Claude row; all three rows mirror these values.
     pub async fn get_global_proxy_config(&self) -> Result<GlobalProxyConfig, AppError> {
-        // 使用 block 限制 conn 的作用域，避免跨 await 持有锁
+        // Limit the connection scope so its lock is not held across await.
         let result = {
             let conn = lock_conn!(self.conn);
             conn.query_row(
@@ -76,12 +76,12 @@ impl Database {
                 },
             )
         };
-        // conn 已在 block 结束时释放
+        // The connection was released at the end of the block.
 
         match result {
             Ok(config) => Ok(config),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // 如果不存在，创建默认配置
+                // Create default configuration when absent.
                 self.init_proxy_config_rows().await?;
                 Ok(GlobalProxyConfig {
                     proxy_enabled: false,
@@ -94,7 +94,7 @@ impl Database {
         }
     }
 
-    /// 更新全局代理配置（镜像写三行）
+    /// Updates global proxy configuration in all three mirrored rows.
     pub async fn update_global_proxy_config(
         &self,
         config: GlobalProxyConfig,
@@ -120,7 +120,7 @@ impl Database {
         Ok(())
     }
 
-    /// 获取默认成本倍率
+    /// Returns the default cost multiplier.
     pub async fn get_default_cost_multiplier(&self, app_type: &str) -> Result<String, AppError> {
         let result = {
             let conn = lock_conn!(self.conn);
@@ -141,7 +141,7 @@ impl Database {
         }
     }
 
-    /// 设置默认成本倍率
+    /// Sets the default cost multiplier.
     pub async fn set_default_cost_multiplier(
         &self,
         app_type: &str,
@@ -150,7 +150,7 @@ impl Database {
         validate_cost_multiplier(value)?;
         let trimmed = value.trim();
 
-        // 确保行存在
+        // Ensure the row exists.
         self.ensure_proxy_config_row_exists(app_type)?;
 
         let conn = lock_conn!(self.conn);
@@ -166,7 +166,7 @@ impl Database {
         Ok(())
     }
 
-    /// 获取计费模式来源
+    /// Returns the pricing-mode source.
     pub async fn get_pricing_model_source(&self, app_type: &str) -> Result<String, AppError> {
         let result = {
             let conn = lock_conn!(self.conn);
@@ -187,7 +187,7 @@ impl Database {
         }
     }
 
-    /// 设置计费模式来源
+    /// Sets the pricing-mode source.
     pub async fn set_pricing_model_source(
         &self,
         app_type: &str,
@@ -195,7 +195,7 @@ impl Database {
     ) -> Result<(), AppError> {
         let trimmed = validate_pricing_source(value)?;
 
-        // 确保行存在
+        // Ensure the row exists.
         self.ensure_proxy_config_row_exists(app_type)?;
 
         let conn = lock_conn!(self.conn);
@@ -211,12 +211,89 @@ impl Database {
         Ok(())
     }
 
-    /// 获取应用级代理配置
+    /// Save multiplier and pricing-model source updates in one SQLite
+    /// transaction. Every value is validated before the first write so a bad
+    /// row (or any database failure) cannot leave a partially saved catalog.
+    pub async fn save_pricing_defaults_atomically(
+        &self,
+        updates: &[(String, String, String)],
+    ) -> Result<(), AppError> {
+        if updates.is_empty() {
+            return Err(AppError::Config(
+                "At least one pricing default update is required".to_string(),
+            ));
+        }
+
+        let mut normalized = Vec::with_capacity(updates.len());
+        let mut seen_apps = HashSet::with_capacity(updates.len());
+        for (app_type, multiplier, source) in updates {
+            let app_type = app_type.trim();
+            if !matches!(app_type, "claude" | "codex" | "gemini") {
+                return Err(AppError::Config(format!(
+                    "Unsupported pricing app type: {app_type}"
+                )));
+            }
+            if !seen_apps.insert(app_type.to_string()) {
+                return Err(AppError::Config(format!(
+                    "Duplicate pricing app type: {app_type}"
+                )));
+            }
+            validate_cost_multiplier(multiplier)?;
+            let source = validate_pricing_source(source)?;
+            normalized.push((
+                app_type.to_string(),
+                multiplier.trim().to_string(),
+                source.to_string(),
+            ));
+        }
+
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn.transaction().map_err(|e| {
+            AppError::Database(format!("Failed to begin pricing defaults update: {e}"))
+        })?;
+
+        for (app_type, multiplier, source) in normalized {
+            let (retries, first_byte, idle, failures, successes, timeout, rate, minimum) =
+                match app_type.as_str() {
+                    "claude" => (6, 90, 180, 8, 3, 90, 0.7, 15),
+                    "gemini" => (5, 60, 120, 4, 2, 60, 0.6, 10),
+                    _ => (3, 60, 120, 4, 2, 60, 0.6, 10),
+                };
+            tx.execute(
+                "INSERT OR IGNORE INTO proxy_config (
+                    app_type, max_retries,
+                    streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
+                    circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
+                    circuit_error_rate_threshold, circuit_min_requests
+                 ) VALUES (?1, ?2, ?3, ?4, 600, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![
+                    app_type, retries, first_byte, idle, failures, successes, timeout, rate,
+                    minimum
+                ],
+            )
+            .map_err(|e| AppError::Database(format!("Failed to ensure pricing row: {e}")))?;
+            tx.execute(
+                "UPDATE proxy_config SET
+                    default_cost_multiplier = ?2,
+                    pricing_model_source = ?3,
+                    updated_at = datetime('now')
+                 WHERE app_type = ?1",
+                rusqlite::params![app_type, multiplier, source],
+            )
+            .map_err(|e| AppError::Database(format!("Failed to update pricing defaults: {e}")))?;
+        }
+
+        tx.commit().map_err(|e| {
+            AppError::Database(format!("Failed to commit pricing defaults update: {e}"))
+        })
+    }
+
+    /// Returns application-level proxy configuration.
     pub async fn get_proxy_config_for_app(
         &self,
         app_type: &str,
     ) -> Result<AppProxyConfig, AppError> {
-        // 使用 block 限制 conn 的作用域，避免跨 await 持有锁
+        // Limit the connection scope so its lock is not held across await.
         let app_type_owned = app_type.to_string();
         let result = {
             let conn = lock_conn!(self.conn);
@@ -245,12 +322,12 @@ impl Database {
                 },
             )
         };
-        // conn 已在 block 结束时释放
+        // The connection was released at the end of the block.
 
         match result {
             Ok(config) => Ok(config),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // 如果不存在，创建默认配置
+                // Create default configuration when absent.
                 self.init_proxy_config_rows().await?;
                 Ok(AppProxyConfig {
                     app_type: app_type_owned,
@@ -271,7 +348,7 @@ impl Database {
         }
     }
 
-    /// 更新应用级代理配置
+    /// Updates application-level proxy configuration.
     pub async fn update_proxy_config_for_app(
         &self,
         config: AppProxyConfig,
@@ -313,22 +390,22 @@ impl Database {
         Ok(())
     }
 
-    /// 确保指定 app_type 的 proxy_config 行存在（同步版本，用于 set_* 函数）
+    /// Synchronously ensures a proxy_config row exists for app_type, for set_* calls.
     ///
-    /// 使用与 schema.rs seed 相同的 per-app 默认值
+    /// Uses the same per-application defaults as schema.rs seeds.
     fn ensure_proxy_config_row_exists(&self, app_type: &str) -> Result<(), AppError> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| AppError::Lock(e.to_string()))?;
 
-        // 根据 app_type 使用不同的默认值（与 schema.rs seed 保持一致）
+        // Select per-application defaults matching schema.rs seeds.
         let (retries, fb_timeout, idle_timeout, cb_fail, cb_succ, cb_timeout, cb_rate, cb_min) =
             match app_type {
                 "claude" => (6, 90, 180, 8, 3, 90, 0.7, 15),
                 "codex" => (3, 60, 120, 4, 2, 60, 0.6, 10),
                 "gemini" => (5, 60, 120, 4, 2, 60, 0.6, 10),
-                _ => (3, 60, 120, 4, 2, 60, 0.6, 10), // 默认值
+                _ => (3, 60, 120, 4, 2, 60, 0.6, 10), // Default values.
             };
 
         conn.execute(
@@ -355,14 +432,13 @@ impl Database {
         Ok(())
     }
 
-    /// 初始化 proxy_config 表的三行数据
+    /// Initializes the three proxy_config rows.
     ///
-    /// 使用与 schema.rs seed 相同的 per-app 默认值
+    /// Uses the same per-application defaults as schema.rs seeds.
     async fn init_proxy_config_rows(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
-        // 使用与 schema.rs seed 相同的 per-app 默认值
-        // claude: 更激进的重试和超时配置
+        // Match schema.rs seeds. Claude uses more aggressive retries and timeouts.
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
                 app_type, max_retries,
@@ -374,7 +450,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // codex: 默认配置
+        // Codex uses standard defaults.
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
                 app_type, max_retries,
@@ -386,7 +462,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // gemini: 稍高的重试次数
+        // Gemini uses slightly more retries.
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
                 app_type, max_retries,
@@ -401,11 +477,11 @@ impl Database {
         Ok(())
     }
 
-    // ==================== Legacy Proxy Config (兼容旧代码) ====================
+    // Legacy proxy configuration retained for compatibility.
 
-    /// 获取代理配置（兼容旧接口，返回 claude 行的配置）
+    /// Returns Claude-row proxy configuration through the legacy interface.
     pub async fn get_proxy_config(&self) -> Result<ProxyConfig, AppError> {
-        // 使用 block 限制 conn 的作用域，避免跨 await 持有锁
+        // Limit the connection scope so its lock is not held across await.
         let result = {
             let conn = lock_conn!(self.conn);
             conn.query_row(
@@ -419,9 +495,9 @@ impl Database {
                         listen_address: row.get(0)?,
                         listen_port: row.get::<_, i32>(1)? as u16,
                         max_retries: row.get::<_, i32>(2)? as u8,
-                        request_timeout: 600, // 废弃字段，返回默认值
+                        request_timeout: 600, // Deprecated field; return its default.
                         enable_logging: row.get::<_, i32>(3)? != 0,
-                        live_takeover_active: false, // 废弃字段
+                        live_takeover_active: false, // Deprecated field.
                         streaming_first_byte_timeout: row.get::<_, i32>(4).unwrap_or(60) as u64,
                         streaming_idle_timeout: row.get::<_, i32>(5).unwrap_or(120) as u64,
                         non_streaming_timeout: row.get::<_, i32>(6).unwrap_or(600) as u64,
@@ -429,12 +505,12 @@ impl Database {
                 },
             )
         };
-        // conn 已在 block 结束时释放
+        // The connection was released at the end of the block.
 
         match result {
             Ok(config) => Ok(config),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // 如果不存在，初始化默认配置
+                // Initialize default configuration when absent.
                 self.init_proxy_config_rows().await?;
                 Ok(ProxyConfig::default())
             }
@@ -442,11 +518,11 @@ impl Database {
         }
     }
 
-    /// 更新代理配置（兼容旧接口，更新所有三行的公共字段）
+    /// Updates shared fields in all three rows through the legacy interface.
     pub async fn update_proxy_config(&self, config: ProxyConfig) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
-        // 更新所有三行的公共字段
+        // Update shared fields in all three rows.
         conn.execute(
             "UPDATE proxy_config SET
                 listen_address = ?1,
@@ -472,16 +548,15 @@ impl Database {
         Ok(())
     }
 
-    /// 设置 Live 接管状态（兼容旧版本，更新 enabled 字段）
+    /// Sets live takeover for legacy callers by updating enabled.
     pub async fn set_live_takeover_active(&self, _active: bool) -> Result<(), AppError> {
-        // 不再使用此字段，由 enabled 字段替代
-        // 保留空实现以兼容旧代码
+        // The old field is replaced by enabled. Keep this no-op for compatibility.
         Ok(())
     }
 
-    /// 检查是否处于 Live 接管模式
+    /// Checks whether live takeover is active.
     ///
-    /// 检查是否有任一 app 的 enabled = true
+    /// Checks whether any application has enabled=true.
     pub async fn is_live_takeover_active(&self) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
         let count: i64 = conn
@@ -496,7 +571,7 @@ impl Database {
 
     // ==================== Provider Health ====================
 
-    /// 获取Provider健康状态
+    /// Returns provider health state.
     pub async fn get_provider_health(
         &self,
         provider_id: &str,
@@ -528,7 +603,7 @@ impl Database {
 
         match result {
             Ok(health) => Ok(health),
-            // 缺少记录时视为健康（关闭后清空状态，再次打开时默认正常）
+            // Missing state is healthy; reopening after a clear starts normally.
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(ProviderHealth {
                 provider_id: provider_id.to_string(),
                 app_type: app_type.to_string(),
@@ -543,9 +618,10 @@ impl Database {
         }
     }
 
-    /// 更新Provider健康状态
+    /// Updates provider health state.
     ///
-    /// 使用默认阈值（5）判断是否健康，建议使用 `update_provider_health_with_threshold` 传入配置的阈值
+    /// Uses the default threshold of five. Prefer
+    /// `update_provider_health_with_threshold` with the configured threshold.
     pub async fn update_provider_health(
         &self,
         provider_id: &str,
@@ -553,15 +629,15 @@ impl Database {
         success: bool,
         error_msg: Option<String>,
     ) -> Result<(), AppError> {
-        // 默认阈值与 CircuitBreakerConfig::default() 保持一致
+        // Keep the default aligned with CircuitBreakerConfig::default().
         self.update_provider_health_with_threshold(provider_id, app_type, success, error_msg, 5)
             .await
     }
 
-    /// 更新Provider健康状态（带阈值参数）
+    /// Updates provider health using an explicit threshold.
     ///
     /// # Arguments
-    /// * `failure_threshold` - 连续失败多少次后标记为不健康
+    /// * `failure_threshold` - consecutive failures before marking unhealthy.
     pub async fn update_provider_health_with_threshold(
         &self,
         provider_id: &str,
@@ -574,7 +650,7 @@ impl Database {
 
         let now = chrono::Utc::now().to_rfc3339();
 
-        // 先查询当前状态
+        // Read current state first.
         let current = conn.query_row(
             "SELECT consecutive_failures FROM provider_health
              WHERE provider_id = ?1 AND app_type = ?2",
@@ -583,12 +659,12 @@ impl Database {
         );
 
         let (is_healthy, consecutive_failures) = if success {
-            // 成功：重置失败计数
+            // Success resets the failure count.
             (1, 0)
         } else {
-            // 失败：增加失败计数
+            // Failure increments the failure count.
             let failures = current.unwrap_or(0) + 1;
-            // 使用传入的阈值而非硬编码
+            // Apply the supplied threshold instead of a hard-coded value.
             let healthy = if failures >= failure_threshold { 0 } else { 1 };
             (healthy, failures)
         };
@@ -626,7 +702,7 @@ impl Database {
         Ok(())
     }
 
-    /// 重置Provider健康状态
+    /// Resets provider health state.
     pub async fn reset_provider_health(
         &self,
         provider_id: &str,
@@ -645,7 +721,7 @@ impl Database {
         Ok(())
     }
 
-    /// 清空指定应用的健康状态（关闭单个代理时使用）
+    /// Clears health state for one application when its proxy is disabled.
     pub async fn clear_provider_health_for_app(&self, app_type: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
@@ -659,7 +735,7 @@ impl Database {
         Ok(())
     }
 
-    /// 清空所有Provider健康状态（代理停止时调用）
+    /// Clears all provider health state when the proxy stops.
     pub async fn clear_all_provider_health(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
@@ -672,14 +748,14 @@ impl Database {
 
     // ==================== Circuit Breaker Config (Legacy Compatibility) ====================
 
-    /// 获取熔断器配置（兼容旧接口，从 claude 行读取）
+    /// Returns circuit-breaker settings from the Claude row for legacy callers.
     ///
-    /// 熔断器配置已合并到 proxy_config 表，每 app 独立
-    /// 此方法保留用于兼容旧代码，建议使用 get_proxy_config_for_app
+    /// Circuit-breaker settings now live per application in proxy_config. Prefer
+    /// get_proxy_config_for_app; this method remains for compatibility.
     pub async fn get_circuit_breaker_config(
         &self,
     ) -> Result<crate::proxy::circuit_breaker::CircuitBreakerConfig, AppError> {
-        // 使用 block 限制 conn 的作用域，避免跨 await 持有锁
+        // Limit the connection scope so its lock is not held across await.
         let result = {
             let conn = lock_conn!(self.conn);
             conn.query_row(
@@ -698,12 +774,12 @@ impl Database {
                 },
             )
         };
-        // conn 已在 block 结束时释放
+        // The connection was released at the end of the block.
 
         match result {
             Ok(config) => Ok(config),
             Err(rusqlite::Error::QueryReturnedNoRows) => {
-                // 如果不存在，初始化默认配置
+                // Initialize default configuration when absent.
                 self.init_proxy_config_rows().await?;
                 Ok(crate::proxy::circuit_breaker::CircuitBreakerConfig::default())
             }
@@ -711,17 +787,17 @@ impl Database {
         }
     }
 
-    /// 更新熔断器配置（兼容旧接口，更新所有三行）
+    /// Updates circuit-breaker settings in all three rows for legacy callers.
     ///
-    /// 熔断器配置已合并到 proxy_config 表
-    /// 此方法保留用于兼容旧代码，建议使用 update_proxy_config_for_app
+    /// Circuit-breaker settings now live in proxy_config. Prefer
+    /// update_proxy_config_for_app; this remains for compatibility.
     pub async fn update_circuit_breaker_config(
         &self,
         config: &crate::proxy::circuit_breaker::CircuitBreakerConfig,
     ) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
-        // 更新所有三行的熔断器配置
+        // Update circuit-breaker fields in all three rows.
         conn.execute(
             "UPDATE proxy_config SET
                 circuit_failure_threshold = ?1,
@@ -745,7 +821,7 @@ impl Database {
 
     // ==================== Live Backup ====================
 
-    /// 保存 Live 配置备份
+    /// Saves a live-configuration backup.
     pub async fn save_live_backup(
         &self,
         app_type: &str,
@@ -761,11 +837,11 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        log::info!("已备份 {app_type} Live 配置");
+        log::info!("Backed up {app_type} live configuration");
         Ok(())
     }
 
-    /// 检查是否存在任意 Live 配置备份
+    /// Checks whether any live-configuration backup exists.
     pub async fn has_any_live_backup(&self) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
         let count: i64 = conn
@@ -776,7 +852,7 @@ impl Database {
         Ok(count > 0)
     }
 
-    /// 获取 Live 配置备份
+    /// Returns a live-configuration backup.
     pub async fn get_live_backup(&self, app_type: &str) -> Result<Option<LiveBackup>, AppError> {
         let conn = lock_conn!(self.conn);
 
@@ -799,7 +875,7 @@ impl Database {
         }
     }
 
-    /// 删除 Live 配置备份
+    /// Deletes a live-configuration backup.
     pub async fn delete_live_backup(&self, app_type: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
@@ -809,27 +885,27 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        log::info!("已删除 {app_type} Live 配置备份");
+        log::info!("Deleted {app_type} live-configuration backup");
         Ok(())
     }
 
-    /// 删除所有 Live 配置备份
+    /// Deletes every live-configuration backup.
     pub async fn delete_all_live_backups(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
 
         conn.execute("DELETE FROM proxy_live_backup", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
 
-        log::info!("已删除所有 Live 配置备份");
+        log::info!("Deleted all live-configuration backups");
         Ok(())
     }
 
     // ==================== Sync Methods for Tray Menu ====================
 
-    /// 同步获取应用的 proxy 启用状态和自动故障转移状态
+    /// Synchronously returns an application's proxy and automatic-failover state.
     ///
-    /// 用于托盘菜单构建等同步场景
-    /// 返回 (enabled, auto_failover_enabled)
+    /// Intended for synchronous paths such as tray-menu construction. Returns
+    /// `(enabled, auto_failover_enabled)`.
     pub fn get_proxy_flags_sync(&self, app_type: &str) -> (bool, bool) {
         let conn = match self.conn.lock() {
             Ok(c) => c,
@@ -844,9 +920,9 @@ impl Database {
         .unwrap_or((false, false))
     }
 
-    /// 同步设置应用的 proxy 启用状态和自动故障转移状态
+    /// Synchronously sets an application's proxy and automatic-failover state.
     ///
-    /// 用于托盘菜单点击等同步场景
+    /// Intended for synchronous paths such as tray-menu clicks.
     pub fn set_proxy_flags_sync(
         &self,
         app_type: &str,
@@ -946,6 +1022,76 @@ mod tests {
                 ..
             }
         ));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pricing_defaults_are_saved_together() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let updates = vec![
+            (
+                "claude".to_string(),
+                "1.25".to_string(),
+                "request".to_string(),
+            ),
+            (
+                "codex".to_string(),
+                "0.8".to_string(),
+                "response".to_string(),
+            ),
+            ("gemini".to_string(), "2".to_string(), "request".to_string()),
+        ];
+
+        db.save_pricing_defaults_atomically(&updates).await?;
+
+        assert_eq!(db.get_default_cost_multiplier("claude").await?, "1.25");
+        assert_eq!(db.get_pricing_model_source("claude").await?, "request");
+        assert_eq!(db.get_default_cost_multiplier("codex").await?, "0.8");
+        assert_eq!(db.get_pricing_model_source("codex").await?, "response");
+        assert_eq!(db.get_default_cost_multiplier("gemini").await?, "2");
+        assert_eq!(db.get_pricing_model_source("gemini").await?, "request");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pricing_defaults_roll_back_on_database_failure() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = db.conn.lock().expect("lock conn");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_codex_pricing_update
+                 BEFORE UPDATE OF default_cost_multiplier, pricing_model_source ON proxy_config
+                 WHEN NEW.app_type = 'codex'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced pricing update failure');
+                 END;",
+            )
+            .expect("create failure trigger");
+        }
+        let updates = vec![
+            (
+                "claude".to_string(),
+                "1.25".to_string(),
+                "request".to_string(),
+            ),
+            (
+                "codex".to_string(),
+                "0.8".to_string(),
+                "request".to_string(),
+            ),
+        ];
+
+        let error = db
+            .save_pricing_defaults_atomically(&updates)
+            .await
+            .expect_err("second row must fail");
+        assert!(error.to_string().contains("forced pricing update failure"));
+        assert_eq!(db.get_default_cost_multiplier("claude").await?, "1");
+        assert_eq!(db.get_pricing_model_source("claude").await?, "response");
+        assert_eq!(db.get_default_cost_multiplier("codex").await?, "1");
+        assert_eq!(db.get_pricing_model_source("codex").await?, "response");
 
         Ok(())
     }

@@ -1,6 +1,6 @@
-//! Schema 定义和迁移
+//! Schema definitions and migrations.
 //!
-//! 负责数据库表结构的创建和版本迁移。
+//! Creates database tables and applies versioned migrations.
 
 use super::{lock_conn, Database, SCHEMA_VERSION};
 use crate::error::AppError;
@@ -14,15 +14,15 @@ struct LegacySkillMigrationRow {
 }
 
 impl Database {
-    /// 创建所有数据库表
+    /// Creates all database tables.
     pub(crate) fn create_tables(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         Self::create_tables_on_conn(&conn)
     }
 
-    /// 在指定连接上创建表（供迁移和测试使用）
+    /// Creates tables on a supplied connection for migrations and tests.
     pub(crate) fn create_tables_on_conn(conn: &Connection) -> Result<(), AppError> {
-        // 1. Providers 表
+        // 1. Providers table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS providers (
                 id TEXT NOT NULL,
@@ -45,7 +45,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 2. Provider Endpoints 表
+        // 2. Provider endpoints table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS provider_endpoints (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -59,7 +59,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 3. MCP Servers 表
+        // 3. MCP servers table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS mcp_servers (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, server_config TEXT NOT NULL,
@@ -72,14 +72,14 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 4. Prompts 表
+        // 4. Prompts table.
         conn.execute("CREATE TABLE IF NOT EXISTS prompts (
             id TEXT NOT NULL, app_type TEXT NOT NULL, name TEXT NOT NULL, content TEXT NOT NULL,
             description TEXT, enabled BOOLEAN NOT NULL DEFAULT 1, created_at INTEGER, updated_at INTEGER,
             PRIMARY KEY (id, app_type)
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 5. Skills 表（v3.10.0+ 统一结构）
+        // 5. Unified skills table for v3.10.0 and later.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skills (
             id TEXT PRIMARY KEY,
@@ -103,7 +103,7 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 6. Skill Repos 表
+        // 6. Skill repositories table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS skill_repos (
             owner TEXT NOT NULL, name TEXT NOT NULL, branch TEXT NOT NULL DEFAULT 'main',
@@ -113,14 +113,14 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 7. Settings 表
+        // 7. Settings table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 8. Proxy Config 表（三行结构，app_type 主键）
+        // 8. Proxy configuration table with one row per app_type.
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_config (
             app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
             proxy_enabled INTEGER NOT NULL DEFAULT 0, listen_address TEXT NOT NULL DEFAULT '127.0.0.1',
@@ -136,11 +136,10 @@ impl Database {
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 初始化三行数据（每应用不同默认值）
+        // Initialize three rows with per-application defaults.
         //
-        // 兼容旧数据库：
-        // - 老版本 proxy_config 是单例表（没有 app_type 列），此时不能执行三行 seed insert；
-        // - 旧表会在 apply_schema_migrations() 中迁移为三行结构后再插入。
+        // Legacy compatibility: old proxy_config is a singleton without app_type,
+        // so three-row seeding cannot run until apply_schema_migrations converts it.
         if Self::has_column(conn, "proxy_config", "app_type")? {
             conn.execute(
                 "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
@@ -171,7 +170,7 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
-        // 9. Provider Health 表
+        // 9. Provider health table.
         conn.execute("CREATE TABLE IF NOT EXISTS provider_health (
             provider_id TEXT NOT NULL, app_type TEXT NOT NULL, is_healthy INTEGER NOT NULL DEFAULT 1,
             consecutive_failures INTEGER NOT NULL DEFAULT 0, last_success_at TEXT, last_failure_at TEXT,
@@ -180,13 +179,20 @@ impl Database {
             FOREIGN KEY (provider_id, app_type) REFERENCES providers(id, app_type) ON DELETE CASCADE
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 10. Proxy Request Logs 表
-        // pricing_model = 写入时实际用于计价的模型名（pricing_model_source 解析结果），
-        // 回填按它重算；NULL 表示 v11 之前的历史行，'' 表示未计价的错误行。
+        // 10. Proxy request logs table. pricing_model is the resolved model name
+        // used for pricing at write time. Backfill recalculates from it; NULL marks
+        // a pre-v11 historical row and '' marks an unpriced error row.
+        // pricing_known is nullable because v12 zero-cost history cannot always
+        // distinguish an absent rule from an explicitly free rule.
+        // duration_ms is a legacy total-duration alias retained for compatibility.
+        // Request-log reads preserve a stored value and otherwise fall back to
+        // latency_ms, which stores measured elapsed time; first_token_ms stores TTFT.
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_request_logs (
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
             pricing_model TEXT,
+            token_usage_known INTEGER NOT NULL DEFAULT 1,
+            pricing_known INTEGER,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
@@ -218,8 +224,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
         Self::create_request_logs_usage_indexes_if_supported(conn)?;
+        Self::backfill_proxy_request_duration_ms(conn)?;
 
-        // 11. Model Pricing 表
+        // 11. Model pricing table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_pricing (
             model_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
@@ -231,7 +238,19 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 12. Stream Check Logs 表
+        // A deleted built-in pricing row must stay deleted when the catalog is
+        // incrementally seeded on a later launch. Resetting the catalog clears
+        // these tombstones explicitly.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_pricing_deletions (
+                model_id TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        // 12. Stream-check logs table.
         conn.execute("CREATE TABLE IF NOT EXISTS stream_check_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT, provider_id TEXT NOT NULL, provider_name TEXT NOT NULL,
             app_type TEXT NOT NULL, status TEXT NOT NULL, success INTEGER NOT NULL, message TEXT NOT NULL,
@@ -246,9 +265,9 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 注意：circuit_breaker_config 已合并到 proxy_config 表中
+        // circuit_breaker_config has been merged into proxy_config.
 
-        // 16. Proxy Live Backup 表 (Live 配置备份)
+        // 16. Proxy live-configuration backups table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS proxy_live_backup (
             app_type TEXT PRIMARY KEY, original_config TEXT NOT NULL, backed_up_at TEXT NOT NULL
@@ -257,10 +276,13 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 17. Usage Daily Rollups 表 (日聚合统计)
-        // request_model 保留路由接管的「客户端别名 → 真实模型」映射维度，
-        // pricing_model 保留写入时的计价基准（request 计价模式下与 model 分叉），
-        // 否则明细被 prune 后接管计费不可审计；历史行迁移时填 ''（未知）。
+        // 17. Daily usage rollups table. request_model retains the client-alias to
+        // upstream-model mapping from routing takeover. pricing_model retains the
+        // pricing basis at write time and may differ from model in request-pricing
+        // mode. These dimensions keep pricing auditable after detail pruning;
+        // migrated historical rows use '' for unknown values. A NULL
+        // priced_request_count means the legacy bucket's exact denominator is
+        // unreconstructable and must propagate through aggregates.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,
@@ -271,6 +293,9 @@ impl Database {
                 pricing_model TEXT NOT NULL DEFAULT '',
                 request_count INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
+                measured_request_count INTEGER NOT NULL DEFAULT 0,
+                token_usage_known_count INTEGER NOT NULL DEFAULT 0,
+                priced_request_count INTEGER,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
@@ -283,7 +308,33 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 18. Session Log Sync 表 (会话日志同步状态)
+        // Repair databases created by an earlier prerelease v12 build that had
+        // token-usage coverage but not measured outcome coverage. Because their
+        // user_version is already 12, the normal v11 -> v12 migration will not
+        // run. Historical rollups do not retain data_source, so any existing
+        // success or latency values must be treated as unmeasured.
+        if !Self::has_column(conn, "usage_daily_rollups", "measured_request_count")? {
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_rollups",
+                "measured_request_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+            conn.execute(
+                "UPDATE usage_daily_rollups
+                 SET measured_request_count = 0,
+                     success_count = 0,
+                     avg_latency_ms = 0",
+                [],
+            )
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "Failed to repair prerelease v12 usage outcome coverage: {e}"
+                ))
+            })?;
+        }
+
+        // 18. Session-log synchronization state table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
@@ -295,13 +346,13 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 尝试添加 live_takeover_active 列到 proxy_config 表
+        // Add live_takeover_active to proxy_config when missing.
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
             [],
         );
 
-        // 尝试添加基础配置列到 proxy_config 表（兼容 v3.9.0-2 升级）
+        // Add base proxy_config fields needed by upgrades from v3.9.0-2.
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN proxy_enabled INTEGER NOT NULL DEFAULT 0",
             [],
@@ -319,7 +370,7 @@ impl Database {
             [],
         );
 
-        // 尝试添加超时配置列到 proxy_config 表
+        // Add timeout fields to proxy_config when missing.
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN streaming_first_byte_timeout INTEGER NOT NULL DEFAULT 60",
             [],
@@ -333,15 +384,15 @@ impl Database {
             [],
         );
 
-        // 兼容：若旧版 proxy_config 仍为单例结构（无 app_type），则在启动时直接转换为三行结构
-        // 说明：user_version=2 时不会再触发 v1->v2 迁移，但新代码查询依赖 app_type 列。
+        // Convert a legacy singleton proxy_config without app_type at startup.
+        // user_version=2 no longer triggers v1->v2, while new queries require app_type.
         if Self::table_exists(conn, "proxy_config")?
             && !Self::has_column(conn, "proxy_config", "app_type")?
         {
             Self::migrate_proxy_config_to_per_app(conn)?;
         }
 
-        // 确保 in_failover_queue 列存在（对于已存在的 v2 数据库）
+        // Ensure in_failover_queue exists in an existing v2 database.
         Self::add_column_if_missing(
             conn,
             "providers",
@@ -349,11 +400,11 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        // 删除旧的 failover_queue 表（如果存在）
+        // Drop the legacy failover_queue table when present.
         let _ = conn.execute("DROP INDEX IF EXISTS idx_failover_queue_order", []);
         let _ = conn.execute("DROP TABLE IF EXISTS failover_queue", []);
 
-        // 为故障转移队列创建索引（基于 providers 表）
+        // Create failover-queue indexes on the providers table.
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_providers_failover
              ON providers(app_type, in_failover_queue, sort_index)",
@@ -363,16 +414,16 @@ impl Database {
         Ok(())
     }
 
-    /// 应用 Schema 迁移
+    /// Applies schema migrations.
     pub(crate) fn apply_schema_migrations(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         Self::apply_schema_migrations_on_conn(&conn)
     }
 
-    /// 在指定连接上应用 Schema 迁移
+    /// Applies schema migrations on a supplied connection.
     pub(crate) fn apply_schema_migrations_on_conn(conn: &Connection) -> Result<(), AppError> {
         conn.execute("SAVEPOINT schema_migration;", [])
-            .map_err(|e| AppError::Database(format!("开启迁移 savepoint 失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to open migration savepoint: {e}")))?;
 
         let mut version = Self::get_user_version(conn)?;
 
@@ -380,7 +431,7 @@ impl Database {
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
             return Err(AppError::Database(format!(
-                "数据库版本过新（{version}），当前应用仅支持 {SCHEMA_VERSION}，请升级应用后再尝试。"
+                "Database version is newer ({version}) than this application supports ({SCHEMA_VERSION}); upgrade the application and try again."
             )));
         }
 
@@ -388,65 +439,86 @@ impl Database {
             while version < SCHEMA_VERSION {
                 match version {
                     0 => {
-                        log::info!("检测到 user_version=0，迁移到 1（补齐缺失列并设置版本）");
+                        log::info!(
+                            "Detected user_version=0; migrating to v1 and adding missing columns"
+                        );
                         Self::migrate_v0_to_v1(conn)?;
                         Self::set_user_version(conn, 1)?;
                     }
                     1 => {
                         log::info!(
-                            "迁移数据库从 v1 到 v2（添加使用统计表和完整字段，重构 skills 表）"
+                            "Migrating database from v1 to v2: add usage tables and fields, rebuild skills"
                         );
                         Self::migrate_v1_to_v2(conn)?;
                         Self::set_user_version(conn, 2)?;
                     }
                     2 => {
-                        log::info!("迁移数据库从 v2 到 v3（Skills 统一管理架构）");
+                        log::info!("Migrating database from v2 to v3: unified skill management");
                         Self::migrate_v2_to_v3(conn)?;
                         Self::set_user_version(conn, 3)?;
                     }
                     3 => {
-                        log::info!("迁移数据库从 v3 到 v4（OpenCode 支持）");
+                        log::info!("Migrating database from v3 to v4: OpenCode support");
                         Self::migrate_v3_to_v4(conn)?;
                         Self::set_user_version(conn, 4)?;
                     }
                     4 => {
-                        log::info!("迁移数据库从 v4 到 v5（计费模式支持）");
+                        log::info!("Migrating database from v4 to v5: pricing-mode support");
                         Self::migrate_v4_to_v5(conn)?;
                         Self::set_user_version(conn, 5)?;
                     }
                     5 => {
-                        log::info!("迁移数据库从 v5 到 v6（使用量聚合表 + Copilot 模板类型统一）");
+                        log::info!("Migrating database from v5 to v6: usage rollups and unified Copilot template type");
                         Self::migrate_v5_to_v6(conn)?;
                         Self::set_user_version(conn, 6)?;
                     }
                     6 => {
-                        log::info!("迁移数据库从 v6 到 v7（Skills 更新检测支持）");
+                        log::info!("Migrating database from v6 to v7: skill update detection");
                         Self::migrate_v6_to_v7(conn)?;
                         Self::set_user_version(conn, 7)?;
                     }
                     7 => {
-                        log::info!("迁移数据库从 v7 到 v8（会话日志使用追踪 + 修正模型定价）");
+                        log::info!("Migrating database from v7 to v8: session usage tracking and corrected model pricing");
                         Self::migrate_v7_to_v8(conn)?;
                         Self::set_user_version(conn, 8)?;
                     }
                     8 => {
-                        log::info!("迁移数据库从 v8 到 v9（全面补充模型定价）");
+                        log::info!("Migrating database from v8 to v9: expanded model pricing");
                         Self::migrate_v8_to_v9(conn)?;
                         Self::set_user_version(conn, 9)?;
                     }
                     9 => {
-                        log::info!("迁移数据库从 v9 到 v10（添加 Hermes Agent 支持）");
+                        log::info!("Migrating database from v9 to v10: Hermes Agent support");
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
                     }
                     10 => {
-                        log::info!("迁移数据库从 v10 到 v11（usage_daily_rollups 保留 request_model 维度）");
+                        log::info!("Migrating database from v10 to v11: retain request_model in usage_daily_rollups");
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
                     }
+                    11 => {
+                        log::info!("Migrating database from v11 to v12: preserve unknown token-usage requests");
+                        Self::migrate_v11_to_v12(conn)?;
+                        Self::set_user_version(conn, 12)?;
+                    }
+                    12 => {
+                        log::info!(
+                            "Migrating database from v12 to v13: preserve usage pricing coverage"
+                        );
+                        Self::migrate_v12_to_v13(conn)?;
+                        Self::set_user_version(conn, 13)?;
+                    }
+                    13 => {
+                        log::info!(
+                            "Migrating database from v13 to v14: reserved compatibility version"
+                        );
+                        Self::migrate_v13_to_v14(conn)?;
+                        Self::set_user_version(conn, 14)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
-                            "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
+                            "Unknown database version {version}; cannot migrate to {SCHEMA_VERSION}"
                         )));
                     }
                 }
@@ -457,8 +529,9 @@ impl Database {
 
         match result {
             Ok(_) => {
-                conn.execute("RELEASE schema_migration;", [])
-                    .map_err(|e| AppError::Database(format!("提交迁移 savepoint 失败: {e}")))?;
+                conn.execute("RELEASE schema_migration;", []).map_err(|e| {
+                    AppError::Database(format!("Failed to commit migration savepoint: {e}"))
+                })?;
                 Ok(())
             }
             Err(e) => {
@@ -469,9 +542,9 @@ impl Database {
         }
     }
 
-    /// v0 -> v1 迁移：补齐所有缺失列
+    /// v0 -> v1: adds all missing columns.
     fn migrate_v0_to_v1(conn: &Connection) -> Result<(), AppError> {
-        // providers 表
+        // Providers table.
         Self::add_column_if_missing(conn, "providers", "category", "TEXT")?;
         Self::add_column_if_missing(conn, "providers", "created_at", "INTEGER")?;
         Self::add_column_if_missing(conn, "providers", "sort_index", "INTEGER")?;
@@ -486,10 +559,10 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        // provider_endpoints 表
+        // Provider endpoints table.
         Self::add_column_if_missing(conn, "provider_endpoints", "added_at", "INTEGER")?;
 
-        // mcp_servers 表
+        // MCP servers table.
         Self::add_column_if_missing(conn, "mcp_servers", "description", "TEXT")?;
         Self::add_column_if_missing(conn, "mcp_servers", "homepage", "TEXT")?;
         Self::add_column_if_missing(conn, "mcp_servers", "docs", "TEXT")?;
@@ -507,16 +580,16 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        // prompts 表
+        // Prompts table.
         Self::add_column_if_missing(conn, "prompts", "description", "TEXT")?;
         Self::add_column_if_missing(conn, "prompts", "enabled", "BOOLEAN NOT NULL DEFAULT 1")?;
         Self::add_column_if_missing(conn, "prompts", "created_at", "INTEGER")?;
         Self::add_column_if_missing(conn, "prompts", "updated_at", "INTEGER")?;
 
-        // skills 表
+        // Skills table.
         Self::add_column_if_missing(conn, "skills", "installed_at", "INTEGER NOT NULL DEFAULT 0")?;
 
-        // skill_repos 表
+        // Skill repositories table.
         Self::add_column_if_missing(
             conn,
             "skill_repos",
@@ -524,14 +597,14 @@ impl Database {
             "TEXT NOT NULL DEFAULT 'main'",
         )?;
         Self::add_column_if_missing(conn, "skill_repos", "enabled", "BOOLEAN NOT NULL DEFAULT 1")?;
-        // 注意: skills_path 字段已被移除，因为现在支持全仓库递归扫描
+        // skills_path was removed after recursive repository scanning was introduced.
 
         Ok(())
     }
 
-    /// v1 -> v2 迁移：添加使用统计表和完整字段，重构 skills 表
+    /// v1 -> v2: adds usage tables and fields, then rebuilds skills.
     fn migrate_v1_to_v2(conn: &Connection) -> Result<(), AppError> {
-        // providers 表字段
+        // Provider fields.
         Self::add_column_if_missing(
             conn,
             "providers",
@@ -548,9 +621,9 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        // 添加代理超时配置字段
+        // Add proxy timeout fields.
         if Self::table_exists(conn, "proxy_config")? {
-            // 兼容旧版本缺失的基础字段
+            // Add base fields omitted by older releases.
             Self::add_column_if_missing(
                 conn,
                 "proxy_config",
@@ -596,21 +669,21 @@ impl Database {
             )?;
         }
 
-        // 删除旧的 failover_queue 表（如果存在）
+        // Drop the legacy failover_queue table when present.
         conn.execute("DROP INDEX IF EXISTS idx_failover_queue_order", [])
-            .map_err(|e| AppError::Database(format!("删除 failover_queue 索引失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to drop failover_queue index: {e}")))?;
         conn.execute("DROP TABLE IF EXISTS failover_queue", [])
-            .map_err(|e| AppError::Database(format!("删除 failover_queue 表失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to drop failover_queue table: {e}")))?;
 
-        // 创建 failover 索引
+        // Create failover indexes.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_providers_failover
              ON providers(app_type, in_failover_queue, sort_index)",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建 failover 索引失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create failover index: {e}")))?;
 
-        // proxy_request_logs 表
+        // Proxy request logs table.
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_request_logs (
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
@@ -624,7 +697,7 @@ impl Database {
             cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL
         )", [])?;
 
-        // 为已存在的表添加新字段
+        // Add new fields to an existing table.
         Self::add_column_if_missing(conn, "proxy_request_logs", "provider_type", "TEXT")?;
         Self::add_column_if_missing(
             conn,
@@ -640,8 +713,9 @@ impl Database {
         )?;
         Self::add_column_if_missing(conn, "proxy_request_logs", "first_token_ms", "INTEGER")?;
         Self::add_column_if_missing(conn, "proxy_request_logs", "duration_ms", "INTEGER")?;
+        Self::backfill_proxy_request_duration_ms(conn)?;
 
-        // model_pricing 表
+        // Model pricing table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_pricing (
             model_id TEXT PRIMARY KEY, display_name TEXT NOT NULL,
@@ -652,35 +726,35 @@ impl Database {
             [],
         )?;
 
-        // 清空并重新插入模型定价
+        // Clear and reseed model pricing.
         conn.execute("DELETE FROM model_pricing", [])
-            .map_err(|e| AppError::Database(format!("清空模型定价失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to clear model pricing: {e}")))?;
         Self::seed_model_pricing(conn)?;
 
-        // 重构 skills 表（添加 app_type 字段）
+        // Rebuild skills with an app_type field.
         Self::migrate_skills_table(conn)?;
 
-        // 重构 proxy_config 为三行结构（每应用独立配置）
+        // Rebuild proxy_config with one independent row per application.
         Self::migrate_proxy_config_to_per_app(conn)?;
 
         Ok(())
     }
 
-    /// 将 proxy_config 迁移为三行结构（每应用独立配置）
+    /// Migrates proxy_config to one independent row per application.
     fn migrate_proxy_config_to_per_app(conn: &Connection) -> Result<(), AppError> {
-        // 检查是否已经是新表结构（幂等性）
+        // Check for the new shape to keep migration idempotent.
         if !Self::table_exists(conn, "proxy_config")? {
-            // 表不存在，跳过迁移（新安装）
+            // A fresh installation has no table to migrate.
             return Ok(());
         }
 
         if Self::has_column(conn, "proxy_config", "app_type")? {
-            // 已经是三行结构，跳过迁移
-            log::info!("proxy_config 已经是三行结构，跳过迁移");
+            // Skip an already-migrated table.
+            log::info!("proxy_config already has one row per application; skipping migration");
             return Ok(());
         }
 
-        // 读取旧配置
+        // Read legacy configuration.
         let old_config = conn
             .query_row(
                 "SELECT listen_address, listen_port, max_retries, enable_logging,
@@ -758,7 +832,7 @@ impl Database {
             ),
         ];
 
-        // 创建新表
+        // Create the new table.
         conn.execute("DROP TABLE IF EXISTS proxy_config_new", [])?;
         conn.execute("CREATE TABLE proxy_config_new (
             app_type TEXT PRIMARY KEY CHECK (app_type IN ('claude','codex','gemini')),
@@ -775,7 +849,7 @@ impl Database {
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )", [])?;
 
-        // 插入三行配置
+        // Insert three application rows.
         for (app, takeover, failover, retries, fb, idle, cb_f, cb_s, cb_t, cb_r, cb_m) in apps {
             conn.execute(
                 "INSERT INTO proxy_config_new (app_type, proxy_enabled, listen_address, listen_port, enable_logging,
@@ -786,10 +860,10 @@ impl Database {
                 rusqlite::params![app, old_config.0, old_config.1, old_config.3,
                     if takeover { 1 } else { 0 }, if failover { 1 } else { 0 },
                     retries, fb, idle, old_config.6, cb_f, cb_s, cb_t, cb_r, cb_m]
-            ).map_err(|e| AppError::Database(format!("插入 {app} 配置失败: {e}")))?;
+            ).map_err(|e| AppError::Database(format!("Failed to insert {app} configuration: {e}")))?;
         }
 
-        // 替换表并清理
+        // Replace the table and clean up.
         conn.execute("DROP TABLE IF EXISTS proxy_config", [])?;
         conn.execute("ALTER TABLE proxy_config_new RENAME TO proxy_config", [])?;
         conn.execute("DROP TABLE IF EXISTS circuit_breaker_config", [])?;
@@ -799,36 +873,37 @@ impl Database {
             [],
         )?;
 
-        log::info!("proxy_config 已迁移为三行结构");
+        log::info!("Migrated proxy_config to one row per application");
         Ok(())
     }
 
-    /// 迁移 skills 表：从单 key 主键改为 (directory, app_type) 复合主键
+    /// Migrates skills from a single key to a `(directory, app_type)` primary key.
     fn migrate_skills_table(conn: &Connection) -> Result<(), AppError> {
-        // v3 结构（统一管理架构）已经是更高版本的 skills 表：
-        // - 主键为 id
-        // - 包含 enabled_claude / enabled_codex / enabled_gemini 等列
-        // 在这种情况下，不应再执行 v1 -> v2 的迁移逻辑，否则会因列不匹配而失败。
+        // The unified v3 skills shape is newer: its primary key is ID and it has
+        // per-application enable columns. Running v1->v2 against it would fail due
+        // to mismatched columns.
         if Self::has_column(conn, "skills", "enabled_claude")?
             || Self::has_column(conn, "skills", "id")?
         {
-            log::info!("skills 表已经是 v3 结构，跳过 v1 -> v2 迁移");
+            log::info!("skills already uses the v3 shape; skipping v1 -> v2 migration");
             return Ok(());
         }
 
-        // 检查是否已经是新表结构
+        // Check whether this migration already ran.
         if Self::has_column(conn, "skills", "app_type")? {
-            log::info!("skills 表已经包含 app_type 字段，跳过迁移");
+            log::info!("skills already contains app_type; skipping migration");
             return Ok(());
         }
 
-        log::info!("开始迁移 skills 表...");
+        log::info!("Starting skills table migration");
 
-        // 1. 重命名旧表
+        // 1. Rename the old table.
         conn.execute("ALTER TABLE skills RENAME TO skills_old", [])
-            .map_err(|e| AppError::Database(format!("重命名旧 skills 表失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to rename legacy skills table: {e}"))
+            })?;
 
-        // 2. 创建新表
+        // 2. Create the new table.
         conn.execute(
             "CREATE TABLE skills (
                 directory TEXT NOT NULL,
@@ -839,13 +914,13 @@ impl Database {
             )",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建新 skills 表失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create new skills table: {e}")))?;
 
-        // 3. 迁移数据：解析 key 格式（如 "claude:my-skill" 或 "codex:foo"）
-        //    旧数据如果没有前缀，默认为 claude
+        // 3. Parse keys such as "claude:my-skill" or "codex:foo" and migrate data.
+        // Legacy keys without a prefix default to Claude.
         let mut stmt = conn
             .prepare("SELECT key, installed, installed_at FROM skills_old")
-            .map_err(|e| AppError::Database(format!("查询旧 skills 数据失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to query legacy skill data: {e}")))?;
 
         let old_skills: Vec<(String, bool, i64)> = stmt
             .query_map([], |row| {
@@ -855,17 +930,17 @@ impl Database {
                     row.get::<_, i64>(2)?,
                 ))
             })
-            .map_err(|e| AppError::Database(format!("读取旧 skills 数据失败: {e}")))?
+            .map_err(|e| AppError::Database(format!("Failed to read legacy skill data: {e}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AppError::Database(format!("解析旧 skills 数据失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to parse legacy skill data: {e}")))?;
 
         let count = old_skills.len();
 
         for (key, installed, installed_at) in old_skills {
-            // 解析 key: "app:directory" 或 "directory"（默认 claude）
+            // Parse "app:directory" or a directory that defaults to Claude.
             let (app_type, directory) = if let Some(idx) = key.find(':') {
                 let (app, dir) = key.split_at(idx);
-                (app.to_string(), dir[1..].to_string()) // 跳过冒号
+                (app.to_string(), dir[1..].to_string()) // Skip the colon.
             } else {
                 ("claude".to_string(), key.clone())
             };
@@ -875,47 +950,49 @@ impl Database {
                 rusqlite::params![directory, app_type, installed, installed_at],
             )
             .map_err(|e| {
-                AppError::Database(format!("迁移 skill {key} 到新表失败: {e}"))
+                AppError::Database(format!("Failed to migrate skill {key} to the new table: {e}"))
             })?;
         }
 
-        // 4. 删除旧表
+        // 4. Drop the old table.
         conn.execute("DROP TABLE skills_old", [])
-            .map_err(|e| AppError::Database(format!("删除旧 skills 表失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to drop legacy skills table: {e}")))?;
 
-        log::info!("skills 表迁移完成，共迁移 {count} 条记录");
+        log::info!("Finished skills migration; migrated {count} records");
         Ok(())
     }
 
-    /// v2 -> v3 迁移：Skills 统一管理架构
+    /// v2 -> v3: unified skill management.
     ///
-    /// 将 skills 表从 (directory, app_type) 复合主键结构迁移到统一的 id 主键结构，
-    /// 支持三应用启用标志（enabled_claude, enabled_codex, enabled_gemini）。
+    /// Replaces the `(directory, app_type)` primary key with one ID and adds
+    /// enable flags for Claude, Codex, and Gemini.
     ///
-    /// 迁移策略：
-    /// 1. 旧数据库只存储安装记录，真正的 skill 文件在文件系统
-    /// 2. 直接重建新表结构，后续由 SkillService 在首次启动时扫描文件系统重建数据
+    /// Legacy databases store only installation records while skill files live on
+    /// disk. Rebuild the table directly, then let SkillService scan the filesystem
+    /// and reconstruct records on first startup.
     fn migrate_v2_to_v3(conn: &Connection) -> Result<(), AppError> {
-        // 检查是否已经是新结构（通过检查是否有 enabled_claude 列）
+        // Detect the new shape through enabled_claude.
         if Self::has_column(conn, "skills", "enabled_claude")? {
-            log::info!("skills 表已经是 v3 结构，跳过迁移");
+            log::info!("skills already uses the v3 shape; skipping migration");
             return Ok(());
         }
 
-        log::info!("开始迁移 skills 表到 v3 结构（统一管理架构）...");
+        log::info!("Migrating skills to the unified v3 shape");
 
-        // 1. 备份旧数据（用于日志和后续启动迁移）
+        // 1. Snapshot legacy data for logging and later startup migration.
         let old_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM skills", [], |row| row.get(0))
             .unwrap_or(0);
-        log::info!("旧 skills 表有 {old_count} 条记录");
+        log::info!("Legacy skills table contains {old_count} records");
 
         let mut stmt = conn
             .prepare(
                 "SELECT directory, app_type FROM skills
                  WHERE installed = 1",
             )
-            .map_err(|e| AppError::Database(format!("查询旧 skills 快照失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to query legacy skill snapshot: {e}"))
+            })?;
         let snapshot_rows: Vec<LegacySkillMigrationRow> = stmt
             .query_map([], |row| {
                 Ok(LegacySkillMigrationRow {
@@ -923,15 +1000,18 @@ impl Database {
                     app_type: row.get(1)?,
                 })
             })
-            .map_err(|e| AppError::Database(format!("读取旧 skills 快照失败: {e}")))?
+            .map_err(|e| AppError::Database(format!("Failed to read legacy skill snapshot: {e}")))?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AppError::Database(format!("解析旧 skills 快照失败: {e}")))?;
-        let snapshot_json = serde_json::to_string(&snapshot_rows)
-            .map_err(|e| AppError::Database(format!("序列化旧 skills 快照失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to parse legacy skill snapshot: {e}"))
+            })?;
+        let snapshot_json = serde_json::to_string(&snapshot_rows).map_err(|e| {
+            AppError::Database(format!("Failed to serialize legacy skill snapshot: {e}"))
+        })?;
 
-        // 标记：需要在启动后从文件系统扫描并重建 Skills 数据
-        // 说明：v3 结构将 Skills 的 SSOT 迁移到 ~/.cc-switch/skills/，
-        // 旧表只存“安装记录”，无法直接无损迁移到新结构，因此改为启动后扫描 app 目录导入。
+        // Mark the database for a post-startup filesystem scan. v3 moves the skill
+        // source of truth to ~/.cc-switch/skills/; legacy installation-only records
+        // cannot be migrated losslessly, so application directories are imported later.
         let _ = conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('skills_ssot_migration_pending', 'true')",
             [],
@@ -941,11 +1021,11 @@ impl Database {
             [snapshot_json],
         );
 
-        // 2. 删除旧表
+        // 2. Drop the old table.
         conn.execute("DROP TABLE IF EXISTS skills", [])
-            .map_err(|e| AppError::Database(format!("删除旧 skills 表失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to drop legacy skills table: {e}")))?;
 
-        // 3. 创建新表
+        // 3. Create the new table.
         conn.execute(
             "CREATE TABLE skills (
                 id TEXT PRIMARY KEY,
@@ -963,21 +1043,21 @@ impl Database {
             )",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建新 skills 表失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create new skills table: {e}")))?;
 
         log::info!(
-            "skills 表已迁移到 v3 结构。\n\
-             注意：旧的安装记录已清除，首次启动时将自动扫描文件系统重建数据。"
+            "Migrated skills to the v3 shape.\n\
+             Legacy installation records were cleared; the first startup will scan the filesystem and rebuild them."
         );
 
         Ok(())
     }
 
-    /// v3 -> v4 迁移：添加 OpenCode 支持
+    /// v3 -> v4: adds OpenCode support.
     ///
-    /// 为 mcp_servers 和 skills 表添加 enabled_opencode 列。
+    /// Adds enabled_opencode to mcp_servers and skills.
     fn migrate_v3_to_v4(conn: &Connection) -> Result<(), AppError> {
-        // 为 mcp_servers 表添加 enabled_opencode 列
+        // Add enabled_opencode to mcp_servers.
         Self::add_column_if_missing(
             conn,
             "mcp_servers",
@@ -985,7 +1065,7 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        // 为 skills 表添加 enabled_opencode 列
+        // Add enabled_opencode to skills.
         Self::add_column_if_missing(
             conn,
             "skills",
@@ -993,11 +1073,11 @@ impl Database {
             "BOOLEAN NOT NULL DEFAULT 0",
         )?;
 
-        log::info!("v3 -> v4 迁移完成：已添加 OpenCode 支持");
+        log::info!("Completed v3 -> v4 migration: added OpenCode support");
         Ok(())
     }
 
-    /// v4 -> v5 迁移：新增计费模式配置与请求模型字段
+    /// v4 -> v5: adds pricing-mode configuration and request-model fields.
     fn migrate_v4_to_v5(conn: &Connection) -> Result<(), AppError> {
         if Self::table_exists(conn, "proxy_config")? {
             Self::add_column_if_missing(
@@ -1017,13 +1097,13 @@ impl Database {
             Self::add_column_if_missing(conn, "proxy_request_logs", "request_model", "TEXT")?;
         }
 
-        log::info!("v4 -> v5 迁移完成：已添加计费模式与请求模型字段");
+        log::info!("Completed v4 -> v5 migration: added pricing mode and request model");
         Ok(())
     }
 
-    /// v5 -> v6 迁移：添加使用量日聚合表 + 统一 Copilot 模板类型
+    /// v5 -> v6: adds daily usage rollups and unifies the Copilot template type.
     fn migrate_v5_to_v6(conn: &Connection) -> Result<(), AppError> {
-        // 1. 添加使用量日聚合表
+        // 1. Add the daily usage rollups table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS usage_daily_rollups (
                 date TEXT NOT NULL,
@@ -1042,9 +1122,9 @@ impl Database {
             )",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建 usage_daily_rollups 表失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create usage_daily_rollups: {e}")))?;
 
-        // 2. 统一 Copilot 模板类型为 github_copilot
+        // 2. Normalize the Copilot template type to github_copilot.
         let mut stmt = conn
             .prepare("SELECT id, app_type, meta FROM providers")
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -1092,11 +1172,11 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         }
 
-        log::info!("v5 -> v6 迁移完成：已添加使用量日聚合表，统一 copilot 模板类型");
+        log::info!("Completed v5 -> v6 migration: added daily usage rollups and normalized the Copilot template type");
         Ok(())
     }
 
-    /// v6 -> v7: Skills 更新检测支持（content_hash + updated_at）
+    /// v6 -> v7: adds skill update detection through content_hash and updated_at.
     fn migrate_v6_to_v7(conn: &Connection) -> Result<(), AppError> {
         if Self::table_exists(conn, "skills")? {
             Self::add_column_if_missing(conn, "skills", "content_hash", "TEXT")?;
@@ -1107,13 +1187,13 @@ impl Database {
                 "INTEGER NOT NULL DEFAULT 0",
             )?;
         }
-        log::info!("v6 -> v7 迁移完成：已添加 content_hash 和 updated_at 列");
+        log::info!("Completed v6 -> v7 migration: added content_hash and updated_at");
         Ok(())
     }
 
-    /// v7 -> v8: 会话日志使用追踪（无代理模式统计支持）
+    /// v7 -> v8: tracks usage from session logs without proxy mode.
     fn migrate_v7_to_v8(conn: &Connection) -> Result<(), AppError> {
-        // 1. 为 proxy_request_logs 添加 data_source 列，区分数据来源
+        // 1. Add data_source to distinguish proxy-request-log origins.
         if Self::table_exists(conn, "proxy_request_logs")? {
             Self::add_column_if_missing(
                 conn,
@@ -1124,7 +1204,7 @@ impl Database {
             Self::create_request_logs_usage_indexes_if_supported(conn)?;
         }
 
-        // 2. 创建会话日志同步状态表
+        // 2. Create the session-log synchronization table.
         conn.execute(
             "CREATE TABLE IF NOT EXISTS session_log_sync (
                 file_path TEXT PRIMARY KEY,
@@ -1134,9 +1214,9 @@ impl Database {
             )",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建 session_log_sync 表失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create session_log_sync: {e}")))?;
 
-        // 3. 修正国产模型定价：之前误将 CNY 值存为 USD 字段，统一转换为 USD
+        // 3. Correct model prices that stored CNY values in USD fields.
         if Self::table_exists(conn, "model_pricing")? {
             let pricing_fixes: &[(&str, &str, &str, &str, &str)] = &[
                 ("deepseek-v3.2", "0.28", "0.42", "0.028", "0"),
@@ -1163,15 +1243,17 @@ impl Database {
                      WHERE model_id = ?1",
                     rusqlite::params![model_id, input, output, cache_read, cache_creation],
                 )
-                .map_err(|e| AppError::Database(format!("更新模型 {model_id} 定价失败: {e}")))?;
+                .map_err(|e| {
+                    AppError::Database(format!("Failed to update pricing for {model_id}: {e}"))
+                })?;
             }
         }
 
-        log::info!("v7 -> v8 迁移完成：data_source 列、session_log_sync 表、修正 13 个模型定价");
+        log::info!("Completed v7 -> v8 migration: added data_source and session_log_sync, corrected 13 model prices");
         Ok(())
     }
 
-    /// v8 → v9: 全面补充模型定价（清空 + 重新 seed）
+    /// v8 -> v9: clears and comprehensively reseeds model pricing.
     fn migrate_v8_to_v9(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS model_pricing (
@@ -1182,15 +1264,15 @@ impl Database {
             )",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建 model_pricing 表失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create model_pricing: {e}")))?;
         conn.execute("DELETE FROM model_pricing", [])
-            .map_err(|e| AppError::Database(format!("清空模型定价失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to clear model pricing: {e}")))?;
         Self::seed_model_pricing(conn)?;
-        log::info!("v8 -> v9 迁移完成：已刷新全部模型定价数据");
+        log::info!("Completed v8 -> v9 migration: refreshed all model pricing");
         Ok(())
     }
 
-    /// v9 -> v10 迁移：添加 Hermes Agent 支持
+    /// v9 -> v10: adds Hermes Agent support.
     fn migrate_v9_to_v10(conn: &Connection) -> Result<(), AppError> {
         Self::add_column_if_missing(
             conn,
@@ -1209,25 +1291,26 @@ impl Database {
             )?;
         }
 
-        log::info!("v9 -> v10 迁移完成：已添加 Hermes Agent 支持");
+        log::info!("Completed v9 -> v10 migration: added Hermes Agent support");
         Ok(())
     }
 
-    /// v10 -> v11：usage_daily_rollups 增加 request_model 维度（进入主键），
-    /// proxy_request_logs 增加 pricing_model 列（写入时的计价基准，回填依据）。
+    /// v10 -> v11: adds request_model to the usage_daily_rollups primary key and
+    /// adds pricing_model, the write-time pricing basis, to proxy_request_logs.
     ///
-    /// 路由接管下 model（真实上游模型）≠ request_model（客户端别名），
-    /// 旧 rollup 只按 model 聚合，明细 prune 后映射关系永久丢失、计费不可审计。
-    /// SQLite 改主键必须重建表；历史行的 request_model 已不可知，填 ''。
+    /// Under routing takeover, model is the upstream model while request_model is
+    /// the client alias. Old rollups aggregate only by model and lose that mapping
+    /// after pruning. SQLite requires rebuilding the table to change its primary
+    /// key; historical request_model values are unknown and use ''.
     fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
-        // proxy_request_logs.pricing_model：NULL = v11 前的历史行（回填走
-        // model → 占位符回退 request_model 的旧逻辑），'' = 未计价的错误行
+        // proxy_request_logs.pricing_model: NULL marks a pre-v11 row that uses the
+        // legacy model-to-placeholder-to-request_model backfill; '' marks an unpriced error.
         if Self::table_exists(conn, "proxy_request_logs")? {
             Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_model", "TEXT")?;
         }
 
         if !Self::table_exists(conn, "usage_daily_rollups")? {
-            log::info!("v10 -> v11：usage_daily_rollups 不存在，跳过重建");
+            log::info!("v10 -> v11: usage_daily_rollups does not exist; skipping rebuild");
             return Ok(());
         }
 
@@ -1261,21 +1344,253 @@ impl Database {
              DROP TABLE usage_daily_rollups_v10;",
         )
         .map_err(|e| {
-            AppError::Database(format!("v10 -> v11 重建 usage_daily_rollups 失败: {e}"))
+            AppError::Database(format!(
+                "v10 -> v11 failed to rebuild usage_daily_rollups: {e}"
+            ))
         })?;
 
         log::info!(
-            "v10 -> v11 迁移完成：usage_daily_rollups 已保留 request_model/pricing_model 维度"
+            "Completed v10 -> v11 migration: usage_daily_rollups now retain request_model and pricing_model"
         );
         Ok(())
     }
 
-    /// 插入默认模型定价数据
-    /// 格式: (model_id, display_name, input, output, cache_read, cache_creation)
-    /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
+    /// v11 -> v12: explicitly distinguishes requests whose upstream response did
+    /// not report token usage. These requests still contribute to request outcome
+    /// and timing statistics, but never to token or cost totals. The rollup count
+    /// retains that coverage information after detailed request rows are pruned.
+    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_request_logs",
+                "token_usage_known",
+                "INTEGER NOT NULL DEFAULT 1",
+            )?;
+
+            let has_token_columns = [
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_creation_tokens",
+            ]
+            .iter()
+            .try_fold(true, |all_present, column| {
+                Ok::<_, AppError>(
+                    all_present && Self::has_column(conn, "proxy_request_logs", column)?,
+                )
+            })?;
+            if has_token_columns {
+                // Before v12, successful all-zero rows were discarded and failed
+                // all-zero rows were diagnostic records with no measured token usage.
+                // Conservatively treat every surviving all-zero detail as unknown.
+                conn.execute(
+                    "UPDATE proxy_request_logs
+                     SET token_usage_known = 0
+                     WHERE input_tokens = 0 AND output_tokens = 0
+                       AND cache_read_tokens = 0 AND cache_creation_tokens = 0",
+                    [],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!(
+                        "v11 -> v12 failed to classify historical request logs: {e}"
+                    ))
+                })?;
+            }
+        }
+
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_rollups",
+                "token_usage_known_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+
+            // Before v12, successful responses without usage were discarded at
+            // the logger boundary. Therefore every surviving successful rollup
+            // request had reported usage, while failed requests did not.
+            conn.execute(
+                "UPDATE usage_daily_rollups
+                 SET token_usage_known_count = success_count",
+                [],
+            )
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "v11 -> v12 failed to classify historical usage rollups: {e}"
+                ))
+            })?;
+
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_rollups",
+                "measured_request_count",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+
+            // Historical rollups did not retain data_source, so their outcome
+            // and latency coverage cannot be reconstructed without inventing
+            // measurements for imported sessions.
+            conn.execute(
+                "UPDATE usage_daily_rollups
+                 SET measured_request_count = 0,
+                     success_count = 0,
+                     avg_latency_ms = 0",
+                [],
+            )
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "v11 -> v12 failed to clear unmeasured historical outcomes: {e}"
+                ))
+            })?;
+        }
+
+        log::info!(
+            "Completed v11 -> v12 migration: unknown token usage is explicit in details and rollups"
+        );
+        Ok(())
+    }
+
+    /// v12 -> v13: records whether a request actually matched a pricing rule.
+    /// A zero cost is not sufficient evidence: it can mean either an unpriced
+    /// request or a legitimately free model. Detail and rollup counters retain
+    /// the distinction after old request rows are pruned.
+    fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_known", "INTEGER")?;
+
+            // Requests without reported usage were never eligible for pricing,
+            // so their negative classification is exact even for legacy data.
+            // Known-usage zero-cost rows remain NULL: zero may mean either a
+            // missing price or a legitimately free rule, and v12 did not retain
+            // enough evidence to distinguish those cases.
+            let has_token_usage_known =
+                Self::has_column(conn, "proxy_request_logs", "token_usage_known")?;
+            if has_token_usage_known {
+                conn.execute(
+                    "UPDATE proxy_request_logs
+                     SET pricing_known = 0
+                     WHERE token_usage_known = 0",
+                    [],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!(
+                        "v12 -> v13 failed to classify requests without usage: {e}"
+                    ))
+                })?;
+            }
+
+            let has_cost_columns = [
+                "input_cost_usd",
+                "output_cost_usd",
+                "cache_read_cost_usd",
+                "cache_creation_cost_usd",
+                "total_cost_usd",
+            ]
+            .iter()
+            .try_fold(true, |all_present, column| {
+                Ok::<_, AppError>(
+                    all_present && Self::has_column(conn, "proxy_request_logs", column)?,
+                )
+            })?;
+            if has_cost_columns && has_token_usage_known {
+                // Non-zero stored component/total costs prove that pricing was
+                // applied. This intentionally does not infer pricing merely from a
+                // model name or a zero total, because a pricing row may have been
+                // added only after the historical request.
+                conn.execute(
+                    "UPDATE proxy_request_logs
+                     SET pricing_known = 1
+                     WHERE token_usage_known != 0
+                       AND (
+                           CAST(input_cost_usd AS REAL) != 0
+                           OR CAST(output_cost_usd AS REAL) != 0
+                           OR CAST(cache_read_cost_usd AS REAL) != 0
+                           OR CAST(cache_creation_cost_usd AS REAL) != 0
+                           OR CAST(total_cost_usd AS REAL) != 0
+                       )",
+                    [],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!(
+                        "v12 -> v13 failed to classify historical priced requests: {e}"
+                    ))
+                })?;
+            }
+
+            // Do not classify a historical zero from today's pricing catalog.
+            // The normal backfill path may later resolve that row against a
+            // current rule, calculate every component, and only then mark it
+            // priced. Until that successful operation, NULL means indeterminate.
+        }
+
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            Self::add_column_if_missing(
+                conn,
+                "usage_daily_rollups",
+                "priced_request_count",
+                "INTEGER",
+            )?;
+
+            // v12 rollups retain only an aggregate cost. A non-zero total proves
+            // at least one row was priced, but cannot reveal the exact count when
+            // a bucket spans requests before and after a pricing rule was added.
+            // Leave every non-empty legacy bucket NULL rather than inventing an
+            // exact Full/Partial/None coverage result. Empty buckets are exact.
+            if Self::has_column(conn, "usage_daily_rollups", "request_count")? {
+                conn.execute(
+                    "UPDATE usage_daily_rollups
+                     SET priced_request_count = 0
+                     WHERE request_count = 0",
+                    [],
+                )
+                .map_err(|e| {
+                    AppError::Database(format!(
+                        "v12 -> v13 failed to classify empty historical rollups: {e}"
+                    ))
+                })?;
+            }
+        }
+
+        log::info!(
+            "Completed v12 -> v13 migration: pricing coverage is explicit in details and rollups"
+        );
+        Ok(())
+    }
+
+    /// v13 -> v14: reserved compatibility version.
+    ///
+    /// A short-lived diagnostic trace migration was pruned before release. Keep
+    /// the version bump as a no-op so databases already opened by that build do
+    /// not appear newer than this application.
+    fn migrate_v13_to_v14(conn: &Connection) -> Result<(), AppError> {
+        let _ = conn;
+        log::info!("Completed v13 -> v14 migration: no schema changes");
+        Ok(())
+    }
+
+    /// Inserts default model pricing.
+    /// Tuple format: `(model_id, display_name, input, output, cache_read, cache_creation)`.
+    /// model_id uses hyphens, such as claude-haiku-4-5, matching normalized API names.
     fn seed_model_pricing(conn: &Connection) -> Result<(), AppError> {
+        // Legacy databases can reach incremental pricing repair without first
+        // running the full create-tables path. Ensure the deletion ledger is
+        // present before the seed query references it.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_pricing_deletions (
+                model_id TEXT PRIMARY KEY,
+                deleted_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )",
+            [],
+        )
+        .map_err(|e| {
+            AppError::Database(format!(
+                "Failed to create model pricing deletion ledger: {e}"
+            ))
+        })?;
+
         let pricing_data = [
-            // Claude Fable 5（Opus 之上的新档）
+            // Claude Fable 5, a tier above Opus.
             (
                 "claude-fable-5",
                 "Claude Fable 5",
@@ -1292,7 +1607,7 @@ impl Database {
                 "1.00",
                 "12.50",
             ),
-            // Claude 4.8 系列
+            // Claude 4.8 family.
             (
                 "claude-opus-4-8",
                 "Claude Opus 4.8",
@@ -1301,7 +1616,8 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude Sonnet 5（list 价，与 Sonnet 4.6 一致；促销 $2/$10 至 2026-08-31 不入表）
+            // Claude Sonnet 5 list price, equal to Sonnet 4.6. The temporary $2/$10
+            // promotion through 2026-08-31 is intentionally not stored.
             (
                 "claude-sonnet-5",
                 "Claude Sonnet 5",
@@ -1310,7 +1626,7 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
-            // Claude 4.7 系列
+            // Claude 4.7 family.
             (
                 "claude-opus-4-7",
                 "Claude Opus 4.7",
@@ -1319,7 +1635,7 @@ impl Database {
                 "0.50",
                 "6.25",
             ),
-            // Claude 4.6 系列
+            // Claude 4.6 family.
             (
                 "claude-opus-4-6-20260206",
                 "Claude Opus 4.6",
@@ -1336,7 +1652,7 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
-            // Claude 4.5 系列
+            // Claude 4.5 family.
             (
                 "claude-opus-4-5-20251101",
                 "Claude Opus 4.5",
@@ -1361,7 +1677,7 @@ impl Database {
                 "0.10",
                 "1.25",
             ),
-            // Claude 4 系列 (Legacy Models)
+            // Legacy Claude 4 family.
             (
                 "claude-opus-4-20250514",
                 "Claude Opus 4",
@@ -1386,7 +1702,7 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
-            // Claude 3.5 系列
+            // Claude 3.5 family.
             (
                 "claude-3-5-haiku-20241022",
                 "Claude 3.5 Haiku",
@@ -1403,18 +1719,18 @@ impl Database {
                 "0.30",
                 "3.75",
             ),
-            // GPT-5.5 系列
+            // GPT-5.5 family.
             ("gpt-5.5", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-low", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-medium", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-high", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-xhigh", "GPT-5.5", "5", "30", "0.50", "0"),
             ("gpt-5.5-minimal", "GPT-5.5", "5", "30", "0.50", "0"),
-            // GPT-5.4 系列
+            // GPT-5.4 family.
             ("gpt-5.4", "GPT-5.4", "2.50", "15", "0.25", "0"),
             ("gpt-5.4-mini", "GPT-5.4 Mini", "0.75", "4.50", "0.075", "0"),
             ("gpt-5.4-nano", "GPT-5.4 Nano", "0.20", "1.25", "0.02", "0"),
-            // GPT-5.2 系列
+            // GPT-5.2 family.
             ("gpt-5.2", "GPT-5.2", "1.75", "14", "0.175", "0"),
             ("gpt-5.2-low", "GPT-5.2", "1.75", "14", "0.175", "0"),
             ("gpt-5.2-medium", "GPT-5.2", "1.75", "14", "0.175", "0"),
@@ -1453,7 +1769,7 @@ impl Database {
                 "0.175",
                 "0",
             ),
-            // GPT-5.3 Codex 系列
+            // GPT-5.3 Codex family.
             ("gpt-5.3-codex", "GPT-5.3 Codex", "1.75", "14", "0.175", "0"),
             (
                 "gpt-5.3-codex-low",
@@ -1487,7 +1803,7 @@ impl Database {
                 "0.175",
                 "0",
             ),
-            // GPT-5.1 系列
+            // GPT-5.1 family.
             ("gpt-5.1", "GPT-5.1", "1.25", "10", "0.125", "0"),
             ("gpt-5.1-low", "GPT-5.1", "1.25", "10", "0.125", "0"),
             ("gpt-5.1-medium", "GPT-5.1", "1.25", "10", "0.125", "0"),
@@ -1526,7 +1842,7 @@ impl Database {
                 "0.125",
                 "0",
             ),
-            // GPT-5 系列
+            // GPT-5 family.
             ("gpt-5", "GPT-5", "1.25", "10", "0.125", "0"),
             ("gpt-5-low", "GPT-5", "1.25", "10", "0.125", "0"),
             ("gpt-5-medium", "GPT-5", "1.25", "10", "0.125", "0"),
@@ -1574,14 +1890,14 @@ impl Database {
                 "0.125",
                 "0",
             ),
-            // OpenAI Reasoning 系列
+            // OpenAI reasoning family.
             ("o3", "OpenAI o3", "2", "8", "0.50", "0"),
             ("o4-mini", "OpenAI o4-mini", "1.10", "4.40", "0.275", "0"),
-            // GPT-4.1 系列
+            // GPT-4.1 family.
             ("gpt-4.1", "GPT-4.1", "2", "8", "0.50", "0"),
             ("gpt-4.1-mini", "GPT-4.1 Mini", "0.40", "1.60", "0.10", "0"),
             ("gpt-4.1-nano", "GPT-4.1 Nano", "0.10", "0.40", "0.025", "0"),
-            // Gemini 3.5 系列
+            // Gemini 3.5 family.
             (
                 "gemini-3.5-flash",
                 "Gemini 3.5 Flash",
@@ -1590,7 +1906,7 @@ impl Database {
                 "0.15",
                 "0",
             ),
-            // Gemini 3.1 系列
+            // Gemini 3.1 family.
             (
                 "gemini-3.1-pro-preview",
                 "Gemini 3.1 Pro Preview",
@@ -1615,7 +1931,7 @@ impl Database {
                 "0.025",
                 "0",
             ),
-            // Gemini 3 系列
+            // Gemini 3 family.
             (
                 "gemini-3-pro-preview",
                 "Gemini 3 Pro Preview",
@@ -1632,7 +1948,7 @@ impl Database {
                 "0.05",
                 "0",
             ),
-            // Gemini 2.5 系列
+            // Gemini 2.5 family.
             (
                 "gemini-2.5-pro",
                 "Gemini 2.5 Pro",
@@ -1657,7 +1973,7 @@ impl Database {
                 "0.01",
                 "0",
             ),
-            // Gemini 2.0 系列
+            // Gemini 2.0 family.
             (
                 "gemini-2.0-flash",
                 "Gemini 2.0 Flash",
@@ -1666,7 +1982,7 @@ impl Database {
                 "0.025",
                 "0",
             ),
-            // StepFun 系列
+            // StepFun family.
             (
                 "step-3.7-flash",
                 "Step 3.7 Flash",
@@ -1691,12 +2007,13 @@ impl Database {
                 "0.02",
                 "0",
             ),
-            // ====== 国产模型 (USD/1M tokens) ======
-            // Doubao (字节跳动)
-            // Seed 2.1 系列（2026-06 火山引擎官方 list 价，CNY 按 ~7.14 折算）：
-            //   pro   输入 6 元 / 输出 30 元 / 命中 1.2 元
-            //   turbo 输入 3 元 / 输出 15 元 / 命中 0.6 元
-            // 「缓存存储 0.017 元/M/小时」是按时长计费的存储费，与本表 cache_creation（按 token 写入价）口径不同，置 0。
+            // Models priced by Chinese vendors, stored as USD per million tokens.
+            // Doubao by ByteDance. Seed 2.1 uses Volcengine's June 2026 list price,
+            // converted from CNY at approximately 7.14 CNY/USD:
+            //   pro: input 6 CNY, output 30 CNY, cache hit 1.2 CNY;
+            //   turbo: input 3 CNY, output 15 CNY, cache hit 0.6 CNY.
+            // Cache storage at 0.017 CNY/M/hour is time-based, unlike this table's
+            // per-token cache_creation field, so cache_creation remains zero.
             (
                 "doubao-seed-2-1-pro",
                 "Doubao Seed 2.1 Pro",
@@ -1761,7 +2078,7 @@ impl Database {
                 "0.0056",
                 "0",
             ),
-            // DeepSeek 系列
+            // DeepSeek family.
             (
                 "deepseek-v3.2",
                 "DeepSeek V3.2",
@@ -1795,7 +2112,7 @@ impl Database {
                 "0.14",
                 "0",
             ),
-            // DeepSeek V4 系列（官方 CNY 按 1 USD ≈ 7.14 折算）
+            // DeepSeek V4 family; official CNY prices converted at about 7.14 CNY/USD.
             (
                 "deepseek-v4-flash",
                 "DeepSeek V4 Flash",
@@ -1812,7 +2129,7 @@ impl Database {
                 "0.003625",
                 "0",
             ),
-            // Kimi (月之暗面)
+            // Kimi by Moonshot AI.
             (
                 "kimi-k2-thinking",
                 "Kimi K2 Thinking",
@@ -1840,7 +2157,7 @@ impl Database {
                 "0.19",
                 "0",
             ),
-            // MiniMax 系列
+            // MiniMax family.
             ("minimax-m2.1", "MiniMax M2.1", "0.27", "0.95", "0.03", "0"),
             (
                 "minimax-m2.1-lightning",
@@ -1877,14 +2194,14 @@ impl Database {
                 "0.375",
             ),
             ("minimax-m3", "MiniMax M3", "0.60", "2.40", "0.12", "0"),
-            // GLM (智谱)
+            // GLM by Zhipu AI.
             ("glm-4.7", "GLM-4.7", "0.6", "2.2", "0.11", "0"),
             ("glm-4.6", "GLM-4.6", "0.6", "2.2", "0.11", "0"),
             ("glm-5", "GLM-5", "1", "3.2", "0.2", "0"),
             ("glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0"),
             ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
-            ("glm-5.2-sglang", "GLM-5.2 SGLang", "1.4", "4.4", "0.26", "0"),
-            // MiMo (小米)
+            ("glm-5.2-sglang", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
+            // MiMo by Xiaomi.
             (
                 "mimo-v2-flash",
                 "MiMo V2 Flash",
@@ -1903,7 +2220,7 @@ impl Database {
                 "0.0036",
                 "0",
             ),
-            // Qwen 系列 (阿里巴巴)
+            // Qwen family by Alibaba.
             ("qwen3.7-max", "Qwen3.7 Max", "2.50", "7.50", "0.25", "0"),
             ("qwen3.7-plus", "Qwen3.7 Plus", "0.40", "1.60", "0.08", "0"),
             (
@@ -1967,7 +2284,7 @@ impl Database {
             ("qwq-plus", "QwQ Plus", "0.80", "2.40", "0", "0"),
             ("qwq-32b", "QwQ 32B", "0.20", "0.60", "0", "0"),
             ("qwen3-32b", "Qwen3 32B", "0.16", "0.64", "0", "0"),
-            // Grok 系列 (xAI)
+            // Grok family by xAI.
             ("grok-4.3", "Grok 4.3", "1.25", "2.50", "0.20", "0"),
             (
                 "grok-4.20-0309-reasoning",
@@ -2013,7 +2330,7 @@ impl Database {
             ("grok-build-0.1", "Grok Build 0.1", "1", "2", "0.20", "0"),
             ("grok-3", "Grok 3", "3", "15", "0.75", "0"),
             ("grok-3-mini", "Grok 3 Mini", "0.25", "0.50", "0.075", "0"),
-            // Mistral 系列
+            // Mistral family.
             (
                 "mistral-medium-3.5",
                 "Mistral Medium 3.5",
@@ -2089,7 +2406,7 @@ impl Database {
                 "0",
             ),
             ("magistral-medium", "Magistral Medium", "2", "5", "0", "0"),
-            // Cohere 系列
+            // Cohere family.
             ("command-a", "Cohere Command A", "2.50", "10", "0", "0"),
             (
                 "command-r-plus",
@@ -2100,7 +2417,7 @@ impl Database {
                 "0",
             ),
             ("command-r", "Cohere Command R", "0.15", "0.60", "0", "0"),
-            // OpenAI 补充
+            // Additional OpenAI models.
             ("o3-pro", "OpenAI o3-pro", "20", "80", "0", "0"),
             ("o3-mini", "OpenAI o3-mini", "0.55", "2.20", "0.55", "0"),
             ("o1", "OpenAI o1", "15", "60", "7.50", "0"),
@@ -2115,9 +2432,15 @@ impl Database {
                 "INSERT OR IGNORE INTO model_pricing (
                     model_id, display_name, input_cost_per_million, output_cost_per_million,
                     cache_read_cost_per_million, cache_creation_cost_per_million
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                )
+                SELECT ?1, ?2, ?3, ?4, ?5, ?6
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM model_pricing_deletions WHERE model_id = ?1
+                )",
             )
-            .map_err(|e| AppError::Database(format!("准备模型定价语句失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to prepare model-pricing statement: {e}"))
+            })?;
         for (model_id, display_name, input, output, cache_read, cache_creation) in pricing_data {
             stmt.execute(rusqlite::params![
                 model_id,
@@ -2127,24 +2450,25 @@ impl Database {
                 cache_read,
                 cache_creation
             ])
-            .map_err(|e| AppError::Database(format!("插入模型定价失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to insert model pricing: {e}")))?;
         }
 
-        log::info!("已插入 {} 条默认模型定价数据", pricing_data.len());
+        log::info!("Inserted {} default model-pricing rows", pricing_data.len());
         Ok(())
     }
 
     fn repair_current_model_pricing(conn: &Connection) -> Result<(), AppError> {
         let pricing_fixes = [
-            // 2026-06-10 全量核价（厂商官方 list 价；CNY 按 ~7.14 折算）
-            // GLM 4.6/4.7：旧值是中转/OpenRouter 折扣价，统一到 Z.ai 官方（与 glm-5/5.1 一致）
+            // Full price audit on 2026-06-10 using official vendor list prices;
+            // CNY is converted at about 7.14 CNY/USD. GLM 4.6/4.7 replace old
+            // reseller/OpenRouter discounts with official Z.ai pricing, like GLM 5/5.1.
             (
                 "glm-4.7", "GLM-4.7", "0.6", "2.2", "0.11", "0", "0.39", "1.75", "0.04", "0",
             ),
             (
                 "glm-4.6", "GLM-4.6", "0.6", "2.2", "0.11", "0", "0.28", "1.11", "0.03", "0",
             ),
-            // Grok 4.20：xAI 已降价 2/6 → 1.25/2.50
+            // Grok 4.20: xAI reduced 2/6 pricing to 1.25/2.50.
             (
                 "grok-4.20-0309-reasoning",
                 "Grok 4.20 Reasoning",
@@ -2169,7 +2493,7 @@ impl Database {
                 "0.20",
                 "0",
             ),
-            // Kimi K2.5 官方 output 3.00
+            // Kimi K2.5 official output price is 3.00.
             (
                 "kimi-k2.5",
                 "Kimi K2.5",
@@ -2195,7 +2519,7 @@ impl Database {
                 "0.03",
                 "0",
             ),
-            // Mistral Devstral 2 output 0.90 → 2（与同表 devstral-medium 一致）
+            // Mistral Devstral 2 output changed from 0.90 to 2, matching devstral-medium.
             (
                 "devstral-2-2512",
                 "Devstral 2",
@@ -2208,7 +2532,8 @@ impl Database {
                 "0.04",
                 "0",
             ),
-            // Doubao Seed 2.0：lite 旧价贵 3-4 倍 + 全系补 cache 命中价
+            // Doubao Seed 2.0: correct a lite price that was 3-4 times too high and
+            // add cache-hit pricing for the entire family.
             (
                 "doubao-seed-2-0-lite",
                 "Doubao Seed 2.0 Lite",
@@ -2269,7 +2594,7 @@ impl Database {
                 "0",
                 "0",
             ),
-            // MiMo：5/27 永久降价，旧值是旧价
+            // MiMo: apply the permanent May 27 price reduction.
             (
                 "mimo-v2-pro",
                 "MiMo V2 Pro",
@@ -2306,7 +2631,7 @@ impl Database {
                 "0",
                 "0",
             ),
-            // Qwen：官方"隐式缓存 = 输入 20%"补 cache 命中价
+            // Qwen: add official implicit-cache pricing at 20% of input price.
             (
                 "qwen3.6-plus",
                 "Qwen3.6 Plus",
@@ -2437,38 +2762,89 @@ impl Database {
                     old_cache_creation
                 ],
             )
-            .map_err(|e| AppError::Database(format!("修复模型 {model_id} 定价失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to repair pricing for {model_id}: {e}"))
+            })?;
         }
 
         Ok(())
     }
 
-    /// 确保模型定价表具备默认数据
+    /// Ensures the model-pricing table contains defaults.
     pub fn ensure_model_pricing_seeded(&self) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         Self::ensure_model_pricing_seeded_on_conn(&conn)
     }
 
+    /// Delete a pricing row and remember the deletion so built-in catalog
+    /// seeding cannot silently recreate it on the next read or launch.
+    pub fn delete_model_pricing_persistently(&self, model_id: &str) -> Result<(), AppError> {
+        let model_id = model_id.trim();
+        if model_id.is_empty() {
+            return Err(AppError::localized(
+                "usage.modelIdRequired",
+                "Cần có mã mô hình",
+                "Model ID is required",
+            ));
+        }
+
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(format!("Failed to begin pricing deletion: {e}")))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO model_pricing_deletions (model_id, deleted_at)
+             VALUES (?1, datetime('now'))",
+            [model_id],
+        )
+        .map_err(|e| AppError::Database(format!("Failed to record pricing deletion: {e}")))?;
+        tx.execute("DELETE FROM model_pricing WHERE model_id = ?1", [model_id])
+            .map_err(|e| AppError::Database(format!("Failed to delete model pricing: {e}")))?;
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("Failed to commit pricing deletion: {e}")))
+    }
+
+    /// Explicitly replace the entire pricing catalog with the application
+    /// defaults. This is intentionally separate from deleting one row because
+    /// it also discards custom rows and edits.
+    pub fn reset_model_pricing_to_defaults(&self) -> Result<(), AppError> {
+        let mut conn = lock_conn!(self.conn);
+        let tx = conn
+            .transaction()
+            .map_err(|e| AppError::Database(format!("Failed to begin pricing reset: {e}")))?;
+        tx.execute("DELETE FROM model_pricing", [])
+            .map_err(|e| AppError::Database(format!("Failed to clear model pricing: {e}")))?;
+        tx.execute("DELETE FROM model_pricing_deletions", [])
+            .map_err(|e| AppError::Database(format!("Failed to clear pricing deletions: {e}")))?;
+        Self::seed_model_pricing(&tx)?;
+        Self::repair_current_model_pricing(&tx)?;
+        tx.commit()
+            .map_err(|e| AppError::Database(format!("Failed to commit pricing reset: {e}")))
+    }
+
     fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
-        // 每次启动都执行 INSERT OR IGNORE，增量追加新模型；仅修复仍等于旧内置值的定价。
+        // Run INSERT OR IGNORE at every startup to add new models incrementally;
+        // repair only prices that still equal old built-in values.
         Self::seed_model_pricing(conn)?;
         Self::repair_current_model_pricing(conn)
     }
 
-    // --- 辅助方法 ---
+    // Helper methods.
 
     pub(crate) fn get_user_version(conn: &Connection) -> Result<i32, AppError> {
         conn.query_row("PRAGMA user_version;", [], |row| row.get(0))
-            .map_err(|e| AppError::Database(format!("读取 user_version 失败: {e}")))
+            .map_err(|e| AppError::Database(format!("Failed to read user_version: {e}")))
     }
 
     pub(crate) fn set_user_version(conn: &Connection, version: i32) -> Result<(), AppError> {
         if version < 0 {
-            return Err(AppError::Database("user_version 不能为负数".to_string()));
+            return Err(AppError::Database(
+                "user_version cannot be negative".to_string(),
+            ));
         }
         let sql = format!("PRAGMA user_version = {version};");
         conn.execute(&sql, [])
-            .map_err(|e| AppError::Database(format!("写入 user_version 失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to write user_version: {e}")))?;
         Ok(())
     }
 
@@ -2485,7 +2861,9 @@ impl Database {
                  ON proxy_request_logs(app_type, created_at DESC)",
                 [],
             )
-            .map_err(|e| AppError::Database(format!("创建使用量应用时间索引失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to create usage app-time index: {e}"))
+            })?;
         }
 
         let required_columns = [
@@ -2504,11 +2882,15 @@ impl Database {
         }
 
         conn.execute("DROP INDEX IF EXISTS idx_request_logs_dedup_lookup", [])
-            .map_err(|e| AppError::Database(format!("删除旧使用量去重索引失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "Failed to drop legacy usage-deduplication index: {e}"
+                ))
+            })?;
 
-        // 查询层为了兼容历史 NULL data_source 行，会使用
-        // COALESCE(data_source, 'proxy')。普通 data_source 索引无法匹配该表达式，
-        // 会让跨源去重子查询退化成大量扫描；表达式索引让 SQLite 能按同一表达式查找。
+        // Queries use COALESCE(data_source, 'proxy') for historical NULL rows. A
+        // plain data_source index cannot match that expression, causing broad scans
+        // during cross-source deduplication. An expression index lets SQLite use it.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_request_logs_dedup_lookup_expr
              ON proxy_request_logs(app_type, COALESCE(data_source, 'proxy'), input_tokens,
@@ -2516,35 +2898,39 @@ impl Database {
                                    cache_creation_tokens)",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建使用量去重表达式索引失败: {e}")))?;
+        .map_err(|e| {
+            AppError::Database(format!(
+                "Failed to create usage-deduplication expression index: {e}"
+            ))
+        })?;
         Ok(())
     }
 
     fn validate_identifier(s: &str, kind: &str) -> Result<(), AppError> {
         if s.is_empty() {
-            return Err(AppError::Database(format!("{kind} 不能为空")));
+            return Err(AppError::Database(format!("{kind} cannot be empty")));
         }
         if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return Err(AppError::Database(format!(
-                "非法{kind}: {s}，仅允许字母、数字和下划线"
+                "Invalid {kind}: {s}; only letters, digits, and underscores are allowed"
             )));
         }
         Ok(())
     }
 
     pub(crate) fn table_exists(conn: &Connection, table: &str) -> Result<bool, AppError> {
-        Self::validate_identifier(table, "表名")?;
+        Self::validate_identifier(table, "table name")?;
 
         let mut stmt = conn
             .prepare("SELECT name FROM sqlite_master WHERE type='table'")
-            .map_err(|e| AppError::Database(format!("读取表名失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to read table name: {e}")))?;
         let mut rows = stmt
             .query([])
-            .map_err(|e| AppError::Database(format!("查询表名失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to query table name: {e}")))?;
         while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
             let name: String = row
                 .get(0)
-                .map_err(|e| AppError::Database(format!("解析表名失败: {e}")))?;
+                .map_err(|e| AppError::Database(format!("Failed to parse table name: {e}")))?;
             if name.eq_ignore_ascii_case(table) {
                 return Ok(true);
             }
@@ -2557,20 +2943,20 @@ impl Database {
         table: &str,
         column: &str,
     ) -> Result<bool, AppError> {
-        Self::validate_identifier(table, "表名")?;
-        Self::validate_identifier(column, "列名")?;
+        Self::validate_identifier(table, "table name")?;
+        Self::validate_identifier(column, "column name")?;
 
         let sql = format!("PRAGMA table_info(\"{table}\");");
         let mut stmt = conn
             .prepare(&sql)
-            .map_err(|e| AppError::Database(format!("读取表结构失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to read table schema: {e}")))?;
         let mut rows = stmt
             .query([])
-            .map_err(|e| AppError::Database(format!("查询表结构失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to query table schema: {e}")))?;
         while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
             let name: String = row
                 .get(1)
-                .map_err(|e| AppError::Database(format!("读取列名失败: {e}")))?;
+                .map_err(|e| AppError::Database(format!("Failed to read column name: {e}")))?;
             if name.eq_ignore_ascii_case(column) {
                 return Ok(true);
             }
@@ -2584,12 +2970,12 @@ impl Database {
         column: &str,
         definition: &str,
     ) -> Result<bool, AppError> {
-        Self::validate_identifier(table, "表名")?;
-        Self::validate_identifier(column, "列名")?;
+        Self::validate_identifier(table, "table name")?;
+        Self::validate_identifier(column, "column name")?;
 
         if !Self::table_exists(conn, table)? {
             return Err(AppError::Database(format!(
-                "表 {table} 不存在，无法添加列 {column}"
+                "Table {table} does not exist; cannot add column {column}"
             )));
         }
         if Self::has_column(conn, table, column)? {
@@ -2597,9 +2983,38 @@ impl Database {
         }
 
         let sql = format!("ALTER TABLE \"{table}\" ADD COLUMN \"{column}\" {definition};");
-        conn.execute(&sql, [])
-            .map_err(|e| AppError::Database(format!("为表 {table} 添加列 {column} 失败: {e}")))?;
-        log::info!("已为表 {table} 添加缺失列 {column}");
+        conn.execute(&sql, []).map_err(|e| {
+            AppError::Database(format!(
+                "Failed to add column {column} to table {table}: {e}"
+            ))
+        })?;
+        log::info!("Added missing column {column} to table {table}");
         Ok(true)
+    }
+
+    fn backfill_proxy_request_duration_ms(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "proxy_request_logs")?
+            || !Self::has_column(conn, "proxy_request_logs", "duration_ms")?
+            || !Self::has_column(conn, "proxy_request_logs", "latency_ms")?
+        {
+            return Ok(());
+        }
+
+        let updated = conn
+            .execute(
+                "UPDATE proxy_request_logs
+                 SET duration_ms = latency_ms
+                 WHERE duration_ms IS NULL AND latency_ms IS NOT NULL",
+                [],
+            )
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "Failed to backfill proxy request duration_ms from latency_ms: {e}"
+                ))
+            })?;
+        if updated > 0 {
+            log::info!("Backfilled duration_ms for {updated} proxy request log rows");
+        }
+        Ok(())
     }
 }

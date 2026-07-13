@@ -5,7 +5,7 @@ export interface ProxyConfig {
   request_timeout: number;
   enable_logging: boolean;
   live_takeover_active?: boolean;
-  // 超时配置
+  // Timeout configuration.
   streaming_first_byte_timeout: number;
   streaming_idle_timeout: number;
   non_streaming_timeout: number;
@@ -62,7 +62,7 @@ export interface ProviderHealth {
   updated_at: string;
 }
 
-// 熔断器相关类型
+// Circuit-breaker types.
 export interface CircuitBreakerConfig {
   failureThreshold: number;
   successThreshold: number;
@@ -81,7 +81,7 @@ export interface CircuitBreakerStats {
   failedRequests: number;
 }
 
-// 供应商健康状态枚举
+// Provider health states.
 export enum ProviderHealthStatus {
   Healthy = "healthy",
   Degraded = "degraded",
@@ -89,7 +89,7 @@ export enum ProviderHealthStatus {
   Unknown = "unknown",
 }
 
-// 扩展 ProviderHealth 以包含前端计算的状态
+// ProviderHealth plus UI-derived state.
 export interface ProviderHealthWithStatus extends ProviderHealth {
   status: ProviderHealthStatus;
   circuitState?: CircuitState;
@@ -107,7 +107,7 @@ export interface ProxyUsageRecord {
   timestamp: string;
 }
 
-// 故障转移队列条目
+// Failover queue entry.
 export interface FailoverQueueItem {
   providerId: string;
   providerName: string;
@@ -115,7 +115,7 @@ export interface FailoverQueueItem {
   sortIndex?: number;
 }
 
-// 全局代理配置（统一字段，三行镜像）
+// Global proxy configuration shared across the three mirrored routes.
 export interface GlobalProxyConfig {
   proxyEnabled: boolean;
   listenAddress: string;
@@ -123,7 +123,7 @@ export interface GlobalProxyConfig {
   enableLogging: boolean;
 }
 
-// 应用级代理配置（每个 app 独立）
+// Per-application proxy configuration.
 export interface AppProxyConfig {
   appType: string;
   enabled: boolean;

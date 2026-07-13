@@ -23,6 +23,7 @@ mod mcp;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+mod project_links;
 mod prompt;
 mod prompt_files;
 mod provider;
@@ -80,13 +81,13 @@ fn set_windows_app_user_model_id(app: &tauri::AppHandle) {
     };
 
     if result < 0 {
-        log::warn!("设置 Windows AppUserModelID 失败: 0x{result:08X}");
+        log::warn!("Failed to set Windows AppUserModelID: 0x{result:08X}");
     } else {
-        log::debug!("Windows AppUserModelID 已设置为 {app_id}");
+        log::debug!("Windows AppUserModelID set to {app_id}");
     }
 }
 
-fn redact_url_for_log(url_str: &str) -> String {
+pub(crate) fn redact_url_for_log(url_str: &str) -> String {
     match url::Url::parse(url_str) {
         Ok(url) => {
             let mut output = format!("{}://", url.scheme());
@@ -117,24 +118,79 @@ fn redact_url_for_log(url_str: &str) -> String {
     }
 }
 
-/// 统一处理 nexus:// 深链接 URL
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeepLinkErrorPayload {
+    error: String,
+    context: String,
+}
+
+fn deep_link_error_payload(url_str: &str, error: String) -> DeepLinkErrorPayload {
+    DeepLinkErrorPayload {
+        error,
+        context: redact_url_for_log(url_str),
+    }
+}
+
+fn is_supported_deeplink_url(url: &str) -> bool {
+    url.starts_with("nexus://") || url.starts_with("ccswitch://")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_deep_link_handler_needs_registration(contents: Option<&str>) -> bool {
+    let Some(contents) = contents else {
+        return true;
+    };
+
+    !["x-scheme-handler/nexus", "x-scheme-handler/ccswitch"]
+        .iter()
+        .all(|scheme| {
+            contents
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("MimeType="))
+                .flat_map(|value| value.split(';'))
+                .any(|mime_type| mime_type == *scheme)
+        })
+}
+
+/// Bring the main window back to a user-visible, focused state.
+pub(crate) fn present_main_window(app: &tauri::AppHandle, reason: &str) {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "windows")]
+        {
+            let _ = window.set_skip_taskbar(false);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            tray::apply_tray_policy(app, true);
+        }
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        #[cfg(target_os = "linux")]
+        {
+            linux_fix::nudge_main_window(window.clone());
+        }
+        log::info!("Main window presented: {reason}");
+    }
+}
+
+/// Handle a Nexus or legacy CC Switch deep-link URL through the shared path.
 ///
-/// - 解析 URL
-/// - 向前端发射 `deeplink-import` / `deeplink-error` 事件
-/// - 可选：在成功时聚焦主窗口
+/// Parses the URL, emits `deeplink-import` or `deeplink-error` to the frontend,
+/// and optionally focuses the main window after success.
 fn handle_deeplink_url(
     app: &tauri::AppHandle,
     url_str: &str,
     focus_main_window: bool,
     source: &str,
 ) -> bool {
-    if !url_str.starts_with("nexus://") {
+    if !is_supported_deeplink_url(url_str) {
         return false;
     }
 
     let redacted_url = redact_url_for_log(url_str);
     log::info!("✓ Deep link URL detected from {source}: {redacted_url}");
-    log::debug!("Deep link URL (raw) from {source}: {url_str}");
 
     match crate::deeplink::parse_deeplink_url(url_str) {
         Ok(request) => {
@@ -152,16 +208,7 @@ fn handle_deeplink_url(
             }
 
             if focus_main_window {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.unminimize();
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    #[cfg(target_os = "linux")]
-                    {
-                        linux_fix::nudge_main_window(window.clone());
-                    }
-                    log::info!("✓ Window shown and focused");
-                }
+                present_main_window(app, "deep link");
             }
         }
         Err(e) => {
@@ -169,10 +216,7 @@ fn handle_deeplink_url(
 
             if let Err(emit_err) = app.emit(
                 "deeplink-error",
-                serde_json::json!({
-                    "url": url_str,
-                    "error": e.to_string()
-                }),
+                deep_link_error_payload(url_str, e.to_string()),
             ) {
                 log::error!("✗ Failed to emit deeplink-error event: {emit_err}");
             }
@@ -182,7 +226,7 @@ fn handle_deeplink_url(
     true
 }
 
-/// 更新托盘菜单的Tauri命令
+/// Tauri command that refreshes the tray menu.
 #[tauri::command]
 async fn update_tray_menu(
     app: tauri::AppHandle,
@@ -192,13 +236,13 @@ async fn update_tray_menu(
         Ok(new_menu) => {
             if let Some(tray) = app.tray_by_id(tray::TRAY_ID) {
                 tray.set_menu(Some(new_menu))
-                    .map_err(|e| format!("更新托盘菜单失败: {e}"))?;
+                    .map_err(|e| format!("Failed to update the tray menu: {e}"))?;
                 return Ok(true);
             }
             Ok(false)
         }
         Err(err) => {
-            log::error!("创建托盘菜单失败: {err}");
+            log::error!("Failed to create the tray menu: {err}");
             Ok(false)
         }
     }
@@ -219,7 +263,8 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
+    // Install the panic hook, writing crashes to <app_config_dir>/crash.log
+    // (default ~/.cc-switch/crash.log).
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -235,7 +280,7 @@ pub fn run() {
 
             if crate::lightweight::is_lightweight_mode() {
                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app) {
-                    log::error!("退出轻量模式重建窗口失败: {e}");
+                    log::error!("Failed to recreate the window when leaving lightweight mode: {e}");
                 }
             }
 
@@ -253,25 +298,18 @@ pub fn run() {
             }
 
             // Show and focus window regardless
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-                #[cfg(target_os = "linux")]
-                {
-                    linux_fix::nudge_main_window(window.clone());
-                }
-            }
+            present_main_window(app, "single-instance activation");
         }));
     }
 
     let builder = builder
-        // 注册 deep-link 插件（处理 macOS AppleEvent 和其他平台的深链接）
+        // Register the deep-link plugin for macOS AppleEvents and other platforms.
         .plugin(tauri_plugin_deep_link::init())
-        // 拦截窗口关闭：根据设置决定是否最小化到托盘
+        // Intercept window close and apply the configured minimize-to-tray behavior.
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 数据库版本过新的恢复模式下没有托盘可唤回，关闭即退出，避免应用隐身后台
+                // Database-too-new recovery has no tray entry; close exits so the app
+                // cannot remain invisibly in the background.
                 let in_db_recovery = crate::init_status::get_init_error()
                     .map(|p| p.kind.as_deref() == Some("db_version_too_new"))
                     .unwrap_or(false);
@@ -312,41 +350,30 @@ pub fn run() {
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
 
-            // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
+            // Load Store overrides before resolving paths for logs, database, and other data.
             app_store::refresh_app_config_dir_override(app.handle());
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
 
-            // 注册 Updater 插件（桌面端）
-            #[cfg(desktop)]
-            {
-                if let Err(e) = app
-                    .handle()
-                    .plugin(tauri_plugin_updater::Builder::new().build())
-                {
-                    // 若配置不完整（如缺少 pubkey），跳过 Updater 而不中断应用
-                    log::warn!("初始化 Updater 插件失败，已跳过：{e}");
-                }
-            }
-            // 初始化日志（单文件输出到 <app_config_dir>/logs/nexus-composer.log）
+            // Initialize single-file logging at <app_config_dir>/logs/nexus-composer.log.
             {
                 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
                 let log_dir = panic_hook::get_log_dir();
 
-                // 确保日志目录存在
+                // Ensure the log directory exists.
                 if let Err(e) = std::fs::create_dir_all(&log_dir) {
-                    eprintln!("创建日志目录失败: {e}");
+                    eprintln!("Failed to create the log directory: {e}");
                 }
 
-                // 启动时删除旧日志文件，实现单文件覆盖效果
+                // Delete the previous log on startup for single-file replacement.
                 let log_file_path = log_dir.join("nexus-composer.log");
                 let _ = std::fs::remove_file(&log_file_path);
 
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
-                        // 初始化为 Trace，允许后续通过 log::set_max_level() 动态调整级别
+                        // Start at Trace so log::set_max_level() can adjust it later.
                         .level(log::LevelFilter::Trace)
                         .targets([
                             Target::new(TargetKind::Stdout),
@@ -355,53 +382,52 @@ pub fn run() {
                                 file_name: Some("nexus-composer".into()),
                             }),
                         ])
-                        // 单文件模式：启动时删除旧文件，达到大小时轮转
-                        // 注意：KeepSome(n) 内部会做 n-2 运算，n=1 会导致 usize 下溢
-                        // KeepSome(2) 是最小安全值，表示不保留轮转文件
+                        // Rotate at the size limit after deleting the old startup file.
+                        // KeepSome computes n - 2, so 2 is the minimum safe value and
+                        // represents retaining no rotated files.
                         .rotation_strategy(RotationStrategy::KeepSome(2))
-                        // 单文件大小限制 1GB
+                        // Limit the single file to 1 GiB.
                         .max_file_size(1024 * 1024 * 1024)
                         .timezone_strategy(TimezoneStrategy::UseLocal)
                         .build(),
                 )?;
             }
 
-            // 注入 AppHandle 给 usage_events，让无 AppHandle 持有的写日志路径
-            // 也能向前端推送 `usage-log-recorded`。
-            // 放在日志系统初始化之后，确保 init 的日志能正常输出。
+            // Inject AppHandle into usage_events after logging starts, enabling write
+            // paths without their own handle to emit `usage-log-recorded`.
             usage_events::init(app.handle().clone());
 
-            // 初始化数据库
+            // Initialize the database.
             let app_config_dir = crate::config::get_app_config_dir();
             let db_path = app_config_dir.join("cc-switch.db");
             let json_path = app_config_dir.join("config.json");
 
-            // 检查是否需要从 config.json 迁移到 SQLite
+            // Determine whether config.json must migrate to SQLite.
             let has_json = json_path.exists();
             let has_db = db_path.exists();
 
-            // 如果需要迁移，先验证 config.json 是否可以加载（在创建数据库之前）
-            // 这样如果加载失败用户选择退出，数据库文件还没被创建，下次可以正常重试
+            // Validate config.json before creating the database. If loading fails and
+            // the user exits, no database is left behind and the next launch can retry.
             let migration_config = if !has_db && has_json {
-                log::info!("检测到旧版配置文件，验证配置文件...");
+                log::info!("Detected legacy configuration; validating it");
 
-                // 循环：支持用户重试加载配置文件
+                // Loop so the user can retry loading the file.
                 loop {
                     match crate::app_config::MultiAppConfig::load() {
                         Ok(config) => {
-                            log::info!("✓ 配置文件加载成功");
+                            log::info!("Configuration file loaded successfully");
                             break Some(config);
                         }
                         Err(e) => {
-                            log::error!("加载旧配置文件失败: {e}");
-                            // 弹出系统对话框让用户选择
+                            log::error!("Failed to load legacy configuration: {e}");
+                            // Ask the user through a system dialog.
                             if !show_migration_error_dialog(app.handle(), &e.to_string()) {
-                                // 用户选择退出（此时数据库还没创建，下次启动可以重试）
-                                log::info!("用户选择退出程序");
+                                // The database does not exist yet, so a later launch can retry.
+                                log::info!("User chose to exit");
                                 std::process::exit(1);
                             }
-                            // 用户选择重试，继续循环
-                            log::info!("用户选择重试加载配置文件");
+                            // Continue the loop after Retry.
+                            log::info!("User chose to retry loading configuration");
                         }
                     }
                 }
@@ -409,37 +435,34 @@ pub fn run() {
                 None
             };
 
-            // 现在创建数据库（包含 Schema 迁移）
+            // Create the database and run schema migrations.
             //
-            // 说明：从 v3.8.* 升级的用户通常会走到这里的 SQLite schema 迁移，
-            // 若迁移失败（数据库损坏/权限不足/user_version 过新等），需要给用户明确提示，
-            // 否则表现可能只是“应用打不开/闪退”。
+            // v3.8.* upgrades usually enter SQLite schema migration here. Surface a
+            // clear error for corruption, permissions, or a newer user_version rather
+            // than appearing to crash or fail to open.
             //
-            // 预检：数据库版本过新时，必须先于任何 schema 写操作（create_tables 内含
-            // DROP/ALTER 等 DDL）进入恢复界面，避免旧应用对读不懂的更新版 DB 落写。
+            // Preflight a newer database before create_tables performs any DROP/ALTER
+            // DDL, preventing this older app from writing a schema it cannot understand.
             match crate::database::Database::stored_user_version_exceeds_supported(&db_path) {
                 Ok(Some(version)) => {
-                    log::warn!("数据库版本过新（v{version}），引导用户在应用内升级应用");
+                    log::warn!("Database version v{version} is too new; directing the user to upgrade");
                     crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
                         path: db_path.display().to_string(),
                         error: format!(
-                            "数据库版本过新（{version}），当前应用仅支持 {}，请升级应用后再尝试。",
+                            "Database version {version} is newer than this app supports ({}). Upgrade the app and try again.",
                             crate::database::SCHEMA_VERSION
                         ),
                         kind: Some("db_version_too_new".to_string()),
                         db_version: Some(version),
                         supported_version: Some(crate::database::SCHEMA_VERSION),
                     });
-                    // 主窗口默认 visible:false，恢复界面必须强制显示
-                    if let Some(window) = app.get_webview_window("main") {
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
+                    // The main window starts hidden, so force the recovery UI visible.
+                    present_main_window(app.handle(), "database recovery");
                     return Ok(());
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    log::warn!("预检数据库版本失败，继续正常初始化流程: {e}");
+                    log::warn!("Database-version preflight failed; continuing normal initialization: {e}");
                 }
             }
 
@@ -451,62 +474,71 @@ pub fn run() {
 
                         if !show_database_init_error_dialog(app.handle(), &db_path, &e.to_string())
                         {
-                            log::info!("用户选择退出程序");
+                            log::info!("User chose to exit");
                             std::process::exit(1);
                         }
 
-                        log::info!("用户选择重试初始化数据库");
+                        log::info!("User chose to retry database initialization");
                     }
                 }
             };
 
-            // 如果有预加载的配置，执行迁移
+            // Migrate any preloaded configuration.
             if let Some(config) = migration_config {
-                log::info!("开始执行数据迁移...");
+                log::info!("Starting data migration");
 
                 match db.migrate_from_json(&config) {
                     Ok(_) => {
-                        log::info!("✓ 配置迁移成功");
-                        // 标记迁移成功，供前端显示 Toast
+                        log::info!("Configuration migration succeeded");
+                        // Expose success for a frontend toast.
                         crate::init_status::set_migration_success();
-                        // 归档旧配置文件（重命名而非删除，便于用户恢复）
+                        // Archive rather than delete the legacy file so it can be recovered.
                         let archive_path = json_path.with_extension("json.migrated");
                         if let Err(e) = std::fs::rename(&json_path, &archive_path) {
-                            log::warn!("归档旧配置文件失败: {e}");
+                            log::warn!("Failed to archive the legacy configuration file: {e}");
                         } else {
-                            log::info!("✓ 旧配置已归档为 config.json.migrated");
+                            log::info!("Legacy configuration archived as config.json.migrated");
                         }
                     }
                     Err(e) => {
-                        // 配置加载成功但迁移失败的情况极少（磁盘满等），仅记录日志
-                        log::error!("配置迁移失败: {e}，将从现有配置导入");
+                        // A migration failure after successful loading is rare, such as
+                        // a full disk; log it and continue importing existing configuration.
+                        log::error!("Configuration migration failed: {e}; importing from existing configuration");
                     }
                 }
             }
 
             let app_state = AppState::new(db);
 
-            // 设置 AppHandle 用于代理故障转移时的 UI 更新
+            match app_state.db.normalize_legacy_nexus_provider_names() {
+                Ok(count) if count > 0 => {
+                    log::info!("Normalized {count} legacy Nexus GLM-5.2 provider name(s)");
+                }
+                Ok(_) => {}
+                Err(e) => log::warn!("Failed to normalize legacy Nexus provider names: {e}"),
+            }
+
+            // Store AppHandle for UI updates during proxy failover.
             app_state.proxy_service.set_app_handle(app.handle().clone());
 
             // ============================================================
-            // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
+            // Evaluate imports per table so one data class cannot block another.
             // ============================================================
 
-            // 1. 初始化默认 Skills 仓库（已有内置检查：表非空则跳过）
+            // 1. Initialize default Skill repositories; the helper skips a non-empty table.
             match app_state.db.init_default_skill_repos() {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Initialized {count} default skill repositories");
                 }
-                Ok(_) => {} // 表非空，静默跳过
+                Ok(_) => {} // Silently skip a non-empty table.
                 Err(e) => log::warn!("✗ Failed to initialize default skill repos: {e}"),
             }
 
-            // 1.1. Skills 统一管理迁移：当数据库迁移到 v3 结构后，自动从各应用目录导入到 SSOT
-            // 触发条件由 schema 迁移设置 settings.skills_ssot_migration_pending = true 控制。
+            // 1.1. After schema v3 migration, import Skills from application
+            // directories into the SSOT when skills_ssot_migration_pending is true.
             match app_state.db.get_setting("skills_ssot_migration_pending") {
                 Ok(Some(flag)) if flag == "true" || flag == "1" => {
-                    // 安全保护：如果用户已经有 v3 结构的 Skills 数据，就不要自动清空重建。
+                    // Never clear and rebuild when the user already has v3 Skill data.
                     let has_existing = app_state
                         .db
                         .get_all_installed_skills()
@@ -534,23 +566,23 @@ pub fn run() {
                             Err(e) => {
                                 log::warn!("✗ Failed to auto import legacy skills to SSOT: {e}");
                                 crate::init_status::set_skills_migration_error(e.to_string());
-                                // 保留 pending 标志，方便下次启动重试
+                                // Retain the pending flag so the next launch can retry.
                             }
                         }
                     }
                 }
-                Ok(_) => {} // 未开启迁移标志，静默跳过
+                Ok(_) => {} // Silently skip when migration is not pending.
                 Err(e) => log::warn!("✗ Failed to read skills migration flag: {e}"),
             }
 
-            // 1.5. 自动导入 live 配置 + seed 官方预设供应商（Claude / Codex / Gemini）
+            // 1.5. Import live configuration and seed official Claude/Codex/Gemini presets.
             //
-            // 先 import 后 seed 是有意为之：先把用户手动配置的 settings.json / auth.json / .env
-            // 落成 "default" provider 设为 current，再追加官方预设（is_current=false）。
-            // 这样用户切到官方预设时，回填机制会保护原 live 配置不丢失。
+            // Import before seeding intentionally captures user-managed settings.json,
+            // auth.json, or .env as the current "default" provider, then appends official
+            // presets as non-current. Backfill protects the original live data on switch.
             //
-            // 捕获首次运行快照：所有全新装用户都会看到欢迎弹窗介绍 Nexus Composer 的工作方式。
-            // 读失败时默认不弹，宁可漏弹也不要因为故障打扰用户。
+            // Capture first-launch state so new users see the Nexus Composer welcome
+            // dialog. On read failure, omit it rather than disrupting the user.
             let first_run_already_confirmed = crate::settings::get_settings()
                 .first_run_notice_confirmed
                 .unwrap_or(false);
@@ -641,8 +673,9 @@ pub fn run() {
                         }
                     }
 
-                    // 统一会话开关的官方历史迁移：开关开启但上次未完成（如文件被占用
-                    // 中途失败）时在启动期重试；函数内部自门控，开关关闭时直接跳过。
+                    // Retry incomplete official-history migration at startup when
+                    // unified sessions remain enabled, such as after a locked file.
+                    // The function gates itself and skips when the toggle is off.
                     match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
                         Ok(outcome) => {
                             if let Some(reason) = outcome.skipped_reason {
@@ -662,21 +695,21 @@ pub fn run() {
                 });
             }
 
-            // 老用户 / 已确认的路径由 `fresh_install_at_startup` 自行拦截，这里不做写入。
-            // 字段只由前端在用户点击"我知道了"时 save_settings 回写，语义是"用户显式确认过"。
+            // fresh_install_at_startup filters existing or acknowledged installations.
+            // Only the frontend writes acknowledgement after the user confirms it.
             if !first_run_already_confirmed && fresh_install_at_startup {
                 log::info!("✓ First-run welcome notice pending");
             }
 
-            // 1.6. 自动同步 OpenCode / OpenClaw 的 live providers 到数据库
+            // 1.6. Synchronize OpenCode/OpenClaw live providers into the database.
             //
-            // additive 模式（OpenCode / OpenClaw）的 import 函数本身按 id 幂等，
-            // 已有的 provider 会被跳过，所以每次启动都跑是安全的——既保证新装
-            // 用户开箱可见 live 中的供应商，也让外部修改的 live 文件能在重启
-            // 后同步到数据库（与之前依赖前端"导入当前配置"按钮手动触发不同）。
+            // Additive-mode import is idempotent by ID and skips existing providers,
+            // so running on every launch is safe. New installations see live providers
+            // immediately, while external live-file changes synchronize after restart
+            // without the old manual Import Current Configuration action.
             //
-            // 底层 read_*_config 在文件不存在时返回默认空配置，因此新装且无
-            // live 文件的用户走 Ok(0) 路径，不会产生错误日志噪音。
+            // read_*_config returns empty defaults for absent files, so a fresh
+            // installation without live data follows Ok(0) without noisy errors.
             match crate::services::provider::import_opencode_providers_from_live(&app_state) {
                 Ok(count) if count > 0 => {
                     log::info!("✓ Imported {count} OpenCode provider(s) from live config");
@@ -699,7 +732,7 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to import Hermes providers: {e}"),
             }
 
-            // 2. OMO 配置导入（当数据库中无 OMO provider 时，从本地文件导入）
+            // 2. Import local OMO configuration when no OMO provider exists in the database.
             {
                 let has_omo = app_state
                     .db
@@ -750,7 +783,7 @@ pub fn run() {
                 }
             }
 
-            // 3. 导入 MCP 服务器配置（表空时触发）
+            // 3. Import MCP servers when their table is empty.
             if app_state.db.is_mcp_table_empty().unwrap_or(false) {
                 log::info!("MCP table empty, importing from live configurations...");
 
@@ -795,7 +828,7 @@ pub fn run() {
                 }
             }
 
-            // 4. 导入提示词文件（表空时触发）
+            // 4. Import prompt files when their table is empty.
             if app_state.db.is_prompts_table_empty().unwrap_or(false) {
                 log::info!("Prompts table empty, importing from live configurations...");
 
@@ -820,29 +853,30 @@ pub fn run() {
                 }
             }
 
-            // 迁移旧的 app_config_dir 配置到 Store
+            // Migrate legacy app_config_dir configuration to Store.
             if let Err(e) = app_store::migrate_app_config_dir_from_settings(app.handle()) {
-                log::warn!("迁移 app_config_dir 失败: {e}");
+                log::warn!("Failed to migrate app_config_dir: {e}");
             }
 
-            // 启动阶段不再无条件保存,避免意外覆盖用户配置。
+            // Do not save unconditionally during startup; that could overwrite user data.
 
-            // 注册 deep-link URL 处理器（使用正确的 DeepLinkExt API）
+            // Register the deep-link URL handler through DeepLinkExt.
             log::info!("=== Registering deep-link URL handler ===");
 
-            // Linux 和 Windows 调试模式需要显式注册
+            // Linux and Windows debug builds require explicit registration.
             #[cfg(any(target_os = "linux", all(debug_assertions, windows)))]
             {
                 #[cfg(target_os = "linux")]
                 {
-                    // Use Tauri's path API to get correct path (includes app identifier)
-                    // tauri-plugin-deep-link writes to: ~/.local/share/com.nexuscomposer.desktop/applications/nexus-composer-handler.desktop
-                    // Only register if .desktop file doesn't exist to avoid overwriting user customizations
-                    let should_register = app
-                        .path()
-                        .data_dir()
-                        .map(|d| !d.join("applications/nexus-composer-handler.desktop").exists())
-                        .unwrap_or(true);
+                    // Tauri writes this handler beneath the app-specific data directory.
+                    // Existing Nexus installs may have a handler created before the legacy
+                    // ccswitch scheme was restored, so existence alone is insufficient.
+                    let should_register = app.path().data_dir().map_or(true, |data_dir| {
+                        let handler =
+                            data_dir.join("applications/nexus-composer-handler.desktop");
+                        let contents = std::fs::read_to_string(handler).ok();
+                        linux_deep_link_handler_needs_registration(contents.as_deref())
+                    });
 
                     if should_register {
                         if let Err(e) = app.deep_link().register_all() {
@@ -851,7 +885,7 @@ pub fn run() {
                             log::info!("✓ Deep link schemes registered (Linux)");
                         }
                     } else {
-                        log::info!("⊘ Deep link handler already exists, skipping registration");
+                        log::info!("⊘ Deep link handler already registers all configured schemes");
                     }
                 }
 
@@ -865,7 +899,7 @@ pub fn run() {
                 }
             }
 
-            // 注册 URL 处理回调（所有平台通用）
+            // Register the cross-platform URL callback.
             app.deep_link().on_open_url({
                 let app_handle = app.handle().clone();
                 move |event| {
@@ -875,7 +909,7 @@ pub fn run() {
 
                     if crate::lightweight::is_lightweight_mode() {
                         if let Err(e) = crate::lightweight::exit_lightweight_mode(&app_handle) {
-                            log::error!("退出轻量模式重建窗口失败: {e}");
+                            log::error!("Failed to recreate the window when leaving lightweight mode: {e}");
                         }
                     }
 
@@ -891,16 +925,15 @@ pub fn run() {
             });
             log::info!("✓ Deep-link URL handler registered");
 
-            // 创建动态托盘菜单
+            // Create the dynamic tray menu.
             let menu = tray::create_tray_menu(app.handle(), &app_state)?;
 
-            // 构建托盘
+            // Build the tray icon.
             let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("Nexus Composer") // 鼠标悬停提示
+                .tooltip("Nexus Composer") // Hover tooltip.
                 .on_tray_icon_event(|tray, event| match event {
-                    // 鼠标悬停/点击到托盘图标时，后台异步刷新用量缓存，
-                    // 让用户下一次（或快速打开菜单的那一刻）看到较新的数字。
-                    // refresh_all_usage_in_tray 内部有 10 秒防抖。
+                    // Refresh usage asynchronously on tray hover/click so the next
+                    // menu view has fresher values. The helper debounces for 10 seconds.
                     TrayIconEvent::Enter { .. } | TrayIconEvent::Click { .. } => {
                         let app = tray.app_handle().clone();
                         tauri::async_runtime::spawn(async move {
@@ -915,7 +948,7 @@ pub fn run() {
                 })
                 .show_menu_on_left_click(true);
 
-            // 使用平台对应的托盘图标（macOS 使用模板图标适配深浅色）
+            // Use the platform-specific tray icon; macOS uses a template for light/dark mode.
             #[cfg(target_os = "macos")]
             {
                 if let Some(icon) = macos_tray_icon() {
@@ -946,27 +979,27 @@ pub fn run() {
                 app_state.db.clone(),
                 app.handle().clone(),
             );
-            // 将同一个实例注入到全局状态，避免重复创建导致的不一致
+            // Store the same instance globally to avoid divergence from duplicates.
             app.manage(app_state);
 
-            // 从数据库加载日志配置并应用
+            // Load and apply logging configuration from the database.
             {
                 let db = &app.state::<AppState>().db;
                 if let Ok(log_config) = db.get_log_config() {
                     log::set_max_level(log_config.to_level_filter());
                     log::info!(
-                        "已加载日志配置: enabled={}, level={}",
+                        "Loaded logging configuration: enabled={}, level={}",
                         log_config.enabled,
                         log_config.level
                     );
                 }
             }
 
-            // 初始化 SkillService
+            // Initialize SkillService.
             let skill_service = SkillService::new();
             app.manage(commands::skill::SkillServiceState(Arc::new(skill_service)));
 
-            // 初始化 CopilotAuthManager
+            // Initialize CopilotAuthManager.
             {
                 use crate::proxy::providers::copilot_auth::CopilotAuthManager;
                 use commands::CopilotAuthState;
@@ -978,7 +1011,7 @@ pub fn run() {
                 log::info!("✓ CopilotAuthManager initialized");
             }
 
-            // 初始化 CodexOAuthManager (ChatGPT Plus/Pro 反代)
+            // Initialize CodexOAuthManager for ChatGPT Plus/Pro proxying.
             {
                 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
                 use commands::CodexOAuthState;
@@ -990,7 +1023,7 @@ pub fn run() {
                 log::info!("✓ CodexOAuthManager initialized");
             }
 
-            // 初始化全局出站代理 HTTP 客户端
+            // Initialize the global outbound-proxy HTTP client.
             {
                 let db = &app.state::<AppState>().db;
                 let proxy_url = db.get_global_proxy_url().ok().flatten();
@@ -1000,7 +1033,7 @@ pub fn run() {
                         "[GlobalProxy] [GP-005] Failed to initialize with saved config: {e}"
                     );
 
-                    // 清除无效的代理配置
+                    // Clear invalid proxy configuration.
                     if proxy_url.is_some() {
                         log::warn!(
                             "[GlobalProxy] [GP-006] Clearing invalid proxy config from database"
@@ -1012,7 +1045,7 @@ pub fn run() {
                         }
                     }
 
-                    // 使用直连模式重新初始化
+                    // Reinitialize in direct mode.
                     if let Err(fallback_err) = crate::proxy::http_client::init(None) {
                         log::error!(
                             "[GlobalProxy] [GP-008] Failed to initialize direct connection: {fallback_err}"
@@ -1021,34 +1054,34 @@ pub fn run() {
                 }
             }
 
-            // 异常退出恢复 + 代理状态自动恢复
+            // Recover from abnormal exit and restore proxy state.
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
 
-                // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
+                // Live backups may indicate takeover during the previous abnormal exit.
                 let has_backups = match state.db.has_any_live_backup().await {
                     Ok(v) => v,
                     Err(e) => {
-                        log::error!("检查 Live 备份失败: {e}");
+                        log::error!("Failed to inspect live backups: {e}");
                         false
                     }
                 };
-                // 检查 Live 配置是否仍处于被接管状态（包含占位符）
+                // Check whether live configuration still contains takeover placeholders.
                 let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
 
                 if has_backups || live_taken_over {
-                    log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
+                    log::warn!("Detected takeover residue from an abnormal exit; restoring live configuration");
                     if let Err(e) = state.proxy_service.recover_from_crash().await {
-                        log::error!("恢复 Live 配置失败: {e}");
+                        log::error!("Failed to restore live configuration: {e}");
                     } else {
-                        log::info!("Live 配置已恢复");
+                        log::info!("Live configuration restored");
                     }
                 }
 
                 initialize_common_config_snippets(&state);
 
-                // 检查 settings 表中的代理状态，自动恢复代理服务
+                // Restore proxy service from state recorded in settings.
                 restore_proxy_state_on_startup(&state).await;
 
                 // Periodic backup check (on startup)
@@ -1072,7 +1105,7 @@ pub fn run() {
                     }
                 });
 
-                // Session log usage sync: 启动时同步一次，之后每 60 秒检查
+                // Synchronize session-log usage at startup and every 60 seconds.
                 let db_for_session_sync = state.db.clone();
                 tauri::async_runtime::spawn(async move {
                     const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
@@ -1085,7 +1118,7 @@ pub fn run() {
 
                     let db = &db_for_session_sync;
 
-                    // 首次同步
+                    // Initial synchronization.
                     run_step(
                         "Usage cost startup backfill",
                         db.backfill_missing_usage_costs(),
@@ -1107,7 +1140,7 @@ pub fn run() {
                         crate::services::session_usage_opencode::sync_opencode_usage(db),
                     );
 
-                    // 定期同步
+                    // Periodic synchronization.
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                         SESSION_SYNC_INTERVAL_SECS,
                     ));
@@ -1134,7 +1167,7 @@ pub fn run() {
                 });
             });
 
-            // Linux: 禁用 WebKitGTK 硬件加速，防止 EGL 初始化失败导致白屏
+            // Linux: disable WebKitGTK acceleration to prevent a blank window after EGL failure.
             #[cfg(target_os = "linux")]
             {
                 if let Some(window) = app.get_webview_window("main") {
@@ -1143,39 +1176,30 @@ pub fn run() {
                         let wk_webview = webview.inner();
                         if let Some(settings) = WebViewExt::settings(&wk_webview) {
                             SettingsExt::set_hardware_acceleration_policy(&settings, HardwareAccelerationPolicy::Never);
-                            log::info!("已禁用 WebKitGTK 硬件加速");
+                            log::info!("Disabled WebKitGTK hardware acceleration");
                         }
                     });
                 }
             }
 
-            // 静默启动：根据设置决定是否显示主窗口
+            // Apply silent-startup settings to main-window visibility.
             let settings = crate::settings::get_settings();
             if let Some(window) = app.get_webview_window("main") {
-                // 在窗口首次显示前同步装饰状态，避免前端加载后再切换导致标题栏闪烁
-                // 仅 Linux 生效：解决 Wayland 下系统窗口按钮不可用的问题
+                // Synchronize decorations before first display to avoid title-bar
+                // flicker. This is Linux-only and fixes Wayland window controls.
                 #[cfg(target_os = "linux")]
                 let _ = window.set_decorations(!settings.use_app_window_controls);
                 if settings.silent_startup {
-                    // 静默启动模式：保持窗口隐藏
+                    // Silent startup keeps the window hidden.
                     let _ = window.hide();
                     #[cfg(target_os = "windows")]
                     let _ = window.set_skip_taskbar(true);
                     #[cfg(target_os = "macos")]
                     tray::apply_tray_policy(app.handle(), false);
-                    log::info!("静默启动模式：主窗口已隐藏");
+                    log::info!("Silent startup: main window hidden");
                 } else {
-                    // 正常启动模式：显示窗口
-                    let _ = window.show();
-                    log::info!("正常启动模式：主窗口已显示");
-
-                    // Linux: 解决首次启动 UI 无响应问题（Tauri #10746 + wry #637）。
-                    // 启动时 webview 未获取焦点 + surface 尺寸协商失败，导致点击无效。
-                    // 这里做 set_focus + 伪 resize，等价于无视觉版本的"最大化-还原"。
-                    #[cfg(target_os = "linux")]
-                    {
-                        linux_fix::nudge_main_window(window.clone());
-                    }
+                    // Normal startup shows the window.
+                    present_main_window(app.handle(), "normal startup");
                 }
             }
 
@@ -1226,9 +1250,6 @@ pub fn run() {
             commands::get_log_config,
             commands::set_log_config,
             commands::restart_app,
-            commands::install_update_and_restart,
-            commands::check_app_update_available,
-            commands::check_for_updates,
             commands::is_portable_mode,
             commands::copy_text_to_clipboard,
             commands::get_claude_plugin_status,
@@ -1362,6 +1383,7 @@ pub fn run() {
             commands::set_default_cost_multiplier,
             commands::get_pricing_model_source,
             commands::set_pricing_model_source,
+            commands::save_pricing_defaults,
             commands::is_proxy_running,
             commands::is_live_takeover_active,
             commands::switch_proxy_provider,
@@ -1389,6 +1411,7 @@ pub fn run() {
             commands::get_model_pricing,
             commands::update_model_pricing,
             commands::delete_model_pricing,
+            commands::reset_model_pricing_to_defaults,
             commands::check_provider_limits,
             // Session usage sync
             commands::sync_session_usage,
@@ -1484,6 +1507,7 @@ pub fn run() {
             commands::get_current_omo_slim_provider_id,
             commands::disable_current_omo_slim,
             // Workspace files (OpenClaw)
+            commands::get_openclaw_workspace_paths,
             commands::read_workspace_file,
             commands::write_workspace_file,
             // Daily memory files (OpenClaw workspace)
@@ -1503,100 +1527,109 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while running tauri application");
 
-    app.run(|app_handle, event| {
-        // 处理退出请求（所有平台）
+    let mut restart_requested = false;
+    app.run(move |app_handle, event| {
+        // Handle exit requests on every platform.
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             match classify_exit_request(*code) {
-                // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
-                // 此时应仅阻止退出、保持托盘后台运行。
+                // None is runtime-generated, such as after a hidden WebView is
+                // reclaimed and no window survives. Prevent exit and keep the tray alive.
                 ExitRequestAction::StayInTray => {
-                    log::info!("运行时触发退出请求（无存活窗口），阻止退出以保持托盘后台运行");
+                    log::info!("Runtime requested exit without a live window; keeping the tray process running");
                     api.prevent_exit();
                     return;
                 }
-                // code 为 RESTART_EXIT_CODE：app.restart() / 自更新 relaunch 发起的重启。
-                // 这条路径上 prevent_exit() 会被 Tauri 忽略，事件循环必定退出，随后由
-                // Tauri 在 RunEvent::Exit 后用新二进制 re-exec（macOS 会按更新后的
-                // Info.plist 解析可执行名）。
+                // RESTART_EXIT_CODE comes from app.restart().
+                // Tauri ignores prevent_exit here, exits the event loop, then re-execs
+                // after RunEvent::Exit (macOS resolves the executable via updated Info.plist).
                 //
-                // 绝不能复用下面的异步清理任务：该任务在 tokio 线程调 save_window_state，
-                // 持有 window-state 插件锁的同时向主线程查询窗口几何；而主线程此刻正在
-                // 退出事件循环，并在插件自带的 RunEvent::Exit 钩子里等待同一把锁——双方
-                // 互等造成进程永久卡死（更新已安装但应用冻结、不再重启，见 #3998）。
+                // Never reuse the asynchronous cleanup below. Its Tokio thread calls
+                // save_window_state, holding the plugin lock while querying geometry
+                // from the main thread. During event-loop exit, the plugin Exit hook
+                // waits for that lock, causing a permanent restart deadlock (#3998).
                 //
-                // 重启路径交还 Tauri 默认流程即可：
-                //   - 窗口状态：插件 Exit 钩子在主线程保存（同线程读取窗口几何，无死锁）
-                //   - 托盘图标：Tauri 内部 cleanup_before_exit 清理，正常走 Drop
-                //   - 代理/Live 配置：无需恢复，重启后新实例立即接管并恢复代理状态
-                //   - 100ms 落盘等待：重启前的 DB 写入均为命令驱动、此刻已完成，
-                //     与所有 Tauri 应用默认重启路径的行为一致，无需额外等待
+                // Let Tauri handle restart: the plugin saves window state on the main
+                // thread, normal Drop removes the tray icon, the new instance resumes
+                // proxy/live takeover, and command-driven database writes are already complete.
                 ExitRequestAction::DeferToTauriRestart => {
-                    log::info!("收到重启请求 (code={code:?})，交由 Tauri 默认重启流程 re-exec");
+                    restart_requested = true;
+                    log::info!("Received restart request (code={code:?}); delegating re-exec to Tauri");
                     return;
                 }
-                // 其它 Some(_)：用户主动调用 app.exit() 退出（如托盘菜单"退出"），
-                // 此时执行清理后退出。
+                // Other Some values are explicit app.exit(), such as Exit from the tray;
+                // perform cleanup before termination.
                 ExitRequestAction::CleanupAndExit => {}
             }
 
-            log::info!("收到用户主动退出请求 (code={code:?})，开始清理...");
+            log::info!("Received explicit user exit (code={code:?}); starting cleanup");
             api.prevent_exit();
 
             let app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
                 save_window_state_before_exit(&app_handle);
                 cleanup_before_exit(&app_handle).await;
-                // 先于 std::process::exit 显式移除托盘图标。
-                // 进程直接退出时 Tauri 运行时不走正常 Drop 流程，
-                // 不会向 Windows Shell 发送 NIM_DELETE，导致已退出的进程
-                // 注册的图标仍残留在系统托盘（鼠标悬停 Shell 才会重绘发现进程已死）。
+                // Remove the tray icon before std::process::exit. Direct termination
+                // bypasses Tauri Drop and Windows NIM_DELETE, leaving a stale icon until hover.
                 remove_tray_icon_before_exit(&app_handle);
-                log::info!("清理完成，退出应用");
+                log::info!("Cleanup complete; exiting application");
 
-                // 短暂等待确保所有 I/O 操作（如数据库写入）刷新到磁盘
+                // Briefly allow pending I/O, such as database writes, to flush.
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-                // 使用 std::process::exit 避免再次触发 ExitRequested
+                // Use std::process::exit to avoid another ExitRequested event.
                 std::process::exit(0);
             });
+            return;
+        }
+
+        // Native macOS application-menu, Cmd-Q, and Dock Quit can reach the
+        // final Exit event after an ExitRequested(None) even though we called
+        // prevent_exit above. That path bypasses the tray's controlled exit and
+        // must restore taken-over Live configs before Tauri tears down state.
+        // Restart remains intentionally untouched to avoid the window-state
+        // plugin deadlock documented in the restart branch above.
+        if let RunEvent::Exit = &event {
+            if should_run_final_exit_cleanup(restart_requested) {
+                log::info!("Final native exit detected; restoring managed Live configurations");
+                tauri::async_runtime::block_on(cleanup_before_exit(app_handle));
+            } else {
+                log::info!("Final restart exit detected; skipping Live configuration restoration");
+            }
             return;
         }
 
         #[cfg(target_os = "macos")]
         {
             match event {
-                // macOS 在 Dock 图标被点击并重新激活应用时会触发 Reopen 事件，这里手动恢复主窗口
+                // macOS emits Reopen when the Dock icon reactivates the app; restore the main window.
                 RunEvent::Reopen { .. } => {
                     if let Some(window) = app_handle.get_webview_window("main") {
-                        #[cfg(target_os = "windows")]
-                        {
-                            let _ = window.set_skip_taskbar(false);
-                        }
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        tray::apply_tray_policy(app_handle, true);
+                        drop(window);
+                        present_main_window(app_handle, "macOS reopen");
                     } else if crate::lightweight::is_lightweight_mode() {
                         if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle) {
-                            log::error!("退出轻量模式重建窗口失败: {e}");
+                            log::error!("Failed to recreate the window when leaving lightweight mode: {e}");
                         }
                     }
                 }
-                // 处理通过自定义 URL 协议触发的打开事件（例如 nexus://...）
+                // Handle Nexus and legacy CC Switch custom-URL events.
                 RunEvent::Opened { urls } => {
                     if let Some(url) = urls.first() {
                         let url_str = url.to_string();
-                        log::info!("RunEvent::Opened with URL: {url_str}");
+                        log::info!(
+                            "RunEvent::Opened with URL: {}",
+                            redact_url_for_log(&url_str)
+                        );
 
-                        if url_str.starts_with("nexus://") {
+                        if is_supported_deeplink_url(&url_str) {
                             if crate::lightweight::is_lightweight_mode() {
                                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
-                                    log::error!("退出轻量模式重建窗口失败: {e}");
+                                    log::error!("Failed to recreate the window when leaving lightweight mode: {e}");
                                 }
                             }
 
-                            // 解析并广播深链接事件，复用与 single_instance 相同的逻辑
+                            // Parse and broadcast through the same path as single_instance.
                             match crate::deeplink::parse_deeplink_url(&url_str) {
                                 Ok(request) => {
                                     log::info!(
@@ -1620,10 +1653,7 @@ pub fn run() {
 
                                     if let Err(emit_err) = app_handle.emit(
                                         "deeplink-error",
-                                        serde_json::json!({
-                                            "url": url_str,
-                                            "error": e.to_string()
-                                        }),
+                                        deep_link_error_payload(&url_str, e.to_string()),
                                     ) {
                                         log::error!(
                                             "Failed to emit deep link error event from RunEvent::Opened: {emit_err}"
@@ -1632,12 +1662,8 @@ pub fn run() {
                                 }
                             }
 
-                            // 确保主窗口可见
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                            // Ensure the main window is visible.
+                            present_main_window(app_handle, "opened URL");
                         }
                     }
                 }
@@ -1653,23 +1679,23 @@ pub fn run() {
 }
 
 // ============================================================
-// 应用退出清理
+// Application exit cleanup.
 // ============================================================
 
-/// 应用退出前的清理工作
+/// Clean up before application exit.
 ///
-/// 在应用退出前检查代理服务器状态，如果正在运行则停止代理并恢复 Live 配置。
-/// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
-/// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
+/// Stop a running proxy and restore live configuration so Claude Code, Codex, and
+/// Gemini are not left corrupted. stop_with_restore_keep_state preserves proxy
+/// state in settings for automatic restoration at the next launch.
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 
-        // 退出时也需要兜底：代理可能已崩溃/未运行，但 Live 接管残留仍在（占位符/备份）。
+        // Even if the proxy crashed or stopped, takeover placeholders/backups may remain.
         let has_backups = match state.db.has_any_live_backup().await {
             Ok(v) => v,
             Err(e) => {
-                log::error!("退出时检查 Live 备份失败: {e}");
+                log::error!("Failed to inspect live backups during exit: {e}");
                 false
             }
         };
@@ -1677,57 +1703,55 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
         let needs_restore = has_backups || live_taken_over;
 
         if needs_restore {
-            log::info!("检测到接管残留，开始恢复 Live 配置（保留代理状态）...");
-            // 使用 keep_state 版本，保留 settings 表中的代理状态
+            log::info!("Detected takeover residue; restoring live configuration while preserving proxy state");
+            // keep_state retains proxy state in settings.
             if let Err(e) = proxy_service.stop_with_restore_keep_state().await {
-                log::error!("退出时恢复 Live 配置失败: {e}");
+                log::error!("Failed to restore live configuration during exit: {e}");
             } else {
-                log::info!("已恢复 Live 配置（代理状态已保留，下次启动将自动恢复）");
+                log::info!("Restored live configuration; proxy state will resume on next launch");
             }
             return;
         }
 
-        // 非接管模式：代理在运行则仅停止代理
+        // Outside takeover mode, stop a running proxy without restoration.
         if proxy_service.is_running().await {
-            log::info!("检测到代理服务器正在运行，开始停止...");
+            log::info!("Detected a running proxy server; stopping it");
             if let Err(e) = proxy_service.stop().await {
-                log::error!("退出时停止代理失败: {e}");
+                log::error!("Failed to stop the proxy during exit: {e}");
             }
-            log::info!("代理服务器清理完成");
+            log::info!("Proxy server cleanup complete");
         }
     }
 }
 
-/// 主动从系统托盘移除托盘图标。
+/// Explicitly remove the icon from the system tray.
 ///
-/// `std::process::exit` 会绕过 Tauri 运行时，触发不了 `TrayIcon::drop()`，
-/// 也就不会向 Windows Shell 发 `NIM_DELETE`。结果是进程退出后托盘里
-/// 仍保留一个死图标的缓存占位（Shell 不会主动重绘，需要鼠标悬停才刷新）。
+/// `std::process::exit` bypasses `TrayIcon::drop()` and Windows `NIM_DELETE`,
+/// leaving a cached dead icon until the Shell repaints on hover.
 ///
-/// 通过 `set_visible(false)` 走 `WM_USER_HIDE_TRAYICON` 消息路径，
-/// 触发 tray-icon 内部的 `remove_tray_icon` → `Shell_NotifyIconW(NIM_DELETE)`，
-/// 在进程结束前干净地把图标摘掉。其它平台 `set_visible(false)` 也是
-/// 正常的隐藏/移除语义，作为跨平台兜底也安全。
+/// `set_visible(false)` follows `WM_USER_HIDE_TRAYICON` through tray-icon's
+/// remove_tray_icon to `Shell_NotifyIconW(NIM_DELETE)`, removing it before exit.
+/// The same call has safe hide/remove semantics on other platforms.
 pub(crate) fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
     if let Some(tray) = app_handle.tray_by_id(tray::TRAY_ID) {
         if let Err(e) = tray.set_visible(false) {
-            log::warn!("退出时移除托盘图标失败: {e}");
+            log::warn!("Failed to remove the tray icon during exit: {e}");
         } else {
-            log::info!("已显式从系统托盘移除图标");
+            log::info!("Explicitly removed the system-tray icon");
         }
     }
 }
 
 // ============================================================
-// 启动时恢复代理状态
+// Restore proxy state at startup.
 // ============================================================
 
-/// 启动时根据 proxy_config 表中的代理状态自动恢复代理服务
+/// Restore proxy service at startup from proxy_config state.
 ///
-/// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
-/// 则自动启动代理服务并接管对应应用的 Live 配置。
+/// If any application has proxy_config.enabled=true, start the proxy and take over
+/// that application's live configuration.
 async fn restore_proxy_state_on_startup(state: &store::AppState) {
-    // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
+    // Collect applications requiring takeover restoration from proxy_config.enabled.
     let mut apps_to_restore = Vec::new();
     for app_type in ["claude", "codex", "gemini"] {
         if let Ok(config) = state.db.get_proxy_config_for_app(app_type).await {
@@ -1738,13 +1762,13 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
     }
 
     if apps_to_restore.is_empty() {
-        log::debug!("启动时无需恢复代理状态");
+        log::debug!("No proxy state requires restoration at startup");
         return;
     }
 
-    log::info!("检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}");
+    log::info!("Previous proxy state requires restoration for: {apps_to_restore:?}");
 
-    // 逐个恢复接管状态
+    // Restore takeover state application by application.
     for app_type in apps_to_restore {
         match state
             .proxy_service
@@ -1752,17 +1776,17 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
             .await
         {
             Ok(()) => {
-                log::info!("✓ 已恢复 {app_type} 的代理接管状态");
+                log::info!("Restored proxy takeover for {app_type}");
             }
             Err(e) => {
-                log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
-                // 失败时清除该应用的状态，避免下次启动再次尝试
+                log::error!("Failed to restore proxy takeover for {app_type}: {e}");
+                // Clear failed state so the next launch does not repeat indefinitely.
                 if let Err(clear_err) = state
                     .proxy_service
                     .set_takeover_for_app(app_type, false)
                     .await
                 {
-                    log::error!("清除 {app_type} 代理状态失败: {clear_err}");
+                    log::error!("Failed to clear proxy state for {app_type}: {clear_err}");
                 }
             }
         }
@@ -1849,34 +1873,72 @@ fn initialize_common_config_snippets(state: &store::AppState) {
 }
 
 // ============================================================
-// 迁移错误对话框辅助函数
+// Migration-error dialog helpers.
 // ============================================================
 
-/// 检测是否为中文环境
-fn is_chinese_locale() -> bool {
-    std::env::var("LANG")
-        .or_else(|_| std::env::var("LC_ALL"))
-        .or_else(|_| std::env::var("LC_MESSAGES"))
-        .map(|lang| lang.starts_with("zh"))
-        .unwrap_or(false)
+fn locale_language_code(locale: &str) -> &str {
+    locale
+        .trim()
+        .split(['_', '-', '.', '@'])
+        .next()
+        .unwrap_or_default()
 }
 
-/// 显示迁移错误对话框
-/// 返回 true 表示用户选择重试，false 表示用户选择退出
+fn select_vietnamese_locale(
+    saved_language: Option<&str>,
+    lc_all: Option<&str>,
+    lc_messages: Option<&str>,
+    lang: Option<&str>,
+) -> bool {
+    match saved_language.map(locale_language_code) {
+        Some(code) if code.eq_ignore_ascii_case("vi") => return true,
+        Some(code) if code.eq_ignore_ascii_case("en") => return false,
+        _ => {}
+    }
+
+    [lc_all, lc_messages, lang]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|locale| !locale.is_empty())
+        .map(locale_language_code)
+        .is_some_and(|code| code.eq_ignore_ascii_case("vi"))
+}
+
+/// Detect whether dialogs should use Vietnamese, preferring the saved app
+/// language over process locale variables. GUI launches often do not inherit a
+/// useful `LANG`, so the persisted setting is the authoritative source.
+fn is_vietnamese_locale() -> bool {
+    let settings = crate::settings::get_settings();
+    let lc_all = std::env::var("LC_ALL").ok();
+    let lc_messages = std::env::var("LC_MESSAGES").ok();
+    let lang = std::env::var("LANG").ok();
+
+    select_vietnamese_locale(
+        settings.language.as_deref(),
+        lc_all.as_deref(),
+        lc_messages.as_deref(),
+        lang.as_deref(),
+    )
+}
+
+/// Show the legacy-configuration migration failure dialog.
+/// Returns true for retry and false for exit.
 fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
-    let title = if is_chinese_locale() {
-        "配置迁移失败"
+    let use_vietnamese = is_vietnamese_locale();
+    let title = if use_vietnamese {
+        "Di chuyển cấu hình thất bại"
     } else {
         "Migration Failed"
     };
 
-    let message = if is_chinese_locale() {
+    let message = if use_vietnamese {
         format!(
-            "从旧版本迁移配置时发生错误：\n\n{error}\n\n\
-            您的数据尚未丢失，旧配置文件仍然保留。\n\
-            建议回退到旧版本 Nexus Composer 以保护数据。\n\n\
-            点击「重试」重新尝试迁移\n\
-            点击「退出」关闭程序（可回退版本后重新打开）"
+            "Đã xảy ra lỗi khi di chuyển cấu hình từ phiên bản cũ:\n\n{error}\n\n\
+            Dữ liệu của bạn chưa bị mất; tệp cấu hình cũ vẫn được giữ lại.\n\
+            Hãy cân nhắc quay lại phiên bản Nexus Composer cũ hơn để bảo vệ dữ liệu.\n\n\
+            Chọn 'Thử lại' để thử di chuyển lần nữa\n\
+            Chọn 'Thoát' để đóng ứng dụng"
         )
     } else {
         format!(
@@ -1888,19 +1950,15 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         )
     };
 
-    let retry_text = if is_chinese_locale() {
-        "重试"
+    let retry_text = if use_vietnamese {
+        "Thử lại"
     } else {
         "Retry"
     };
-    let exit_text = if is_chinese_locale() {
-        "退出"
-    } else {
-        "Exit"
-    };
+    let exit_text = if use_vietnamese { "Thoát" } else { "Exit" };
 
-    // 使用 blocking_show 同步等待用户响应
-    // OkCancelCustom: 第一个按钮（重试）返回 true，第二个按钮（退出）返回 false
+    // blocking_show waits synchronously. OkCancelCustom returns true for the first
+    // Retry button and false for the second Exit button.
     app.dialog()
         .message(&message)
         .title(title)
@@ -1912,31 +1970,32 @@ fn show_migration_error_dialog(app: &tauri::AppHandle, error: &str) -> bool {
         .blocking_show()
 }
 
-/// 显示数据库初始化/Schema 迁移失败对话框
-/// 返回 true 表示用户选择重试，false 表示用户选择退出
+/// Show the database initialization/schema-migration failure dialog.
+/// Returns true for retry and false for exit.
 fn show_database_init_error_dialog(
     app: &tauri::AppHandle,
     db_path: &std::path::Path,
     error: &str,
 ) -> bool {
-    let title = if is_chinese_locale() {
-        "数据库初始化失败"
+    let use_vietnamese = is_vietnamese_locale();
+    let title = if use_vietnamese {
+        "Khởi tạo cơ sở dữ liệu thất bại"
     } else {
         "Database Initialization Failed"
     };
 
-    let message = if is_chinese_locale() {
+    let message = if use_vietnamese {
         format!(
-            "初始化数据库或迁移数据库结构时发生错误：\n\n{error}\n\n\
-            数据库文件路径：\n{db}\n\n\
-            您的数据尚未丢失，应用不会自动删除数据库文件。\n\
-            常见原因包括：数据库版本过新、文件损坏、权限不足、磁盘空间不足等。\n\n\
-            建议：\n\
-            1) 先备份整个配置目录（包含 cc-switch.db）\n\
-            2) 如果提示“数据库版本过新”，请升级到更新版本\n\
-            3) 如果刚升级出现异常，可回退旧版本导出/备份后再升级\n\n\
-            点击「重试」重新尝试初始化\n\
-            点击「退出」关闭程序",
+            "Đã xảy ra lỗi khi khởi tạo hoặc di chuyển cơ sở dữ liệu:\n\n{error}\n\n\
+            Đường dẫn tệp cơ sở dữ liệu:\n{db}\n\n\
+            Dữ liệu của bạn chưa bị mất; ứng dụng sẽ không tự động xóa tệp cơ sở dữ liệu.\n\
+            Nguyên nhân thường gặp: phiên bản cơ sở dữ liệu mới hơn, tệp hỏng, thiếu quyền hoặc thiếu dung lượng đĩa.\n\n\
+            Đề xuất:\n\
+            1) Sao lưu toàn bộ thư mục cấu hình, bao gồm cơ sở dữ liệu và các tệp sao lưu\n\
+            2) Nếu cơ sở dữ liệu thuộc phiên bản mới hơn, hãy nâng cấp Nexus Composer\n\
+            3) Nếu lỗi xuất hiện sau khi nâng cấp, hãy quay lại phiên bản cũ để xuất/sao lưu rồi nâng cấp lại\n\n\
+            Chọn 'Thử lại' để khởi tạo lại\n\
+            Chọn 'Thoát' để đóng ứng dụng",
             db = db_path.display()
         )
     } else {
@@ -1946,7 +2005,7 @@ fn show_database_init_error_dialog(
             Your data is NOT lost - the app will not delete the database automatically.\n\
             Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
             Suggestions:\n\
-            1) Back up the entire config directory (including cc-switch.db)\n\
+            1) Back up the entire config directory, including the database and backup files\n\
             2) If you see “database version is newer”, please upgrade Nexus Composer\n\
             3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
             Click 'Retry' to attempt initialization again\n\
@@ -1955,16 +2014,12 @@ fn show_database_init_error_dialog(
         )
     };
 
-    let retry_text = if is_chinese_locale() {
-        "重试"
+    let retry_text = if use_vietnamese {
+        "Thử lại"
     } else {
         "Retry"
     };
-    let exit_text = if is_chinese_locale() {
-        "退出"
-    } else {
-        "Exit"
-    };
+    let exit_text = if use_vietnamese { "Thoát" } else { "Exit" };
 
     app.dialog()
         .message(&message)
@@ -1978,24 +2033,25 @@ fn show_database_init_error_dialog(
 }
 
 // ============================================================
-// 退出请求分类
+// Exit-request classification.
 // ============================================================
 
-/// `RunEvent::ExitRequested` 的三类来源，处理方式必须区分。
+/// Three `RunEvent::ExitRequested` sources that require distinct handling.
 ///
-/// 关键约束：重启请求（`code == RESTART_EXIT_CODE`）上 `prevent_exit()` 会被
-/// Tauri 静默忽略（见 `ExitRequestApi::prevent_exit` 文档），事件循环必定继续
-/// 退出并触发各插件的 `RunEvent::Exit` 钩子；任何与之并发的自定义清理任务都
-/// 可能与插件退出钩子争用同一状态而死锁。
+/// Critical constraint: Tauri silently ignores `prevent_exit()` for restart
+/// (`code == RESTART_EXIT_CODE`). The event loop exits and invokes plugin
+/// RunEvent::Exit hooks, so concurrent custom cleanup can contend for the same
+/// state and deadlock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExitRequestAction {
-    /// `code` 为 `None`：运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活
-    /// 窗口），阻止退出、保持托盘后台运行。
+    /// `code == None`: runtime-generated, such as after reclaiming the hidden
+    /// WebView. Prevent exit and keep the tray process running.
     StayInTray,
-    /// `code` 为 `RESTART_EXIT_CODE`：`app.restart()` / 自更新 relaunch 发起的
-    /// 重启，不拦截、不做自定义清理，交还 Tauri 默认 re-exec 流程。
+    /// `code == RESTART_EXIT_CODE`: app.restart(). Do not
+    /// intercept or run custom cleanup; use Tauri's re-exec path.
     DeferToTauriRestart,
-    /// 其它 `Some(_)`：用户主动退出（托盘「退出」等），执行完整异步清理后结束进程。
+    /// Other `Some(_)`: explicit user exit, such as the tray action. Run complete
+    /// asynchronous cleanup before terminating.
     CleanupAndExit,
 }
 
@@ -2007,44 +2063,48 @@ fn classify_exit_request(code: Option<i32>) -> ExitRequestAction {
     }
 }
 
+fn should_run_final_exit_cleanup(restart_requested: bool) -> bool {
+    !restart_requested
+}
+
 // ============================================================
-// 在应用主动退出前显式持久化窗口状态
+// Explicitly persist window state before a user-initiated exit.
 // ============================================================
 
 fn window_state_flags() -> StateFlags {
     StateFlags::POSITION | StateFlags::SIZE | StateFlags::MAXIMIZED
 }
 
-/// 当前应用的退出路径会拦截 `ExitRequested` 并最终直接 `std::process::exit(0)`，
-/// 这里需要在真正结束进程前手动落盘，避免 window-state 插件的默认退出钩子被绕过。
+/// The application intercepts ExitRequested and eventually calls
+/// `std::process::exit(0)`, so persist before termination rather than bypassing the
+/// window-state plugin's default exit hook.
 pub fn save_window_state_before_exit(app_handle: &tauri::AppHandle) {
     if let Err(err) = app_handle.save_window_state(window_state_flags()) {
-        log::error!("退出前保存窗口状态失败: {err}");
+        log::error!("Failed to save window state before exit: {err}");
     } else {
-        log::info!("已在退出前保存窗口状态");
+        log::info!("Saved window state before exit");
     }
 }
 
-/// 主动释放 single-instance 锁。
+/// Explicitly release the single-instance lock.
 ///
-/// macOS single-instance 使用 `/tmp/{identifier}.sock`。我们有若干路径会直接
-/// `std::process::exit(0)`，不会触发插件挂在 `RunEvent::Exit` 上的清理钩子。
-/// 重启前主动 destroy 可以避免新进程误连旧 listener 后自行退出。
+/// macOS single-instance uses `/tmp/{identifier}.sock`. Direct
+/// `std::process::exit(0)` paths bypass its RunEvent::Exit cleanup, so destroying
+/// before restart prevents the new process from connecting to a stale listener.
 pub fn destroy_single_instance_lock(app_handle: &tauri::AppHandle) {
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     tauri_plugin_single_instance::destroy(app_handle);
 }
 
-/// 清理托盘图标、释放 single-instance 锁后重启当前应用。
+/// Restart after removing the tray icon and releasing the single-instance lock.
 ///
-/// 直接走 `tauri::process::restart`（spawn 新进程 + `exit(0)`），不经过事件
-/// 循环退出，因此 Tauri 内部的 `cleanup_before_exit` 和各插件的
-/// `RunEvent::Exit` 钩子都不会执行。需要的清理由调用方与本函数显式补偿：
-/// 窗口状态、代理/Live 恢复（调用方）；托盘图标、single-instance 锁（本函数）。
+/// `tauri::process::restart` spawns a process and exits directly, bypassing event-
+/// loop shutdown, cleanup_before_exit, and plugin Exit hooks. The caller handles
+/// window state and proxy/live restoration; this function handles tray and lock.
 ///
-/// 有意不调 `AppHandle::cleanup_before_exit()`：它会在调用线程上 Drop 托盘
-/// 图标，而 macOS 的 NSStatusItem 操作要求主线程；`set_visible(false)` 走
-/// `run_item_main_thread` 代理，跨线程安全（见 `remove_tray_icon_before_exit`）。
+/// Deliberately avoid `AppHandle::cleanup_before_exit()`: it drops the tray icon on
+/// the caller thread, while macOS NSStatusItem requires the main thread.
+/// `set_visible(false)` delegates through run_item_main_thread and is thread-safe.
 pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
     remove_tray_icon_before_exit(app_handle);
     destroy_single_instance_lock(app_handle);
@@ -2053,7 +2113,138 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_exit_request, ExitRequestAction};
+    use super::{
+        classify_exit_request, deep_link_error_payload, is_supported_deeplink_url,
+        linux_deep_link_handler_needs_registration, redact_url_for_log, select_vietnamese_locale,
+        should_run_final_exit_cleanup, ExitRequestAction,
+    };
+
+    #[test]
+    fn accepts_current_and_legacy_deep_link_schemes() {
+        assert!(is_supported_deeplink_url("nexus://v1/import"));
+        assert!(is_supported_deeplink_url("ccswitch://v1/import"));
+        assert!(!is_supported_deeplink_url("https://example.com"));
+        assert!(!is_supported_deeplink_url("nexus-invalid://v1/import"));
+    }
+
+    #[test]
+    fn deep_link_log_redaction_preserves_routing_without_query_values() {
+        let raw = "nexus://v1/import?resource=provider&app=codex&name=Test&apiKey=sk-secret-123&config=eyJ0b2tlbiI6InNlY3JldCJ9&usageAccessToken=usage-secret#private-fragment";
+        let redacted = redact_url_for_log(raw);
+
+        assert_eq!(
+            redacted,
+            "nexus://v1/import?[keys:apiKey,app,config,name,resource,usageAccessToken]"
+        );
+        for secret in [
+            "sk-secret-123",
+            "eyJ0b2tlbiI6InNlY3JldCJ9",
+            "usage-secret",
+            "private-fragment",
+        ] {
+            assert!(!redacted.contains(secret));
+        }
+
+        // Redaction is only for logging. The parser still receives the original URL.
+        let parsed = crate::deeplink::parse_deeplink_url(raw).unwrap();
+        assert_eq!(parsed.api_key.as_deref(), Some("sk-secret-123"));
+        assert_eq!(parsed.config.as_deref(), Some("eyJ0b2tlbiI6InNlY3JldCJ9"));
+        assert_eq!(parsed.usage_access_token.as_deref(), Some("usage-secret"));
+    }
+
+    #[test]
+    fn malformed_url_log_redaction_drops_query_and_fragment() {
+        let redacted = redact_url_for_log(
+            "not a URL?apiKey=malformed-secret&config=embedded-secret#fragment-secret",
+        );
+
+        assert_eq!(redacted, "not a URL?[redacted]");
+        assert!(!redacted.contains("malformed-secret"));
+        assert!(!redacted.contains("embedded-secret"));
+        assert!(!redacted.contains("fragment-secret"));
+    }
+
+    #[test]
+    fn deep_link_error_event_payload_never_contains_query_or_fragment_values() {
+        let raw = "nexus://v2/import?apiKey=api-query-secret&config=config-query-secret&token=token-query-secret#fragment-secret";
+        let payload = deep_link_error_payload(raw, "Unsupported protocol version: v2".to_string());
+        let value = serde_json::to_value(&payload).expect("serialize deep-link error payload");
+        let serialized = value.to_string();
+
+        assert_eq!(
+            value["context"],
+            "nexus://v2/import?[keys:apiKey,config,token]"
+        );
+        assert_eq!(value["error"], "Unsupported protocol version: v2");
+        assert!(value.get("url").is_none());
+
+        for secret in [
+            "api-query-secret",
+            "config-query-secret",
+            "token-query-secret",
+            "fragment-secret",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+    }
+
+    #[test]
+    fn linux_deep_link_handler_is_refreshed_when_a_scheme_is_missing() {
+        assert!(linux_deep_link_handler_needs_registration(None));
+        assert!(linux_deep_link_handler_needs_registration(Some(
+            "MimeType=x-scheme-handler/nexus;"
+        )));
+        assert!(linux_deep_link_handler_needs_registration(Some(
+            "# legacy ccswitch handler mentioned in a comment\nMimeType=x-scheme-handler/nexus;"
+        )));
+        assert!(!linux_deep_link_handler_needs_registration(Some(
+            "MimeType=x-scheme-handler/nexus;x-scheme-handler/ccswitch;"
+        )));
+    }
+
+    #[test]
+    fn flatpak_desktop_entry_accepts_both_deep_link_schemes() {
+        let desktop_entry = include_str!("../../flatpak/com.nexuscomposer.desktop.desktop");
+
+        assert!(desktop_entry
+            .lines()
+            .any(|line| line == "Exec=nexus-composer %u"));
+        assert!(desktop_entry
+            .lines()
+            .any(|line| { line == "MimeType=x-scheme-handler/nexus;x-scheme-handler/ccswitch;" }));
+    }
+
+    #[test]
+    fn saved_dialog_language_overrides_process_locale() {
+        assert!(select_vietnamese_locale(
+            Some("vi"),
+            Some("en_US.UTF-8"),
+            None,
+            None
+        ));
+        assert!(!select_vietnamese_locale(
+            Some("en"),
+            Some("vi_VN.UTF-8"),
+            None,
+            None
+        ));
+    }
+
+    #[test]
+    fn dialog_locale_fallback_uses_standard_environment_precedence() {
+        assert!(!select_vietnamese_locale(
+            None,
+            Some("en_US.UTF-8"),
+            Some("vi_VN.UTF-8"),
+            Some("vi_VN.UTF-8")
+        ));
+        assert!(select_vietnamese_locale(
+            None,
+            Some(""),
+            Some("vi_VN.UTF-8"),
+            Some("en_US.UTF-8")
+        ));
+    }
 
     #[test]
     fn no_code_keeps_app_alive_in_tray() {
@@ -2078,5 +2269,15 @@ mod tests {
             classify_exit_request(Some(1)),
             ExitRequestAction::CleanupAndExit
         );
+    }
+
+    #[test]
+    fn native_final_exit_runs_cleanup_fallback() {
+        assert!(should_run_final_exit_cleanup(false));
+    }
+
+    #[test]
+    fn restart_final_exit_skips_cleanup_fallback() {
+        assert!(!should_run_final_exit_cleanup(true));
     }
 }

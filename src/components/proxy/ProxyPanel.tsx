@@ -47,19 +47,19 @@ export function ProxyPanel({
   const { t } = useTranslation();
   const { status, isRunning } = useProxyStatus();
 
-  // 获取应用接管状态
+  // Read per-application routing state.
   const { data: takeoverStatus } = useProxyTakeoverStatus();
   const setTakeoverForApp = useSetProxyTakeoverForApp();
 
-  // 获取全局代理配置
+  // Read global proxy configuration.
   const { data: globalConfig } = useGlobalProxyConfig();
   const updateGlobalConfig = useUpdateGlobalProxyConfig();
 
-  // 监听地址/端口的本地状态（端口用字符串以支持完全清空）
+  // Keep address and port in local state; a string lets the port be cleared.
   const [listenAddress, setListenAddress] = useState("127.0.0.1");
   const [listenPort, setListenPort] = useState("15721");
 
-  // 同步全局配置到本地状态
+  // Synchronize global configuration into local state.
   useEffect(() => {
     if (globalConfig) {
       setListenAddress(globalConfig.listenAddress);
@@ -67,8 +67,8 @@ export function ProxyPanel({
     }
   }, [globalConfig]);
 
-  // 获取所有三个应用类型的故障转移队列
-  // 启用自动故障转移后，将按队列优先级（P1→P2→...）选择供应商
+  // Read failover queues for every supported application. Automatic failover
+  // selects providers by queue priority (P1→P2→...).
   const { data: claudeQueue = [] } = useFailoverQueue("claude");
   const { data: codexQueue = [] } = useFailoverQueue("codex");
   const { data: geminiQueue = [] } = useFailoverQueue("gemini");
@@ -80,22 +80,22 @@ export function ProxyPanel({
         enabled
           ? t("proxy.takeover.enabled", {
               app: appType,
-              defaultValue: `${appType} 接管已启用`,
+              defaultValue: `${appType} routing enabled`,
             })
           : t("proxy.takeover.disabled", {
               app: appType,
-              defaultValue: `${appType} 接管已关闭`,
+              defaultValue: `${appType} routing disabled`,
             }),
         { closeButton: true },
       );
     } catch (error) {
       const detail =
         extractErrorMessage(error) ||
-        t("common.unknown", { defaultValue: "未知错误" });
+        t("common.unknown", { defaultValue: "Unknown error" });
       toast.error(
         t("proxy.takeover.failed", {
           detail,
-          defaultValue: "切换接管状态失败",
+          defaultValue: "Failed to change routing state",
         }),
       );
     }
@@ -110,13 +110,19 @@ export function ProxyPanel({
       });
       toast.success(
         enabled
-          ? t("proxy.logging.enabled", { defaultValue: "日志记录已启用" })
-          : t("proxy.logging.disabled", { defaultValue: "日志记录已关闭" }),
+          ? t("proxy.logging.enabled", {
+              defaultValue: "Request logging enabled",
+            })
+          : t("proxy.logging.disabled", {
+              defaultValue: "Request logging disabled",
+            }),
         { closeButton: true },
       );
     } catch (error) {
       toast.error(
-        t("proxy.logging.failed", { defaultValue: "切换日志状态失败" }),
+        t("proxy.logging.failed", {
+          defaultValue: "Failed to change logging state",
+        }),
       );
     }
   };
@@ -124,7 +130,7 @@ export function ProxyPanel({
   const handleSaveBasicConfig = async () => {
     if (!globalConfig) return;
 
-    // 校验地址格式（IPv4 / IPv6 字面量 / localhost）
+    // Validate an IPv4 address, IPv6 literal, or localhost.
     const addressTrimmed = listenAddress.trim();
     const ipv4Regex = /^(\d{1,3}\.){3}\d{1,3}$/;
     const isValidIpv4 = (addr: string): boolean =>
@@ -133,8 +139,8 @@ export function ProxyPanel({
         const num = parseInt(n, 10);
         return num >= 0 && num <= 255;
       });
-    // IPv6 字面量校验：必须含 `:` 且能在 [..] 包装后被 URL 解析器接受。
-    // 后端 (services/proxy.rs) 会把 `::` 改写成 `::1`，所以这里也接受 `::`。
+    // An IPv6 literal must contain ':' and remain valid when wrapped in URL
+    // brackets. The backend rewrites `::` to `::1`, so accept `::` here too.
     const isValidIpv6 = (addr: string): boolean => {
       if (!addr.includes(":")) return false;
       try {
@@ -155,18 +161,18 @@ export function ProxyPanel({
       toast.error(
         t("proxy.settings.invalidAddress", {
           defaultValue:
-            "地址无效，请输入 IPv4（如 127.0.0.1）、IPv6（如 ::1）或 localhost",
+            "Enter a valid IPv4 address (such as 127.0.0.1), IPv6 address (such as ::1), or localhost",
         }),
       );
       return;
     }
 
-    // 严格校验端口：必须是纯数字
+    // A port must contain decimal digits only.
     const portTrimmed = listenPort.trim();
     if (!/^\d+$/.test(portTrimmed)) {
       toast.error(
         t("proxy.settings.invalidPort", {
-          defaultValue: "端口无效，请输入 1024-65535 之间的数字",
+          defaultValue: "Enter a port from 1024 to 65535",
         }),
       );
       return;
@@ -175,7 +181,7 @@ export function ProxyPanel({
     if (isNaN(port) || port < 1024 || port > 65535) {
       toast.error(
         t("proxy.settings.invalidPort", {
-          defaultValue: "端口无效，请输入 1024-65535 之间的数字",
+          defaultValue: "Enter a port from 1024 to 65535",
         }),
       );
       return;
@@ -187,12 +193,16 @@ export function ProxyPanel({
         listenPort: port,
       });
       toast.success(
-        t("proxy.settings.configSaved", { defaultValue: "代理配置已保存" }),
+        t("proxy.settings.configSaved", {
+          defaultValue: "Proxy settings saved",
+        }),
         { closeButton: true },
       );
     } catch (error) {
       toast.error(
-        t("proxy.settings.configSaveFailed", { defaultValue: "保存配置失败" }),
+        t("proxy.settings.configSaveFailed", {
+          defaultValue: "Failed to save settings",
+        }),
       );
     }
   };
@@ -211,7 +221,7 @@ export function ProxyPanel({
     }
   };
 
-  // 格式化地址用于 URL（IPv6 需要方括号）
+  // URL-format the address, adding brackets around IPv6 literals.
   const formatAddressForUrl = (address: string, port: number): string => {
     const isIPv6 = address.includes(":");
     const host = isIPv6 ? `[${address}]` : address;
@@ -239,7 +249,7 @@ export function ProxyPanel({
             <div className="space-y-1">
               <p className="text-sm font-medium leading-none">
                 {t("proxyConfig.proxyEnabled", {
-                  defaultValue: "代理服务",
+                  defaultValue: "Nexus",
                 })}
               </p>
               <p className="text-xs text-muted-foreground">
@@ -269,7 +279,7 @@ export function ProxyPanel({
               <div className="rounded-xl border-2 border-primary/20 bg-primary/5 p-4 space-y-3">
                 <p className="text-xs font-medium text-primary">
                   {t("proxyConfig.appTakeover", {
-                    defaultValue: "应用接管",
+                    defaultValue: "Apps using Nexus",
                   })}
                 </p>
                 <div className="grid gap-2 sm:grid-cols-3">
@@ -299,8 +309,7 @@ export function ProxyPanel({
                 </div>
                 <p className="text-xs text-muted-foreground">
                   {t("proxy.takeover.hint", {
-                    defaultValue:
-                      "选择要接管的应用，启用后该应用的请求将通过本地代理转发",
+                    defaultValue: "Choose which applications use Nexus",
                   })}
                 </p>
               </div>
@@ -316,7 +325,7 @@ export function ProxyPanel({
               <div>
                 <p className="text-xs text-muted-foreground mb-2">
                   {t("proxy.panel.serviceAddress", {
-                    defaultValue: "服务地址",
+                    defaultValue: "Service Address",
                   })}
                 </p>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -332,7 +341,7 @@ export function ProxyPanel({
                       );
                       toast.success(
                         t("proxy.panel.addressCopied", {
-                          defaultValue: "地址已复制",
+                          defaultValue: "Address copied",
                         }),
                         { closeButton: true },
                       );
@@ -343,7 +352,8 @@ export function ProxyPanel({
                 </div>
                 <p className="text-xs text-muted-foreground mt-2">
                   {t("proxy.settings.restartRequired", {
-                    defaultValue: "修改监听地址/端口需要先停止代理服务",
+                    defaultValue:
+                      "Stop the proxy before changing its listen address or port",
                   })}
                 </p>
               </div>
@@ -374,7 +384,7 @@ export function ProxyPanel({
                 ) : status.current_provider ? (
                   <p className="text-sm text-muted-foreground">
                     {t("proxy.panel.currentProvider", {
-                      defaultValue: "当前 Provider：",
+                      defaultValue: "Current provider:",
                     })}{" "}
                     <span className="font-medium text-foreground">
                       {status.current_provider}
@@ -383,32 +393,36 @@ export function ProxyPanel({
                 ) : (
                   <p className="text-sm text-yellow-600 dark:text-yellow-400">
                     {t("proxy.panel.waitingFirstRequest", {
-                      defaultValue: "当前 Provider：等待首次请求…",
+                      defaultValue:
+                        "Current provider: waiting for the first request…",
                     })}
                   </p>
                 )}
               </div>
 
-              {/* [5] Logging toggle */}
+              {/* [5] Logging toggles */}
               <div className="pt-3 border-t border-border">
-                <div className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2">
-                  <div className="space-y-0.5">
-                    <Label className="text-sm font-medium">
-                      {t("proxy.settings.fields.enableLogging.label", {
-                        defaultValue: "启用日志记录",
-                      })}
-                    </Label>
-                    <p className="text-xs text-muted-foreground">
-                      {t("proxy.settings.fields.enableLogging.description", {
-                        defaultValue: "记录所有代理请求，便于排查问题",
-                      })}
-                    </p>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between rounded-md border border-border bg-background/60 px-3 py-2">
+                    <div className="space-y-0.5">
+                      <Label className="text-sm font-medium">
+                        {t("proxy.settings.fields.enableLogging.label", {
+                          defaultValue: "Enable Request Logging",
+                        })}
+                      </Label>
+                      <p className="text-xs text-muted-foreground">
+                        {t("proxy.settings.fields.enableLogging.description", {
+                          defaultValue:
+                            "Record proxy requests for troubleshooting",
+                        })}
+                      </p>
+                    </div>
+                    <Switch
+                      checked={globalConfig?.enableLogging ?? true}
+                      onCheckedChange={handleLoggingChange}
+                      disabled={updateGlobalConfig.isPending}
+                    />
                   </div>
-                  <Switch
-                    checked={globalConfig?.enableLogging ?? true}
-                    onCheckedChange={handleLoggingChange}
-                    disabled={updateGlobalConfig.isPending}
-                  />
                 </div>
               </div>
 
@@ -468,21 +482,21 @@ export function ProxyPanel({
               <StatCard
                 icon={<Activity className="h-4 w-4" />}
                 label={t("proxy.panel.stats.activeConnections", {
-                  defaultValue: "活跃连接",
+                  defaultValue: "Active Connections",
                 })}
                 value={status.active_connections}
               />
               <StatCard
                 icon={<TrendingUp className="h-4 w-4" />}
                 label={t("proxy.panel.stats.totalRequests", {
-                  defaultValue: "总请求数",
+                  defaultValue: "Total Requests",
                 })}
                 value={status.total_requests}
               />
               <StatCard
                 icon={<Clock className="h-4 w-4" />}
                 label={t("proxy.panel.stats.successRate", {
-                  defaultValue: "成功率",
+                  defaultValue: "Success Rate",
                 })}
                 value={`${status.success_rate.toFixed(1)}%`}
                 variant={status.success_rate > 90 ? "success" : "warning"}
@@ -490,7 +504,7 @@ export function ProxyPanel({
               <StatCard
                 icon={<Clock className="h-4 w-4" />}
                 label={t("proxy.panel.stats.uptime", {
-                  defaultValue: "运行时间",
+                  defaultValue: "Uptime",
                 })}
                 value={formatUptime(status.uptime_seconds)}
               />
@@ -503,12 +517,13 @@ export function ProxyPanel({
               <div>
                 <h4 className="text-sm font-semibold">
                   {t("proxy.settings.basic.title", {
-                    defaultValue: "基础设置",
+                    defaultValue: "Basic Settings",
                   })}
                 </h4>
                 <p className="text-xs text-muted-foreground">
                   {t("proxy.settings.basic.description", {
-                    defaultValue: "配置代理服务监听的地址与端口。",
+                    defaultValue:
+                      "Configure the address and port used by the proxy service.",
                   })}
                 </p>
               </div>
@@ -517,7 +532,7 @@ export function ProxyPanel({
                 <div className="space-y-2">
                   <Label htmlFor="listen-address">
                     {t("proxy.settings.fields.listenAddress.label", {
-                      defaultValue: "监听地址",
+                      defaultValue: "Listen Address",
                     })}
                   </Label>
                   <Input
@@ -534,7 +549,7 @@ export function ProxyPanel({
                   <p className="text-xs text-muted-foreground">
                     {t("proxy.settings.fields.listenAddress.description", {
                       defaultValue:
-                        "代理服务器监听的 IP 地址（推荐 127.0.0.1）",
+                        "IP address on which the proxy listens (127.0.0.1 recommended)",
                     })}
                   </p>
                 </div>
@@ -542,7 +557,7 @@ export function ProxyPanel({
                 <div className="space-y-2">
                   <Label htmlFor="listen-port">
                     {t("proxy.settings.fields.listenPort.label", {
-                      defaultValue: "监听端口",
+                      defaultValue: "Listen Port",
                     })}
                   </Label>
                   <Input
@@ -559,7 +574,8 @@ export function ProxyPanel({
                   />
                   <p className="text-xs text-muted-foreground">
                     {t("proxy.settings.fields.listenPort.description", {
-                      defaultValue: "代理服务器监听的端口号（1024 ~ 65535）",
+                      defaultValue:
+                        "Port on which the proxy listens (1024–65535)",
                     })}
                   </p>
                 </div>
@@ -574,12 +590,12 @@ export function ProxyPanel({
                   {updateGlobalConfig.isPending ? (
                     <>
                       <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      {t("common.saving", { defaultValue: "保存中..." })}
+                      {t("common.saving", { defaultValue: "Saving..." })}
                     </>
                   ) : (
                     <>
                       <Save className="mr-2 h-4 w-4" />
-                      {t("common.save", { defaultValue: "保存" })}
+                      {t("common.save", { defaultValue: "Save" })}
                     </>
                   )}
                 </Button>
@@ -593,12 +609,12 @@ export function ProxyPanel({
               </div>
               <p className="text-base font-medium text-foreground mb-1">
                 {t("proxy.panel.stoppedTitle", {
-                  defaultValue: "代理服务已停止",
+                  defaultValue: "Proxy service is stopped",
                 })}
               </p>
               <p className="text-sm text-muted-foreground">
                 {t("proxy.panel.stoppedDescription", {
-                  defaultValue: "使用上方开关即可启动服务",
+                  defaultValue: "Use the switch above to start it",
                 })}
               </p>
             </div>
@@ -652,14 +668,14 @@ function ProviderQueueGroup({
   targets,
   status,
 }: ProviderQueueGroupProps) {
-  // 查找该应用类型的当前活跃目标
+  // Find the active target for this application.
   const activeTarget = status.active_targets?.find(
     (t) => t.app_type === appType,
   );
 
   return (
     <div className="space-y-2">
-      {/* 应用类型标题 */}
+      {/* Application heading */}
       <div className="flex items-center gap-2 px-2">
         <span className="text-xs font-semibold text-foreground/80">
           {appLabel}
@@ -667,7 +683,7 @@ function ProviderQueueGroup({
         <div className="flex-1 h-px bg-border/50" />
       </div>
 
-      {/* 供应商列表 */}
+      {/* Provider list */}
       <div className="space-y-1.5">
         {targets.map((target, index) => (
           <ProviderQueueItem
@@ -729,7 +745,7 @@ function ProviderQueueItem({
           </span>
         )}
       </div>
-      {/* 健康徽章 */}
+      {/* Health badge */}
       <ProviderHealthBadge
         consecutiveFailures={health?.consecutive_failures ?? 0}
         isHealthy={health?.is_healthy}

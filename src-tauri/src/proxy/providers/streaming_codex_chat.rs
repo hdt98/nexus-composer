@@ -1,8 +1,13 @@
-//! OpenAI Chat Completions SSE → OpenAI Responses SSE conversion.
+//! OpenAI Chat Completions SSE to OpenAI Responses SSE conversion.
 
 use super::{
     codex_chat_common::{
-        extract_reasoning_field_text, split_leading_think_block, strip_leading_think_open_tag,
+        contains_think_open_tag, count_unprotected_think_close_tags, extract_reasoning_field_text,
+        is_leading_think_close_marker_prefix, is_leading_think_open_marker_prefix,
+        leading_think_tag_pair, normalize_glm_think_open_alias_for_literal,
+        split_leading_think_block_repairing_unopened_close,
+        strip_glm_think_open_alias_from_reasoning, strip_leading_think_close_tag,
+        LiteralAwareThinkCloseScanner, ThinkCloseScanner,
     },
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
@@ -18,6 +23,11 @@ use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
+const VISIBLE_TEXT_GUARD_RELEASE_BYTES: usize = 768;
+const VISIBLE_TEXT_GUARD_MAX_UNPROTECTED_CLOSE_TAGS: usize = 0;
+const REASONING_GUARD_MIN_REPEATED_TOOL_CALLS: usize = 2;
+const REASONING_GUARD_MIN_REPEATED_MARKER_FRAGMENTS: usize = 8;
+
 #[derive(Debug, Default)]
 struct TextItemState {
     output_index: Option<u32>,
@@ -28,10 +38,18 @@ struct TextItemState {
 }
 
 #[derive(Debug, Default)]
+struct VisibleTextGuardState {
+    buffer: String,
+    released: bool,
+}
+
+#[derive(Debug, Default)]
 struct ReasoningItemState {
     output_index: Option<u32>,
     item_id: String,
     text: String,
+    placeholder_prefix_buffer: String,
+    marker_fragment_count: usize,
     added: bool,
     done: bool,
 }
@@ -41,6 +59,8 @@ enum InlineThinkMode {
     #[default]
     Detecting,
     Reasoning,
+    StructuredTextPrefix,
+    StructuredDesync,
     Text,
 }
 
@@ -48,6 +68,9 @@ enum InlineThinkMode {
 struct InlineThinkState {
     mode: InlineThinkMode,
     buffer: String,
+    close_scanner: ThinkCloseScanner,
+    desync_scanner: LiteralAwareThinkCloseScanner,
+    saw_content: bool,
 }
 
 #[derive(Debug, Default)]
@@ -57,6 +80,7 @@ struct ToolCallState {
     call_id: String,
     name: String,
     arguments: String,
+    argument_prefix_buffer: String,
     reasoning_content: String,
     added: bool,
     done: bool,
@@ -71,6 +95,7 @@ struct ChatToResponsesState {
     created_at: u64,
     next_output_index: u32,
     text: TextItemState,
+    visible_text_guard: VisibleTextGuardState,
     reasoning: ReasoningItemState,
     inline_think: InlineThinkState,
     tools: BTreeMap<usize, ToolCallState>,
@@ -78,6 +103,7 @@ struct ChatToResponsesState {
     latest_usage: Option<Value>,
     finish_reason: Option<String>,
     tool_context: CodexToolContext,
+    repair_unopened_think_blocks: bool,
 }
 
 impl Default for ChatToResponsesState {
@@ -90,6 +116,7 @@ impl Default for ChatToResponsesState {
             created_at: 0,
             next_output_index: 0,
             text: TextItemState::default(),
+            visible_text_guard: VisibleTextGuardState::default(),
             reasoning: ReasoningItemState::default(),
             inline_think: InlineThinkState::default(),
             tools: BTreeMap::new(),
@@ -97,19 +124,26 @@ impl Default for ChatToResponsesState {
             latest_usage: None,
             finish_reason: None,
             tool_context: CodexToolContext::default(),
+            repair_unopened_think_blocks: false,
         }
     }
 }
 
 impl ChatToResponsesState {
     fn with_tool_context(tool_context: CodexToolContext) -> Self {
+        let repair_unopened_think_blocks = tool_context.repair_unopened_think_blocks();
         Self {
             tool_context,
+            repair_unopened_think_blocks,
             ..Self::default()
         }
     }
 
     fn handle_chat_chunk(&mut self, chunk: &Value) -> Vec<Bytes> {
+        if self.completed {
+            return Vec::new();
+        }
+
         let mut events = Vec::new();
 
         if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
@@ -140,18 +174,39 @@ impl ChatToResponsesState {
 
         if let Some(delta) = choice.get("delta") {
             if let Some(reasoning) = chat_delta_reasoning_text(delta) {
+                if self.repair_unopened_think_blocks
+                    && !self.inline_think.saw_content
+                    && matches!(self.inline_think.mode, InlineThinkMode::Detecting)
+                {
+                    // A structured reasoning field proves that subsequent content
+                    // is answer text. Inspect only its leading boundary for one
+                    // orphan close marker; never sanitize marker text later on.
+                    self.inline_think.mode = InlineThinkMode::StructuredTextPrefix;
+                    self.inline_think.buffer.clear();
+                }
                 events.extend(self.push_reasoning_delta(&reasoning));
+                if self.completed {
+                    return events;
+                }
                 self.append_reasoning_to_active_tools(&reasoning);
             }
 
             if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
                 if !content.is_empty() {
                     events.extend(self.push_content_delta(content));
+                    if self.completed {
+                        return events;
+                    }
                 }
             }
 
             if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                 events.extend(self.flush_inline_think_at_boundary());
+                events.extend(self.flush_visible_text_guard());
+                events.extend(self.flush_reasoning_placeholder_prefix_at_tool_boundary());
+                if self.completed {
+                    return events;
+                }
                 let reasoning_for_tool_call = self.current_reasoning_text();
                 events.extend(self.finalize_reasoning());
                 for tool_call in tool_calls {
@@ -170,95 +225,269 @@ impl ChatToResponsesState {
     }
 
     fn push_content_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        self.inline_think.saw_content = true;
         match self.inline_think.mode {
             InlineThinkMode::Text => {
                 let mut events = self.finalize_reasoning();
                 events.extend(self.push_text_delta(delta));
                 events
             }
+            InlineThinkMode::StructuredTextPrefix => self.push_structured_text_prefix_delta(delta),
+            InlineThinkMode::StructuredDesync => self.push_structured_desync_delta(delta),
             InlineThinkMode::Detecting => {
                 self.inline_think.buffer.push_str(delta);
-                match leading_think_prefix_decision(&self.inline_think.buffer) {
+                match leading_think_prefix_decision(
+                    &self.inline_think.buffer,
+                    self.repair_unopened_think_blocks,
+                ) {
                     ThinkPrefixDecision::NeedMore => Vec::new(),
-                    ThinkPrefixDecision::Reasoning => {
+                    ThinkPrefixDecision::TaggedReasoning(open_tag, close_tag) => {
+                        let buffered = std::mem::take(&mut self.inline_think.buffer);
+                        let initial = buffered
+                            .trim_start()
+                            .strip_prefix(open_tag)
+                            .unwrap_or_default()
+                            .to_string();
                         self.inline_think.mode = InlineThinkMode::Reasoning;
-                        self.drain_complete_inline_think()
+                        self.inline_think.close_scanner = ThinkCloseScanner::tagged(close_tag);
+                        self.push_inline_reasoning_delta(&initial)
+                    }
+                    ThinkPrefixDecision::RawReasoning => {
+                        if let Some((reasoning, answer)) =
+                            split_leading_think_block_repairing_unopened_close(
+                                &self.inline_think.buffer,
+                            )
+                        {
+                            self.inline_think.mode = InlineThinkMode::Text;
+                            self.inline_think.buffer.clear();
+                            let mut events = Vec::new();
+                            if !reasoning.is_empty() {
+                                events.extend(self.push_reasoning_delta(&reasoning));
+                                self.append_reasoning_to_active_tools(&reasoning);
+                                events.extend(self.finalize_reasoning());
+                            }
+                            if !answer.is_empty() {
+                                events.extend(self.push_text_delta(&answer));
+                            }
+                            events
+                        } else if contains_think_open_tag(&self.inline_think.buffer) {
+                            // An opener before the first close is ordinary answer
+                            // content (commonly source code discussing delimiters),
+                            // not an unopened reasoning block. Preserve it exactly.
+                            self.inline_think.mode = InlineThinkMode::Text;
+                            let text = std::mem::take(&mut self.inline_think.buffer);
+                            let mut events = self.finalize_reasoning();
+                            events.extend(self.push_text_delta(&text));
+                            events
+                        } else {
+                            // An unopened GLM reasoning prefix is ambiguous until a
+                            // close marker, tool-call boundary, or finish reason arrives.
+                            Vec::new()
+                        }
                     }
                     ThinkPrefixDecision::Text => {
                         self.inline_think.mode = InlineThinkMode::Text;
                         let text = std::mem::take(&mut self.inline_think.buffer);
                         let mut events = self.finalize_reasoning();
-                        events.extend(self.push_text_delta(&text));
+                        if !text.is_empty() {
+                            events.extend(self.push_text_delta(&text));
+                        }
                         events
                     }
                 }
             }
-            InlineThinkMode::Reasoning => {
-                self.inline_think.buffer.push_str(delta);
-                self.drain_complete_inline_think()
-            }
+            InlineThinkMode::Reasoning => self.push_inline_reasoning_delta(delta),
         }
     }
 
-    fn drain_complete_inline_think(&mut self) -> Vec<Bytes> {
-        let Some((reasoning, answer)) = split_leading_think_block(&self.inline_think.buffer) else {
+    fn push_inline_reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        let scan = self.inline_think.close_scanner.push(delta);
+        let mut events = Vec::new();
+        if !scan.reasoning.is_empty() {
+            events.extend(self.push_reasoning_delta(&scan.reasoning));
+            self.append_reasoning_to_active_tools(&scan.reasoning);
+        }
+
+        if let Some(answer) = scan.answer {
+            self.inline_think.mode = InlineThinkMode::Text;
+            events.extend(self.finalize_reasoning());
+            if !answer.is_empty() {
+                events.extend(self.push_text_delta(&answer));
+            }
+        }
+
+        events
+    }
+
+    fn push_structured_text_prefix_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        self.inline_think.buffer.push_str(delta);
+        let buffered = self.inline_think.buffer.as_str();
+        let trimmed = buffered.trim_start();
+        if trimmed.is_empty() {
+            return Vec::new();
+        }
+
+        let text = if let Some(text) = strip_leading_think_close_tag(buffered) {
+            self.inline_think.mode = InlineThinkMode::Text;
+            self.inline_think.buffer.clear();
+            text
+        } else if is_leading_think_close_marker_prefix(trimmed) {
+            return Vec::new();
+        } else {
+            if self.repair_unopened_think_blocks {
+                let scanner =
+                    LiteralAwareThinkCloseScanner::from_reasoning_prefix(&self.reasoning.text);
+                if scanner.starts_inside_code() {
+                    let initial = std::mem::take(&mut self.inline_think.buffer);
+                    self.inline_think.mode = InlineThinkMode::StructuredDesync;
+                    self.inline_think.desync_scanner = scanner;
+                    return self.push_structured_desync_delta(&initial);
+                }
+            }
+            self.inline_think.mode = InlineThinkMode::Text;
+            std::mem::take(&mut self.inline_think.buffer)
+        };
+
+        let mut events = self.finalize_reasoning();
+        if !text.is_empty() {
+            events.extend(self.push_text_delta(&text));
+        }
+        events
+    }
+
+    fn push_structured_desync_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        self.inline_think.buffer.push_str(delta);
+        let boundary = self.inline_think.desync_scanner.push(delta);
+        if self.inline_think.desync_scanner.is_blocked() {
+            return self.flush_structured_desync_as_text();
+        }
+        let Some(boundary) = boundary else {
             return Vec::new();
         };
 
+        let buffered = std::mem::take(&mut self.inline_think.buffer);
+        let reasoning_extension = &buffered[..boundary.close_start];
+        let answer = buffered[boundary.close_start + boundary.close_tag.len()..]
+            .trim_start_matches(['\r', '\n', '\t', ' ']);
         self.inline_think.mode = InlineThinkMode::Text;
-        self.inline_think.buffer.clear();
+        self.inline_think.desync_scanner = LiteralAwareThinkCloseScanner::default();
 
         let mut events = Vec::new();
-        if !reasoning.is_empty() {
-            events.extend(self.push_reasoning_delta(&reasoning));
-            events.extend(self.finalize_reasoning());
+        if !reasoning_extension.is_empty() {
+            events.extend(self.push_reasoning_delta(reasoning_extension));
+            self.append_reasoning_to_active_tools(reasoning_extension);
         }
+        events.extend(self.finalize_reasoning());
         if !answer.is_empty() {
-            events.extend(self.push_text_delta(&answer));
+            events.extend(self.push_text_delta(answer));
+        }
+        events
+    }
+
+    fn flush_structured_desync_as_text(&mut self) -> Vec<Bytes> {
+        let buffered = std::mem::take(&mut self.inline_think.buffer);
+        if let Some(boundary) = self
+            .inline_think
+            .desync_scanner
+            .fallback_last_close_boundary(&buffered)
+        {
+            let reasoning_extension = &buffered[..boundary.close_start];
+            let answer = buffered[boundary.close_start + boundary.close_tag.len()..]
+                .trim_start_matches(['\r', '\n', '\t', ' ']);
+            self.inline_think.mode = InlineThinkMode::Text;
+            self.inline_think.desync_scanner = LiteralAwareThinkCloseScanner::default();
+
+            let mut events = Vec::new();
+            if !reasoning_extension.is_empty() {
+                events.extend(self.push_reasoning_delta(reasoning_extension));
+                self.append_reasoning_to_active_tools(reasoning_extension);
+            }
+            events.extend(self.finalize_reasoning());
+            if !answer.is_empty() {
+                events.extend(self.push_text_delta(answer));
+            }
+            return events;
         }
 
+        self.inline_think.mode = InlineThinkMode::Text;
+        self.inline_think.desync_scanner = LiteralAwareThinkCloseScanner::default();
+        let mut events = self.finalize_reasoning();
+        if !buffered.is_empty() {
+            events.extend(self.push_text_delta(&buffered));
+        }
         events
     }
 
     fn flush_inline_think_at_boundary(&mut self) -> Vec<Bytes> {
         match self.inline_think.mode {
             InlineThinkMode::Text => Vec::new(),
-            InlineThinkMode::Detecting => {
+            InlineThinkMode::StructuredTextPrefix => {
                 self.inline_think.mode = InlineThinkMode::Text;
-                let text = std::mem::take(&mut self.inline_think.buffer);
-                if text.is_empty() {
-                    Vec::new()
-                } else {
-                    let mut events = self.finalize_reasoning();
-                    events.extend(self.push_text_delta(&text));
-                    events
-                }
-            }
-            InlineThinkMode::Reasoning => {
                 let buffered = std::mem::take(&mut self.inline_think.buffer);
-                self.inline_think.mode = InlineThinkMode::Text;
-                if let Some((reasoning, answer)) = split_leading_think_block(&buffered) {
-                    let mut events = Vec::new();
-                    if !reasoning.is_empty() {
-                        events.extend(self.push_reasoning_delta(&reasoning));
-                        events.extend(self.finalize_reasoning());
-                    }
-                    if !answer.is_empty() {
-                        events.extend(self.push_text_delta(&answer));
-                    }
-                    return events;
+                let text = strip_leading_think_close_tag(&buffered).unwrap_or(buffered);
+                let mut events = self.finalize_reasoning();
+                if !text.is_empty() {
+                    events.extend(self.push_text_delta(&text));
+                }
+                events
+            }
+            InlineThinkMode::StructuredDesync => self.flush_structured_desync_as_text(),
+            InlineThinkMode::Detecting => {
+                let buffered = std::mem::take(&mut self.inline_think.buffer);
+                if buffered.is_empty() {
+                    self.inline_think.mode = InlineThinkMode::Text;
+                    return Vec::new();
                 }
 
-                let reasoning = strip_leading_think_open_tag(&buffered).unwrap_or(buffered);
-                if reasoning.is_empty() {
-                    Vec::new()
+                if self.repair_unopened_think_blocks {
+                    self.inline_think.mode = InlineThinkMode::Reasoning;
+                    self.inline_think.close_scanner = ThinkCloseScanner::unopened();
+                    let mut events = self.push_inline_reasoning_delta(&buffered);
+                    if matches!(self.inline_think.mode, InlineThinkMode::Reasoning) {
+                        events.extend(self.flush_reasoning_scanner_at_boundary());
+                    }
+                    events
                 } else {
-                    let mut events = self.push_reasoning_delta(&reasoning);
-                    events.extend(self.finalize_reasoning());
+                    self.inline_think.mode = InlineThinkMode::Text;
+                    let mut events = Vec::new();
+                    events.extend(self.push_text_delta(&buffered));
                     events
                 }
             }
+            InlineThinkMode::Reasoning => self.flush_reasoning_scanner_at_boundary(),
         }
+    }
+
+    fn flush_inline_think_at_stream_end(&mut self) -> Vec<Bytes> {
+        if self.repair_unopened_think_blocks
+            && matches!(self.inline_think.mode, InlineThinkMode::Detecting)
+            && self.finish_reason.as_deref() == Some("stop")
+        {
+            // A clean stop with no structured reasoning field and no delimiter
+            // is normal answer text. Treating it as reasoning-only leaves Codex
+            // with no assistant item and can trigger an unbounded retry loop.
+            self.inline_think.mode = InlineThinkMode::Text;
+            let text = std::mem::take(&mut self.inline_think.buffer);
+            let mut events = self.finalize_reasoning();
+            if !text.is_empty() {
+                events.extend(self.push_text_delta(&text));
+            }
+            return events;
+        }
+
+        self.flush_inline_think_at_boundary()
+    }
+
+    fn flush_reasoning_scanner_at_boundary(&mut self) -> Vec<Bytes> {
+        let pending = self.inline_think.close_scanner.finish();
+        let mut events = Vec::new();
+        if !pending.is_empty() {
+            events.extend(self.push_reasoning_delta(&pending));
+            self.append_reasoning_to_active_tools(&pending);
+        }
+        events.extend(self.finalize_reasoning());
+        self.inline_think.mode = InlineThinkMode::Text;
+        events
     }
 
     fn ensure_response_started(&mut self) -> Vec<Bytes> {
@@ -289,6 +518,58 @@ impl ChatToResponsesState {
 
     fn push_reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = Vec::new();
+        let delta = if self.repair_unopened_think_blocks {
+            strip_glm_think_open_alias_from_reasoning(delta)
+        } else {
+            std::borrow::Cow::Borrowed(delta)
+        };
+        let mut delta = delta.as_ref().to_string();
+        if delta.is_empty() {
+            return events;
+        }
+
+        if self.repair_unopened_think_blocks {
+            if is_suspicious_reasoning_marker_fragment(&delta) {
+                self.reasoning.marker_fragment_count =
+                    self.reasoning.marker_fragment_count.saturating_add(1);
+                self.reasoning.placeholder_prefix_buffer.clear();
+                if self.reasoning.marker_fragment_count
+                    >= REASONING_GUARD_MIN_REPEATED_MARKER_FRAGMENTS
+                {
+                    return vec![self.failed_event(
+                        "Upstream response repeated raw reasoning delimiter fragments inside reasoning output"
+                            .to_string(),
+                        Some("upstream_reasoning_marker_loop".to_string()),
+                    )];
+                }
+                return events;
+            }
+
+            if self.tools.is_empty() && self.reasoning.text.is_empty() {
+                if !self.reasoning.placeholder_prefix_buffer.is_empty() {
+                    self.reasoning.placeholder_prefix_buffer.push_str(&delta);
+                    let candidate = self.reasoning.placeholder_prefix_buffer.clone();
+                    if is_tool_call_placeholder_pending_candidate(&candidate) {
+                        return events;
+                    }
+                    self.reasoning.placeholder_prefix_buffer.clear();
+                    delta = candidate;
+                } else if is_tool_call_placeholder_pending_candidate(&delta) {
+                    self.reasoning.placeholder_prefix_buffer = delta;
+                    return events;
+                }
+            }
+
+            let mut candidate = self.reasoning.text.clone();
+            candidate.push_str(&delta);
+            if let Some(message) = pathological_reasoning_text_message(&candidate) {
+                self.reasoning.placeholder_prefix_buffer.clear();
+                return vec![self.failed_event(
+                    message.to_string(),
+                    Some("upstream_reasoning_loop".to_string()),
+                )];
+            }
+        }
 
         if !self.reasoning.added {
             let output_index = self.next_output_index();
@@ -325,7 +606,7 @@ impl ChatToResponsesState {
             ));
         }
 
-        self.reasoning.text.push_str(delta);
+        self.reasoning.text.push_str(&delta);
         let output_index = self.reasoning.output_index.unwrap_or(0);
         events.push(sse_event(
             "response.reasoning_summary_text.delta",
@@ -342,6 +623,78 @@ impl ChatToResponsesState {
     }
 
     fn push_text_delta(&mut self, delta: &str) -> Vec<Bytes> {
+        if self.repair_unopened_think_blocks && self.visible_text_guard.released {
+            if let Some(repaired) = strip_recoverable_visible_boundary_artifact(delta) {
+                if repaired.is_empty() {
+                    return Vec::new();
+                }
+                return self.emit_text_delta(&repaired);
+            }
+            if let Some(message) = pathological_visible_text_message(delta) {
+                return vec![self.failed_event(
+                    message.to_string(),
+                    Some("upstream_reasoning_marker_leak".to_string()),
+                )];
+            }
+        }
+
+        if self.repair_unopened_think_blocks && !self.visible_text_guard.released {
+            self.visible_text_guard.buffer.push_str(delta);
+            if let Some(repaired) =
+                strip_recoverable_visible_boundary_artifact(&self.visible_text_guard.buffer)
+            {
+                self.visible_text_guard.buffer = repaired;
+            }
+            if let Some(message) =
+                pathological_visible_text_message(&self.visible_text_guard.buffer)
+            {
+                self.visible_text_guard.buffer.clear();
+                return vec![self.failed_event(
+                    message.to_string(),
+                    Some("upstream_reasoning_marker_leak".to_string()),
+                )];
+            }
+
+            if self.visible_text_guard.buffer.len() < VISIBLE_TEXT_GUARD_RELEASE_BYTES {
+                return Vec::new();
+            }
+
+            self.visible_text_guard.released = true;
+            let buffered = std::mem::take(&mut self.visible_text_guard.buffer);
+            return self.emit_text_delta(&buffered);
+        }
+
+        self.emit_text_delta(delta)
+    }
+
+    fn flush_visible_text_guard(&mut self) -> Vec<Bytes> {
+        if !self.repair_unopened_think_blocks
+            || self.visible_text_guard.released
+            || self.visible_text_guard.buffer.is_empty()
+        {
+            return Vec::new();
+        }
+
+        if let Some(repaired) =
+            strip_recoverable_visible_boundary_artifact(&self.visible_text_guard.buffer)
+        {
+            self.visible_text_guard.buffer = repaired;
+        }
+
+        if let Some(message) = pathological_visible_text_message(&self.visible_text_guard.buffer) {
+            self.visible_text_guard.buffer.clear();
+            return vec![self.failed_event(
+                message.to_string(),
+                Some("upstream_reasoning_marker_leak".to_string()),
+            )];
+        }
+
+        self.visible_text_guard.released = true;
+        let buffered = std::mem::take(&mut self.visible_text_guard.buffer);
+        self.emit_text_delta(&buffered)
+    }
+
+    fn emit_text_delta(&mut self, delta: &str) -> Vec<Bytes> {
         let mut events = Vec::new();
 
         if !self.text.added {
@@ -401,6 +754,16 @@ impl ChatToResponsesState {
         (!self.reasoning.text.trim().is_empty()).then(|| self.reasoning.text.trim().to_string())
     }
 
+    fn flush_reasoning_placeholder_prefix_at_tool_boundary(&mut self) -> Vec<Bytes> {
+        if !self.repair_unopened_think_blocks || self.reasoning.placeholder_prefix_buffer.is_empty()
+        {
+            return Vec::new();
+        }
+
+        self.reasoning.placeholder_prefix_buffer.clear();
+        Vec::new()
+    }
+
     fn push_tool_call_delta(&mut self, tool_call: &Value, reasoning: Option<&str>) -> Vec<Bytes> {
         let chat_index = tool_call.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let id_delta = tool_call
@@ -417,11 +780,17 @@ impl ChatToResponsesState {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        let args_delta = if self.repair_unopened_think_blocks {
+            normalize_glm_think_open_alias_for_literal(&args_delta).into_owned()
+        } else {
+            args_delta
+        };
 
         let mut should_add = false;
         let mut output_index = None;
         let mut item_id = String::new();
         let mut pending_arguments = String::new();
+        let mut emitted_args_delta = String::new();
         let current_name: String;
 
         {
@@ -434,8 +803,14 @@ impl ChatToResponsesState {
                     state.name.clone_from(name);
                 }
             }
-            if !args_delta.is_empty() {
-                state.arguments.push_str(&args_delta);
+            let repaired_args_delta = if self.repair_unopened_think_blocks {
+                Self::repair_leading_orphan_think_close_in_tool_arguments(state, &args_delta)
+            } else {
+                args_delta.clone()
+            };
+            if !repaired_args_delta.is_empty() {
+                state.arguments.push_str(&repaired_args_delta);
+                emitted_args_delta = repaired_args_delta;
             }
             if state.reasoning_content.is_empty() {
                 if let Some(reasoning) = reasoning.map(str::trim).filter(|value| !value.is_empty())
@@ -505,7 +880,7 @@ impl ChatToResponsesState {
                     }),
                 ));
             }
-        } else if !args_delta.is_empty() && !is_custom_tool {
+        } else if !emitted_args_delta.is_empty() && !is_custom_tool {
             if let Some(output_index) = output_index {
                 events.push(sse_event(
                     "response.function_call_arguments.delta",
@@ -513,7 +888,7 @@ impl ChatToResponsesState {
                         "type": "response.function_call_arguments.delta",
                         "item_id": item_id,
                         "output_index": output_index,
-                        "delta": args_delta
+                        "delta": emitted_args_delta
                     }),
                 ));
             }
@@ -523,6 +898,12 @@ impl ChatToResponsesState {
     }
 
     fn append_reasoning_to_active_tools(&mut self, delta: &str) {
+        let delta = if self.repair_unopened_think_blocks {
+            strip_glm_think_open_alias_from_reasoning(delta)
+        } else {
+            std::borrow::Cow::Borrowed(delta)
+        };
+        let delta = delta.as_ref();
         if delta.trim().is_empty() {
             return;
         }
@@ -536,16 +917,47 @@ impl ChatToResponsesState {
         }
     }
 
+    fn repair_leading_orphan_think_close_in_tool_arguments(
+        state: &mut ToolCallState,
+        delta: &str,
+    ) -> String {
+        if delta.is_empty() || !state.arguments.is_empty() {
+            return delta.to_string();
+        }
+
+        let mut candidate = std::mem::take(&mut state.argument_prefix_buffer);
+        candidate.push_str(delta);
+
+        if candidate.trim_start().is_empty() {
+            state.argument_prefix_buffer = candidate;
+            return String::new();
+        }
+
+        if let Some(repaired) = strip_leading_think_close_tag(&candidate) {
+            return repaired;
+        }
+
+        if is_leading_think_close_marker_prefix(candidate.trim_start()) {
+            state.argument_prefix_buffer = candidate;
+            return String::new();
+        }
+
+        candidate
+    }
+
     fn has_substantive_output(&self) -> bool {
         !self.text.text.trim().is_empty()
+            || !self.visible_text_guard.buffer.trim().is_empty()
             || !self.reasoning.text.trim().is_empty()
             || !self.inline_think.buffer.trim().is_empty()
+            || self.inline_think.close_scanner.has_pending()
             || !self.output_items.is_empty()
             || self.tools.values().any(|state| {
                 state.added
                     || !state.call_id.trim().is_empty()
                     || !state.name.trim().is_empty()
                     || !state.arguments.trim().is_empty()
+                    || !state.argument_prefix_buffer.trim().is_empty()
                     || !state.reasoning_content.trim().is_empty()
             })
     }
@@ -556,8 +968,15 @@ impl ChatToResponsesState {
         }
 
         let mut events = self.ensure_response_started();
-        events.extend(self.flush_inline_think_at_boundary());
+        events.extend(self.flush_inline_think_at_stream_end());
+        if self.completed {
+            return events;
+        }
         events.extend(self.finalize_reasoning());
+        events.extend(self.flush_visible_text_guard());
+        if self.completed {
+            return events;
+        }
         events.extend(self.finalize_text());
         events.extend(self.finalize_tools());
 
@@ -759,6 +1178,10 @@ impl ChatToResponsesState {
             let Some(state) = self.tools.get_mut(&key) else {
                 continue;
             };
+            if self.repair_unopened_think_blocks && !state.argument_prefix_buffer.is_empty() {
+                let pending = std::mem::take(&mut state.argument_prefix_buffer);
+                state.arguments.push_str(&pending);
+            }
             let output_index = state.output_index.unwrap_or(0);
             let arguments = canonicalize_tool_arguments_str(&state.arguments);
             let is_custom_tool = self.tool_context.is_custom_tool_chat_name(&state.name);
@@ -880,25 +1303,99 @@ fn chat_delta_reasoning_text(delta: &Value) -> Option<String> {
 
 enum ThinkPrefixDecision {
     NeedMore,
-    Reasoning,
+    TaggedReasoning(&'static str, &'static str),
+    RawReasoning,
     Text,
 }
 
-fn leading_think_prefix_decision(buffer: &str) -> ThinkPrefixDecision {
+fn leading_think_prefix_decision(
+    buffer: &str,
+    repair_unopened_think_blocks: bool,
+) -> ThinkPrefixDecision {
     let trimmed = buffer.trim_start();
     if trimmed.is_empty() {
         return ThinkPrefixDecision::NeedMore;
     }
 
-    if trimmed.starts_with("<think>") {
-        return ThinkPrefixDecision::Reasoning;
+    if let Some((open_tag, close_tag)) = leading_think_tag_pair(trimmed) {
+        return ThinkPrefixDecision::TaggedReasoning(open_tag, close_tag);
     }
 
-    if "<think>".starts_with(trimmed) {
+    if is_leading_think_open_marker_prefix(trimmed) {
         return ThinkPrefixDecision::NeedMore;
     }
 
+    if repair_unopened_think_blocks {
+        return ThinkPrefixDecision::RawReasoning;
+    }
+
     ThinkPrefixDecision::Text
+}
+
+fn pathological_visible_text_message(text: &str) -> Option<&'static str> {
+    let close_count = count_unprotected_think_close_tags(text);
+    if close_count > VISIBLE_TEXT_GUARD_MAX_UNPROTECTED_CLOSE_TAGS {
+        return Some("Upstream response leaked a raw reasoning delimiter into visible output");
+    }
+
+    None
+}
+
+fn strip_recoverable_visible_boundary_artifact(text: &str) -> Option<String> {
+    if count_unprotected_think_close_tags(text) != 1 {
+        return None;
+    }
+
+    let trimmed_end = text.trim_end_matches(['\r', '\n', '\t', ' ']);
+    for close_tag in ["</thinking>", "</think>"] {
+        if let Some(prefix) = trimmed_end.strip_suffix(close_tag) {
+            return Some(prefix.to_string());
+        }
+    }
+
+    None
+}
+
+fn pathological_reasoning_text_message(text: &str) -> Option<&'static str> {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let repeated_tool_calls = tokens
+        .chunks_exact(2)
+        .filter(|pair| *pair == ["tool", "call"])
+        .count();
+    let is_only_tool_call_loop = !tokens.is_empty()
+        && tokens.len() == repeated_tool_calls * 2
+        && repeated_tool_calls >= REASONING_GUARD_MIN_REPEATED_TOOL_CALLS;
+
+    if is_only_tool_call_loop {
+        return Some("Upstream response repeated a tool-call placeholder inside reasoning output");
+    }
+
+    None
+}
+
+fn is_suspicious_reasoning_marker_fragment(text: &str) -> bool {
+    let trimmed = text.trim();
+    if !trimmed.contains("</think") && !trimmed.contains("</thinking") {
+        return false;
+    }
+
+    // A long sentence can legitimately discuss marker syntax during a diagnostic
+    // task. The pathological GLM/Codex cases arrive as short parser-sentinel
+    // fragments such as `</thinking`, `</thinking"` or `tool call</thinking`.
+    trimmed.chars().count() <= 96 && trimmed.split_whitespace().count() <= 4
+}
+
+fn is_tool_call_placeholder_pending_candidate(text: &str) -> bool {
+    let normalized = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase();
+
+    normalized == "tool call"
+        || (!normalized.is_empty()
+            && normalized != "tool call"
+            && "tool call".starts_with(&normalized))
 }
 
 /// Create a stream that converts Chat Completions SSE chunks into Responses SSE events.
@@ -1040,6 +1537,7 @@ fn sse_event(event: &str, data: Value) -> Bytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::providers::codex_chat_common::glm_think_open_alias_char;
     use futures::{stream, StreamExt};
 
     async fn collect(chunks: Vec<&str>) -> String {
@@ -1055,6 +1553,47 @@ mod tests {
         let converted = create_responses_sse_stream_from_chat_with_context(upstream, tool_context);
         let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
         String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    async fn collect_owned_with_context(
+        chunks: Vec<String>,
+        tool_context: CodexToolContext,
+    ) -> String {
+        let chunks: Vec<Result<Bytes, std::io::Error>> = chunks
+            .into_iter()
+            .map(|chunk| Ok(Bytes::from(chunk)))
+            .collect();
+        let upstream = stream::iter(chunks);
+        let converted = create_responses_sse_stream_from_chat_with_context(upstream, tool_context);
+        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
+        String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    fn output_text_payloads(output: &str) -> Vec<String> {
+        output
+            .split("\n\n")
+            .filter_map(|block| {
+                let data = block.lines().find_map(|line| line.strip_prefix("data: "))?;
+                let event: Value = serde_json::from_str(data).ok()?;
+                match event.get("type").and_then(Value::as_str) {
+                    Some("response.output_text.delta") => event
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    Some("response.output_text.done") => event
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(ToString::to_string),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    fn glm_repair_context() -> CodexToolContext {
+        let mut context = CodexToolContext::default();
+        context.set_repair_unopened_think_blocks(true);
+        context
     }
 
     #[tokio::test]
@@ -1115,6 +1654,654 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn converts_inline_thinking_chat_sse_to_reasoning_without_leaking_tags() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_glm\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"<thin\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"king>\\nNeed\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\" context.</thinking>\\n\\npong\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("Need context."));
+        assert!(output.contains("\"text\":\"pong\""));
+        assert!(!output.contains("<thinking>"));
+        assert!(!output.contains("</thinking>"));
+    }
+
+    #[tokio::test]
+    async fn converts_unopened_inline_think_chat_sse_to_reasoning_without_leaking_tags() {
+        let output = collect_with_context(vec![
+            "data: {\"id\":\"chatcmpl_glm_unopened\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Need to inspect\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_unopened\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\" the repo first.</think>The fix is ready.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ], glm_repair_context())
+        .await;
+
+        assert!(output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("Need to inspect the repo first."));
+        assert!(output.contains("\"text\":\"The fix is ready.\""));
+        assert!(!output.contains("</think>"));
+    }
+
+    #[tokio::test]
+    async fn converts_split_unopened_think_close_before_later_answer_chunks() {
+        let output = collect_with_context(vec![
+            "data: {\"id\":\"chatcmpl_glm_split_unopened\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Need to inspect\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_split_unopened\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\" the repo.</thi\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_split_unopened\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"nk>The fix\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_split_unopened\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\" is ready.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ], glm_repair_context())
+        .await;
+
+        assert!(output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("Need to inspect the repo."));
+        assert!(output.contains("\"text\":\"The fix is ready.\""));
+        assert!(!output.contains("</think>"));
+    }
+
+    #[tokio::test]
+    async fn strips_orphan_leading_thinking_close_marker_from_streamed_text() {
+        let output = collect_with_context(vec![
+            "data: {\"id\":\"chatcmpl_glm_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"</think\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"ing>\\n\\npong\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ], glm_repair_context())
+        .await;
+
+        assert!(output.contains("\"text\":\"pong\""));
+        assert!(!output.contains("</thinking>"));
+    }
+
+    #[tokio::test]
+    async fn keeps_long_raw_reasoning_out_of_visible_text_until_a_late_close() {
+        let long_prefix = "a".repeat(65_536);
+        let first = format!(
+            "data: {{\"id\":\"chatcmpl_glm_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"role\":\"assistant\",\"content\":\"{long_prefix}\"}}}}]}}\n\n"
+        );
+
+        let output = collect_with_context(vec![
+            first.as_str(),
+            "data: {\"id\":\"chatcmpl_glm_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</think> visible answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ], glm_repair_context())
+        .await;
+
+        assert!(output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("visible answer"));
+        assert!(!output.contains("</think>"));
+    }
+
+    #[tokio::test]
+    async fn recognizes_a_split_close_after_long_raw_reasoning() {
+        let long_prefix = "a".repeat(65_536);
+        let first = format!(
+            "data: {{\"id\":\"chatcmpl_glm_split_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"role\":\"assistant\",\"content\":\"{long_prefix}\"}}}}]}}\n\n"
+        );
+
+        let output = collect_with_context(vec![
+            first.as_str(),
+            "data: {\"id\":\"chatcmpl_glm_split_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</thi\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_glm_split_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"nk> visible answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ], glm_repair_context())
+        .await;
+
+        assert!(output.contains("visible answer"));
+        assert!(!output.contains("</think>"));
+        assert!(!output.contains("</thi"));
+    }
+
+    #[tokio::test]
+    async fn preserves_an_incomplete_close_prefix_as_text_on_clean_stop() {
+        let long_prefix = "a".repeat(65_536);
+        let first = format!(
+            "data: {{\"id\":\"chatcmpl_glm_incomplete_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"role\":\"assistant\",\"content\":\"{long_prefix}\"}}}}]}}\n\n"
+        );
+
+        let output = collect_with_context(vec![
+            first.as_str(),
+            "data: {\"id\":\"chatcmpl_glm_incomplete_late_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\" </thi\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ], glm_repair_context())
+        .await;
+
+        assert!(output.contains("</thi"));
+        assert!(output.contains("event: response.output_text.done"));
+        assert!(!output.contains("event: response.reasoning_summary_text.done"));
+        assert!(output.contains("event: response.completed"));
+    }
+
+    #[test]
+    fn raw_repair_buffers_ambiguous_content_before_boundary_evidence() {
+        let mut state = ChatToResponsesState::with_tool_context(glm_repair_context());
+        let events = state.handle_chat_chunk(&json!({
+            "id": "chatcmpl_glm_immediate",
+            "created": 123,
+            "model": "glm-5.2",
+            "choices": [{"delta": {"content": "Need to inspect now."}}]
+        }));
+        let output = String::from_utf8(events.into_iter().flatten().collect()).unwrap();
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(!output.contains("event: response.output_text.delta"));
+        assert_eq!(state.inline_think.buffer, "Need to inspect now.");
+    }
+
+    #[tokio::test]
+    async fn raw_repair_preserves_literal_code_tag_pairs_as_answer_text() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_literal_code\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"Here is the implementation:\\n```js\\nconst open = text.indexOf(\\\"\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_literal_code\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"<think>\\\");\\nconst close = text.indexOf(\\\"</think>\\\");\\n```\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output.contains("event: response.output_text.delta"));
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output.contains("Here is the implementation:"));
+        assert!(output.contains(r#"text.indexOf(\"<think>\")"#));
+        assert!(output.contains(r#"text.indexOf(\"</think>\")"#));
+    }
+
+    #[tokio::test]
+    async fn raw_repair_preserves_marker_free_content_as_text_on_clean_stop() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_plain_stop\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"The implementation is ready.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output.contains("event: response.output_text.delta"));
+        assert!(output.contains("The implementation is ready."));
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
+    }
+
+    #[tokio::test]
+    async fn structured_reasoning_streams_normal_answer_text_without_delay() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_structured\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Reason first.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_structured\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"Answer now.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output.contains("Reason first."));
+        assert!(output.contains("\"text\":\"Answer now.\""));
+    }
+
+    #[tokio::test]
+    async fn structured_reasoning_preserves_balanced_answer_code_markers() {
+        let content = "Use `</think>` literally.\n```text\n<thinking>example</thinking>\n```";
+        let chunk = format!(
+            "data: {{\"id\":\"chatcmpl_structured_code\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\n",
+            serde_json::to_string(content).unwrap()
+        );
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_structured_code\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Reasoning is complete.\"}}]}\n\n",
+                chunk.as_str(),
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output_text_payloads(&output)
+            .iter()
+            .any(|text| text == content));
+    }
+
+    #[tokio::test]
+    async fn content_only_diagnostic_code_literal_close_marker_remains_text() {
+        let content = "The regression test `structured_reasoning_fails_late_single_visible_close_before_tool_call` confirms that a literal `</thinking>` before a tool call is quarantined. The `<thinking>` string here is diagnostic text, not a model delimiter.";
+        let chunk = format!(
+            "data: {{\"id\":\"chatcmpl_content_code_literal\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"role\":\"assistant\",\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\n",
+            serde_json::to_string(content).unwrap()
+        );
+        let output = collect_with_context(
+            vec![chunk.as_str(), "data: [DONE]\n\n"],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("event: response.reasoning_summary_text.delta"));
+        assert!(output_text_payloads(&output)
+            .iter()
+            .any(|text| text == content));
+    }
+
+    #[tokio::test]
+    async fn structured_reasoning_fails_later_visible_close_after_stripping_leading_orphan_close() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_structured_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Reason first.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_structured_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</thi\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_structured_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"nk>Answer with literal </think> text.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output.contains("event: response.failed"));
+        assert!(output.contains("upstream_reasoning_marker_leak"));
+        assert!(!output.contains("Answer with literal </think> text."));
+        assert!(!output.contains("\"delta\":\"</think>"));
+    }
+
+    #[tokio::test]
+    async fn structured_reasoning_strips_late_single_visible_close_before_tool_call() {
+        let prefix = "The event stream now shows command executions and file changes. ".repeat(20);
+        let answer = format!("{prefix}Let me check the command execution details.");
+        let content = format!("{answer}</think>");
+        let content_chunk = format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl_late_visible_close",
+                "created": 123,
+                "model": "glm-5.2",
+                "choices": [{"delta": {"content": content}}],
+            })
+        );
+        let output = collect_owned_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_late_visible_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect the event stream.\"}}]}\n\n".to_string(),
+                content_chunk,
+                "data: {\"id\":\"chatcmpl_late_visible_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_bad\",\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n".to_string(),
+                "data: [DONE]\n\n".to_string(),
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("</think>"));
+        assert!(output_text_payloads(&output)
+            .iter()
+            .any(|text| text == &answer));
+        assert!(output.contains("call_bad"));
+    }
+
+    #[tokio::test]
+    async fn structured_reasoning_strips_repeated_leading_orphan_close_markers_before_answer() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_structured_repeated_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"The test finished; prepare the summary.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_structured_repeated_close\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</think></think>The test is making much better progress now.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert_eq!(
+            output
+                .matches("\"delta\":\"The test is making much better progress now.\"")
+                .count(),
+            1
+        );
+        assert!(output.contains("\"text\":\"The test is making much better progress now.\""));
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("</think>"));
+    }
+
+    #[tokio::test]
+    async fn suppresses_single_tool_call_placeholder_reasoning() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_reasoning_loop\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"tool\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_loop\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\" call\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_loop\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_good\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("\"delta\":\"tool\""));
+        assert!(!output.contains("\"text\":\"tool call\""));
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("call_good"));
+    }
+
+    #[tokio::test]
+    async fn suppresses_tool_placeholder_prefix_at_tool_boundary_without_leaking_delta() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_reasoning_prefix\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"tool\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_prefix\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_good\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("\"delta\":\"tool\""));
+        assert!(!output.contains("\"text\":\"tool\""));
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("call_good"));
+    }
+
+    #[tokio::test]
+    async fn suppresses_single_reasoning_marker_fragment_without_visible_delta() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_reasoning_marker_once\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"</thinking\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_marker_once\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need to inspect the trace.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_marker_once\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"Done.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("</thinking"));
+        assert!(output.contains("Need to inspect the trace."));
+        assert!(output.contains("\"text\":\"Done.\""));
+    }
+
+    #[tokio::test]
+    async fn fails_repeated_reasoning_marker_fragments_without_leaking_them() {
+        let mut chunks = Vec::new();
+        for _ in 0..REASONING_GUARD_MIN_REPEATED_MARKER_FRAGMENTS {
+            chunks.push(
+                "data: {\"id\":\"chatcmpl_reasoning_marker_loop\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"</thinking\"}}]}\n\n",
+            );
+        }
+        chunks.push(
+            "data: {\"id\":\"chatcmpl_reasoning_marker_loop\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_bad\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+        );
+        chunks.push("data: [DONE]\n\n");
+
+        let output = collect_with_context(chunks, glm_repair_context()).await;
+
+        assert!(output.contains("event: response.failed"));
+        assert!(output.contains("upstream_reasoning_marker_loop"));
+        assert!(output.contains(
+            "Upstream response repeated raw reasoning delimiter fragments inside reasoning output"
+        ));
+        assert!(!output.contains("</thinking"));
+        assert!(!output.contains("call_bad"));
+    }
+
+    #[tokio::test]
+    async fn allows_sentence_starting_with_tool_prefix_in_reasoning() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_reasoning_tool_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"tool\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_tool_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\" use is appropriate here.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_tool_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_good\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(output.contains("\"delta\":\"tool use is appropriate here.\""));
+        assert!(output.contains("call_good"));
+    }
+
+    #[tokio::test]
+    async fn allows_sentence_that_mentions_tool_call_in_reasoning() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_reasoning_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"I will make a tool call to inspect the file.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_good\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("call_good"));
+    }
+
+    #[tokio::test]
+    async fn allows_split_tool_call_sentence_before_tool_call() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_reasoning_split_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"tool\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_split_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\" call\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_split_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\", let me proceed with the tool calls.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_reasoning_split_sentence\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_good\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"exec_command\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("event: response.failed"));
+        assert!(output.contains("\"delta\":\"tool call, let me proceed with the tool calls.\""));
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("call_good"));
+    }
+
+    #[tokio::test]
+    async fn structured_reasoning_fails_repeated_visible_orphan_close_markers() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_structured_pathological\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\" ming strategy a\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_structured_pathological\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\" andassertTrue's grab</think>.\\n\\n\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_structured_pathological\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</think></think> Args: application-license\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output.contains("event: response.failed"));
+        assert!(output.contains("upstream_reasoning_marker_leak"));
+        assert!(!output.contains("event: response.output_text.delta"));
+        assert!(!output.contains("andassertTrue"));
+    }
+
+    #[tokio::test]
+    async fn structured_desync_repairs_dangling_code_literal_until_last_close() {
+        let reasoning = "Interesting findings:\n\
+1. **1250 downstream bodies contain `<thinking>` or `</thinking>` or `` markers** — this is a significant finding!\n\
+2. **1 downstream body contains U+FFFD**\n\
+3. **44 upstream bodies contain `<thinking>` or `</thinking>` markers in server-side request logs**";
+        let content = "` markers** — the upstream is sending raw thinking markers.\n\
+\n\
+Wait, let me re-examine this. The downstream response body contains `<thinking>` markers in 1250 traces.\n\
+\n\
+Actually, the 1250 count includes `</think>` markers. Let me check which specific markers are appearing.\n\
+The upstream model may be outputting `<think>...</think>` or `<thinking>...</thinking>` tags.\n\
+\n\
+Let me look at some actual examples:\n\
+1. How many have `<thinking>` specifically\n\
+2. How many have `</thinking>` specifically\n\
+3. How many have `</think>` specifically\n\
+4. Sample some actual downstream bodies with these markers</think>Significant finding.";
+
+        let output = collect_owned_with_context(
+            vec![
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "id": "chatcmpl_structured_last_close",
+                        "created": 123,
+                        "model": "glm-5.2",
+                        "choices": [{"delta": {"reasoning_content": reasoning}}],
+                    })
+                ),
+                format!(
+                    "data: {}\n\n",
+                    json!({
+                        "id": "chatcmpl_structured_last_close",
+                        "created": 123,
+                        "model": "glm-5.2",
+                        "choices": [{"delta": {"content": content}, "finish_reason": "stop"}],
+                    })
+                ),
+                "data: [DONE]\n\n".to_string(),
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        let visible_text = output_text_payloads(&output).join("");
+        assert!(!output.contains("event: response.failed"));
+        assert!(output.contains("event: response.completed"));
+        assert!(visible_text.contains("Significant finding."));
+        assert!(!visible_text.contains("Wait, let me re-examine"));
+        assert!(!visible_text.contains("</think>"));
+    }
+
+    #[tokio::test]
+    async fn repairs_structured_desync_after_markdown_literal_close() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_desync\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect `markers: ['\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_desync\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"', '</thinking>', '<think>', '<thinking>']` then continue.\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_desync\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"</thi\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_desync\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"nk>Final answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        let visible = output_text_payloads(&output);
+        assert!(visible.iter().any(|text| text == "Final answer."));
+        assert!(visible.iter().all(|text| !text.contains("</think>")));
+        assert!(visible.iter().all(|text| !text.contains("</thinking>")));
+        assert!(output.contains("then continue."));
+    }
+
+    #[tokio::test]
+    async fn repairs_structured_desync_with_thinking_close_variant() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_desync_thinking\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect ```text\\nmarkers: \"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_desync_thinking\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"literal\\n``` then continue.</thin\"}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_desync_thinking\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"king>Answer.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        let visible = output_text_payloads(&output);
+        assert!(visible.iter().any(|text| text == "Answer."));
+        assert!(visible.iter().all(|text| !text.contains("</thinking>")));
+    }
+
+    #[tokio::test]
+    async fn structured_desync_without_late_close_falls_back_to_original_text() {
+        let content = "']` is the complete literal-code answer.";
+        let chunk = format!(
+            "data: {{\"id\":\"chatcmpl_desync_fallback\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\n",
+            serde_json::to_string(content).unwrap()
+        );
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_desync_fallback\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect `markers: ['\"}}]}\n\n",
+                chunk.as_str(),
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output_text_payloads(&output)
+            .iter()
+            .any(|text| text == content));
+    }
+
+    #[tokio::test]
+    async fn structured_desync_with_unprotected_opener_falls_back_unchanged() {
+        let content = "']` then show <think>literal</think> text.";
+        let chunk = format!(
+            "data: {{\"id\":\"chatcmpl_desync_open\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"content\":{}}},\"finish_reason\":\"stop\"}}]}}\n\n",
+            serde_json::to_string(content).unwrap()
+        );
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_desync_open\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect `markers: ['\"}}]}\n\n",
+                chunk.as_str(),
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output_text_payloads(&output)
+            .iter()
+            .any(|text| text == content));
+    }
+
+    #[tokio::test]
+    async fn structured_desync_without_close_falls_back_at_tool_boundary() {
+        let content = "']` is literal pre-tool text.";
+        let chunk = format!(
+            "data: {{\"id\":\"chatcmpl_desync_tool\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"content\":{}}}}}]}}\n\n",
+            serde_json::to_string(content).unwrap()
+        );
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_desync_tool\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Inspect `markers: ['\"}}]}\n\n",
+                chunk.as_str(),
+                "data: {\"id\":\"chatcmpl_desync_tool\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"inspect\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(output_text_payloads(&output)
+            .iter()
+            .any(|text| text == content));
+        assert!(output.contains("\"type\":\"function_call\""));
+        assert!(output.contains("\"name\":\"inspect\""));
+    }
+
+    #[tokio::test]
+    async fn preserves_unopened_close_marker_without_repair_context() {
+        let output = collect(vec![
+            "data: {\"id\":\"chatcmpl_generic_close\",\"created\":123,\"model\":\"generic\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"literal </think> marker\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ])
+        .await;
+
+        assert!(output.contains("literal </think> marker"));
+    }
+
+    #[test]
+    fn unopened_think_repair_is_opt_in_for_prefix_detection() {
+        assert!(matches!(
+            leading_think_prefix_decision("Need to inspect", false),
+            ThinkPrefixDecision::Text
+        ));
+        assert!(matches!(
+            leading_think_prefix_decision("Need to inspect</think>Done", false),
+            ThinkPrefixDecision::Text
+        ));
+        assert!(matches!(
+            leading_think_prefix_decision("Need to inspect</think>Done", true),
+            ThinkPrefixDecision::RawReasoning
+        ));
+    }
+
+    #[tokio::test]
     async fn converts_tool_call_chat_sse_to_responses_sse() {
         let output = collect(vec![
             "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}]}}]}\n\n",
@@ -1169,6 +2356,67 @@ mod tests {
         .await;
 
         assert!(output.contains(r#""arguments":"{\"a\":1,\"b\":2}""#));
+    }
+
+    #[tokio::test]
+    async fn repairs_leading_orphan_think_close_in_streamed_tool_arguments() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_tool_close\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\"}}]}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_tool_close\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"</think>{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("</think>"));
+        assert!(output.contains(r#""delta":"{\"path\":\"README.md\"}""#));
+        assert!(output.contains(r#""arguments":"{\"path\":\"README.md\"}""#));
+    }
+
+    #[tokio::test]
+    async fn repairs_split_leading_orphan_think_close_in_streamed_tool_arguments() {
+        let output = collect_with_context(
+            vec![
+                "data: {\"id\":\"chatcmpl_tool_split_close\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\"}}]}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_tool_split_close\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"</thi\"}}]}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_tool_split_close\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"nk>{\\\"path\\\":\\\"README.md\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains("</think>"));
+        assert!(output.contains(r#""delta":"{\"path\":\"README.md\"}""#));
+        assert!(output.contains(r#""arguments":"{\"path\":\"README.md\"}""#));
+    }
+
+    #[tokio::test]
+    async fn repairs_glm_alias_in_streamed_tool_arguments_and_reasoning() {
+        let alias = glm_think_open_alias_char();
+        let reasoning_chunk = format!(
+            "data: {{\"id\":\"chatcmpl_glm_alias\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"reasoning_content\":\"Need literal {alias} syntax.\"}}}}]}}\n\n"
+        );
+        let tool_args_chunk = format!(
+            "data: {{\"id\":\"chatcmpl_glm_alias\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"function\":{{\"arguments\":\"{{\\\"text\\\":\\\"{alias}\\\"}}\"}}}}]}},\"finish_reason\":\"tool_calls\"}}]}}\n\n"
+        );
+        let output = collect_with_context(
+            vec![
+                reasoning_chunk.as_str(),
+                "data: {\"id\":\"chatcmpl_glm_alias\",\"created\":123,\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"edit_file\"}}]}}]}\n\n",
+                tool_args_chunk.as_str(),
+                "data: [DONE]\n\n",
+            ],
+            glm_repair_context(),
+        )
+        .await;
+
+        assert!(!output.contains(alias));
+        assert!(output.contains("Need literal  syntax."));
+        assert!(output.contains(r#""delta":"{\"text\":\"<think>\"}""#));
+        assert!(output.contains(r#""arguments":"{\"text\":\"<think>\"}""#));
     }
 
     #[tokio::test]

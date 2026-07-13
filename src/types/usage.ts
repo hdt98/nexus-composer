@@ -1,4 +1,4 @@
-// 使用统计相关类型定义
+// Usage Statistics types.
 
 export interface TokenUsage {
   inputTokens: number;
@@ -14,8 +14,13 @@ export interface RequestLog {
   appType: string;
   model: string;
   requestModel?: string;
-  /** 写入时实际用于计价的模型名；路由接管 + request 计价模式下可能与 model 不同 */
+  /** Model actually used for pricing; route takeover may differ from `model`. */
   pricingModel?: string;
+  /** False when the upstream response omitted token usage. */
+  tokenUsageKnown: boolean;
+  /** True/false when pricing classification is exact; null for legacy rows
+   *  whose historical pricing coverage cannot be reconstructed. */
+  pricingKnown: boolean | null;
   costMultiplier: string;
   inputTokens: number;
   outputTokens: number;
@@ -27,8 +32,11 @@ export interface RequestLog {
   cacheCreationCostUsd: string;
   totalCostUsd: string;
   isStreaming: boolean;
+  /** Elapsed proxy request time through upstream response completion. */
   latencyMs: number;
+  /** Time to the first meaningful streaming payload, when observed. */
   firstTokenMs?: number;
+  /** Legacy total-duration alias; falls back to latencyMs when unstored. */
   durationMs?: number;
   statusCode: number;
   errorMessage?: string;
@@ -67,12 +75,19 @@ export interface ModelPricing {
 
 export interface UsageSummary {
   totalRequests: number;
+  /** Requests included in token totals. */
+  tokenUsageKnownRequests: number;
+  /** Exact priced-request count, or null for indeterminate legacy coverage. */
+  pricedRequestCount: number | null;
+  /** Requests backed by an observed proxy response. */
+  measuredRequestCount: number;
   totalCost: string;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheCreationTokens: number;
   totalCacheReadTokens: number;
-  successRate: number;
+  /** Successful measured proxy responses, or null when no outcome was observed. */
+  successRate: number | null;
   /** input + output + cache_creation + cache_read, all cache-normalized */
   realTotalTokens: number;
   /** cache_read / (input + cache_creation + cache_read), range 0–1 */
@@ -87,6 +102,9 @@ export interface UsageSummaryByApp {
 export interface DailyStats {
   date: string;
   requestCount: number;
+  /** Requests included in this bucket's token totals. */
+  tokenUsageKnownRequests: number;
+  pricedRequestCount: number | null;
   totalCost: string;
   totalTokens: number;
   totalInputTokens: number;
@@ -98,19 +116,28 @@ export interface DailyStats {
 export interface ProviderStats {
   providerId: string;
   providerName: string;
+  /** Providers are uniquely identified by the composite (providerId, appType). */
+  appType: string;
   requestCount: number;
+  tokenUsageKnownRequests: number;
+  pricedRequestCount: number | null;
   totalTokens: number;
   totalCost: string;
-  successRate: number;
-  avgLatencyMs: number;
+  /** Requests backed by an observed proxy response, excluding imported sessions. */
+  measuredRequestCount: number;
+  successRate?: number | null;
+  avgLatencyMs?: number | null;
 }
 
 export interface ModelStats {
   model: string;
   requestCount: number;
+  tokenUsageKnownRequests: number;
+  pricedRequestCount: number | null;
   totalTokens: number;
   totalCost: string;
-  avgCostPerRequest: string;
+  /** Null when the group has no priced requests. */
+  avgCostPerRequest: string | null;
 }
 
 export interface LogFilters {
@@ -123,12 +150,11 @@ export interface LogFilters {
 }
 
 /**
- * Dashboard 顶栏的全局筛选维度，作用于 Hero / 趋势图 / 三个统计 Tab。
+ * Global dashboard filters applied to the hero, trend chart, and statistic tabs.
  *
- * - `providerName` 按展示名精确匹配（与 Provider 统计列表同口径，含
- *   "Claude (Session)" 等会话占位名）；
- * - `model` 按「有效计价模型」匹配（pricing_model 优先、回落 model，
- *   与模型统计的分组口径一致）。
+ * - `providerName` exactly matches display names, including session placeholders.
+ * - `model` matches the effective pricing model, preferring pricing_model and
+ *   falling back to model, consistent with model-stat grouping.
  */
 export interface UsageScopeFilters {
   appType?: string;
@@ -239,9 +265,12 @@ type UsageCostLog = Pick<
   | "totalCostUsd"
   | "statusCode"
 > &
-  Partial<Pick<RequestLog, "costMultiplier">>;
+  Partial<
+    Pick<RequestLog, "costMultiplier" | "tokenUsageKnown" | "pricingKnown">
+  >;
 
 export function hasUsageTokens(log: UsageCostLog): boolean {
+  if (log.tokenUsageKnown === false) return false;
   return (
     log.inputTokens > 0 ||
     log.outputTokens > 0 ||
@@ -251,6 +280,14 @@ export function hasUsageTokens(log: UsageCostLog): boolean {
 }
 
 export function isUnpricedUsage(log: UsageCostLog): boolean {
+  if (log.tokenUsageKnown === false) return false;
+  if (Object.prototype.hasOwnProperty.call(log, "pricingKnown")) {
+    return log.pricingKnown === false;
+  }
+
+  // Compatibility fallback for request objects produced before pricingKnown
+  // was introduced. New backend responses always use the explicit marker so a
+  // genuinely free model is never confused with missing pricing.
   const totalCost = Number.parseFloat(log.totalCostUsd);
   const multiplier =
     log.costMultiplier == null
