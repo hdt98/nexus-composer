@@ -4,6 +4,7 @@
 
 use crate::app_config::AppType;
 use crate::provider::Provider;
+use crate::proxy::session::{extract_harness_identity, extract_request_id, HarnessIdentity};
 use crate::proxy::{
     extract_session_id,
     forwarder::RequestForwarder,
@@ -62,6 +63,9 @@ pub struct RequestContext {
     pub app_type: AppType,
     /// Session ID（从客户端请求提取或新生成）
     pub session_id: String,
+    /// Correlation values held for the complete logical request.
+    request_id: String,
+    harness_identity: Option<HarnessIdentity>,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
     /// 整流器配置
@@ -120,6 +124,8 @@ impl RequestContext {
         // 提取 Session ID
         let session_result = extract_session_id(headers, body, app_type_str);
         let session_id = session_result.session_id.clone();
+        let request_id = extract_request_id(headers);
+        let harness_identity = extract_harness_identity(headers, body, app_type_str);
 
         log::debug!(
             "[{}] Session ID: {} (from {:?}, client_provided: {})",
@@ -169,6 +175,8 @@ impl RequestContext {
             app_type_str,
             app_type,
             session_id,
+            request_id,
+            harness_identity,
             session_client_provided: session_result.client_provided,
             rectifier_config,
             optimizer_config,
@@ -235,6 +243,8 @@ impl RequestContext {
             self.current_provider_id.clone(),
             self.session_id.clone(),
             self.session_client_provided,
+            self.request_id.clone(),
+            self.harness_identity.clone(),
             first_byte_timeout,
             idle_timeout,
             self.rectifier_config.clone(),

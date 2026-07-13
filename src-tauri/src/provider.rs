@@ -76,6 +76,10 @@ impl Provider {
             || self.claude_base_url_contains("githubcopilot.com")
     }
 
+    pub(crate) fn supports_nexus_correlation(&self) -> bool {
+        self.provider_type() == Some("nexus")
+    }
+
     pub fn uses_managed_account_auth(&self) -> bool {
         self.is_github_copilot()
             || self.is_codex_oauth()
