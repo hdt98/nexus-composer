@@ -29,6 +29,7 @@ import {
   type ProviderPreset,
 } from "@/config/claudeProviderPresets";
 import {
+  codexPresetSettingsConfig,
   codexProviderPresets,
   type CodexProviderPreset,
 } from "@/config/codexProviderPresets";
@@ -307,6 +308,7 @@ function ProviderFormFull({
   const [activePreset, setActivePreset] = useState<{
     id: string;
     category?: ProviderCategory;
+    providerType?: string;
     isPartner?: boolean;
     partnerPromotionKey?: string;
     suggestedDefaults?: OpenClawSuggestedDefaults;
@@ -1435,7 +1437,9 @@ function ProviderFormFull({
 
     // 确定 providerType（新建时从预设获取，编辑时从现有数据获取）
     const providerType =
-      templatePreset?.providerType || initialData?.meta?.providerType;
+      activePreset?.providerType ||
+      templatePreset?.providerType ||
+      initialData?.meta?.providerType;
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
@@ -1651,6 +1655,7 @@ function ProviderFormFull({
     setActivePreset({
       id: value,
       category: entry.preset.category,
+      providerType: (entry.preset as { providerType?: string }).providerType,
       isPartner: entry.preset.isPartner,
       partnerPromotionKey: entry.preset.partnerPromotionKey,
     });
@@ -1671,7 +1676,7 @@ function ProviderFormFull({
       form.reset({
         name: preset.nameKey ? t(preset.nameKey) : preset.name,
         websiteUrl: preset.websiteUrl ?? "",
-        settingsConfig: JSON.stringify({ auth, config }, null, 2),
+        settingsConfig: JSON.stringify(codexPresetSettingsConfig(preset), null, 2),
         icon: preset.icon ?? "",
         iconColor: preset.iconColor ?? "",
       });

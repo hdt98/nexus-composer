@@ -13,6 +13,7 @@ from datetime import datetime
 BENCH_DIR = Path(__file__).parent.parent
 DATASETS_DIR = BENCH_DIR / "datasets"
 RESULTS_DIR = BENCH_DIR / "results"
+NEXUS_ENDPOINT = os.environ.get("NEXUS_ENDPOINT", "http://127.0.0.1:30001/v1")
 NODE_PATH = "/Users/sonln4/.nvm/versions/node/v22.22.0/bin"
 
 BENCHMARKS = {
@@ -202,7 +203,7 @@ def main():
                 json.dump({
                     "timestamp": datetime.now().isoformat(),
                     "model": "glm-5.2",
-                    "endpoint": "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+                    "endpoint": NEXUS_ENDPOINT,
                     "limit_per_benchmark": limit,
                     "results": all_results,
                 }, f, indent=2)

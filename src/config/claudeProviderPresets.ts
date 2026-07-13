@@ -2,6 +2,13 @@
  * 预设供应商配置模板
  */
 import { ProviderCategory } from "../types";
+import {
+  NEXUS_AUTH_TOKEN,
+  NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CAPABILITIES,
+  NEXUS_CLAUDE_MODEL,
+  NEXUS_ENDPOINT,
+} from "./nexus";
 
 export interface TemplateValueConfig {
   label: string;
@@ -60,7 +67,7 @@ export interface ProviderPreset {
   // 供应商类型标识（用于特殊供应商检测）
   // - "github_copilot": GitHub Copilot 供应商（需要 OAuth 认证）
   // - "codex_oauth": OpenAI Codex via ChatGPT Plus/Pro 反代（需要 OAuth 认证）
-  providerType?: "github_copilot" | "codex_oauth";
+  providerType?: "github_copilot" | "codex_oauth" | "nexus";
 
   // 是否需要 OAuth 认证（而非 API Key）
   requiresOAuth?: boolean;
@@ -74,26 +81,29 @@ export interface ProviderPreset {
 }
 
 export const providerPresets: ProviderPreset[] = [
-  // Nexus Composer MVP1 default: routes Claude Anthropic Messages -> OpenAI Chat
-  // Completions via Nexus Composer's existing local proxy conversion layer to SGLang.
-  // SGLang is an externally managed service; do not mutate its lifecycle.
+  // Nexus routes Anthropic Messages through the built-in Chat adapter.
   {
-    name: "Nexus",
+    name: "Nexus GLM-5.2",
     nameKey: "providerForm.presets.nexus",
-    websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+    websiteUrl: NEXUS_ENDPOINT,
     settingsConfig: {
-      nexusCapabilities: { reasoningBoundary: "think_close" },
+      nexusCapabilities: NEXUS_CAPABILITIES,
       env: {
-        ANTHROPIC_BASE_URL: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
-        ANTHROPIC_AUTH_TOKEN: "onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc",
-        ANTHROPIC_MODEL: "glm-5.2",
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-5.2",
-        ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.2",
-        ANTHROPIC_DEFAULT_OPUS_MODEL: "glm-5.2",
+        ANTHROPIC_BASE_URL: NEXUS_ENDPOINT,
+        ANTHROPIC_AUTH_TOKEN: NEXUS_AUTH_TOKEN,
+        ANTHROPIC_MODEL: NEXUS_CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: NEXUS_CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: NEXUS_CLAUDE_MODEL,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: NEXUS_CLAUDE_MODEL,
+        API_TIMEOUT_MS: "3000000",
+        CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(NEXUS_AUTO_COMPACT_TOKENS),
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+        CLAUDE_CODE_ATTRIBUTION_HEADER: "0",
       },
     },
-    endpointCandidates: ["https://glm-test-glm52-tp4.onenexus-do.cloud/v1"],
+    endpointCandidates: [NEXUS_ENDPOINT],
     apiFormat: "openai_chat",
+    providerType: "nexus",
     category: "third_party",
     icon: "nexus",
     iconColor: "#6366F1",
