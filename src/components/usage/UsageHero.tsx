@@ -77,7 +77,10 @@ const TITLE_THEMES: Record<AppType | "all", TitleTheme> = {
  */
 function aggregateSummaries(items: UsageSummary[]): UsageSummary {
   let totalRequests = 0;
-  let successCount = 0;
+  let tokenUsageKnownRequests = 0;
+  let pricedRequestCount: number | null = 0;
+  let measuredRequestCount = 0;
+  let successfulRequestCount = 0;
   let totalCostNum = 0;
   let input = 0;
   let output = 0;
@@ -86,7 +89,13 @@ function aggregateSummaries(items: UsageSummary[]): UsageSummary {
 
   for (const s of items) {
     totalRequests += s.totalRequests;
-    successCount += Math.round((s.totalRequests * s.successRate) / 100);
+    tokenUsageKnownRequests += s.tokenUsageKnownRequests;
+    pricedRequestCount =
+      pricedRequestCount == null || s.pricedRequestCount == null
+        ? null
+        : pricedRequestCount + s.pricedRequestCount;
+    measuredRequestCount += s.measuredRequestCount;
+    successfulRequestCount += s.successfulRequestCount;
     totalCostNum += parseFiniteNumber(s.totalCost) ?? 0;
     input += s.totalInputTokens;
     output += s.totalOutputTokens;
@@ -97,12 +106,19 @@ function aggregateSummaries(items: UsageSummary[]): UsageSummary {
   const cacheableInput = input + cacheCreation + cacheRead;
   return {
     totalRequests,
+    tokenUsageKnownRequests,
+    pricedRequestCount,
+    measuredRequestCount,
+    successfulRequestCount,
     totalCost: totalCostNum.toFixed(6),
     totalInputTokens: input,
     totalOutputTokens: output,
     totalCacheCreationTokens: cacheCreation,
     totalCacheReadTokens: cacheRead,
-    successRate: totalRequests > 0 ? (successCount / totalRequests) * 100 : 0,
+    successRate:
+      measuredRequestCount > 0
+        ? (successfulRequestCount / measuredRequestCount) * 100
+        : null,
     realTotalTokens: input + output + cacheCreation + cacheRead,
     cacheHitRate: cacheableInput > 0 ? cacheRead / cacheableInput : 0,
   };
@@ -201,6 +217,8 @@ export function UsageHero({
   const hitRate = summary?.cacheHitRate ?? 0;
   const totalCost = parseFiniteNumber(summary?.totalCost);
   const requests = summary?.totalRequests ?? 0;
+  const tokenKnown = summary?.tokenUsageKnownRequests ?? 0;
+  const pricedKnown = summary?.pricedRequestCount;
 
   const cacheWriteDisplay = {
     value:
@@ -289,6 +307,20 @@ export function UsageHero({
                   <span className="font-semibold flex items-center gap-1.5 text-sm tabular-nums">
                     <Activity className="h-3.5 w-3.5 text-blue-500" />
                     {requests.toLocaleString()}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground tabular-nums whitespace-nowrap">
+                    {t("usage.tokenCoverageCompact", {
+                      known: tokenKnown.toLocaleString(),
+                      total: requests.toLocaleString(),
+                    })}
+                    {" · "}
+                    {t("usage.pricingCoverageCompact", {
+                      priced:
+                        pricedKnown == null
+                          ? t("common.unknown")
+                          : pricedKnown.toLocaleString(),
+                      known: tokenKnown.toLocaleString(),
+                    })}
                   </span>
                 </div>
                 <div className="w-px h-8 bg-border/60" />

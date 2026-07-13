@@ -2,7 +2,7 @@
 //!
 //! 负责数据库表结构的创建和版本迁移。
 
-use super::{lock_conn, Database, SCHEMA_VERSION};
+use super::{lock_conn, Database, SCHEMA_VERSION, USAGE_PRERELEASE_SCHEMA_VERSIONS};
 use crate::error::AppError;
 use rusqlite::{params, Connection};
 use serde::Serialize;
@@ -187,12 +187,14 @@ impl Database {
             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
             pricing_model TEXT,
+            token_usage_known INTEGER NOT NULL DEFAULT 1,
+            pricing_known INTEGER,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
             cache_read_tokens INTEGER NOT NULL DEFAULT 0, cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
             input_cost_usd TEXT NOT NULL DEFAULT '0', output_cost_usd TEXT NOT NULL DEFAULT '0',
             cache_read_cost_usd TEXT NOT NULL DEFAULT '0', cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
-            duration_ms INTEGER, status_code INTEGER NOT NULL, error_message TEXT, session_id TEXT,
+            duration_ms INTEGER, status_code INTEGER NOT NULL, error_message TEXT, stream_outcome TEXT, session_id TEXT,
             provider_type TEXT, is_streaming INTEGER NOT NULL DEFAULT 0,
             cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL,
             data_source TEXT NOT NULL DEFAULT 'proxy'
@@ -271,12 +273,16 @@ impl Database {
                 pricing_model TEXT NOT NULL DEFAULT '',
                 request_count INTEGER NOT NULL DEFAULT 0,
                 success_count INTEGER NOT NULL DEFAULT 0,
+                measured_request_count INTEGER NOT NULL DEFAULT 0,
+                token_usage_known_count INTEGER NOT NULL DEFAULT 0,
+                priced_request_count INTEGER,
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_read_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                latency_sum INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
             )",
             [],
@@ -376,7 +382,7 @@ impl Database {
 
         let mut version = Self::get_user_version(conn)?;
 
-        if version > SCHEMA_VERSION {
+        if version > SCHEMA_VERSION && !USAGE_PRERELEASE_SCHEMA_VERSIONS.contains(&version) {
             conn.execute("ROLLBACK TO schema_migration;", []).ok();
             conn.execute("RELEASE schema_migration;", []).ok();
             return Err(AppError::Database(format!(
@@ -385,6 +391,14 @@ impl Database {
         }
 
         let result = (|| {
+            if USAGE_PRERELEASE_SCHEMA_VERSIONS.contains(&version) {
+                log::info!(
+                    "Normalizing prerelease usage schema v{version} to stable v{SCHEMA_VERSION}"
+                );
+                Self::normalize_usage_prerelease_schema(conn)?;
+                Self::set_user_version(conn, SCHEMA_VERSION)?;
+                version = SCHEMA_VERSION;
+            }
             while version < SCHEMA_VERSION {
                 match version {
                     0 => {
@@ -443,6 +457,13 @@ impl Database {
                         log::info!("迁移数据库从 v10 到 v11（usage_daily_rollups 保留 request_model 维度）");
                         Self::migrate_v10_to_v11(conn)?;
                         Self::set_user_version(conn, 11)?;
+                    }
+                    11 => {
+                        log::info!(
+                            "Migrating database from v11 to v12: usage coverage and stream outcomes"
+                        );
+                        Self::migrate_v11_to_v12(conn)?;
+                        Self::set_user_version(conn, 12)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1270,6 +1291,173 @@ impl Database {
         Ok(())
     }
 
+    fn migrate_v11_to_v12(conn: &Connection) -> Result<(), AppError> {
+        let has = |table: &str, columns: &[&str]| -> Result<bool, AppError> {
+            for column in columns {
+                if !Self::has_column(conn, table, column)? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        };
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            for (name, definition) in [
+                ("token_usage_known", "INTEGER NOT NULL DEFAULT 1"),
+                ("pricing_known", "INTEGER"),
+                ("stream_outcome", "TEXT"),
+            ] {
+                Self::add_column_if_missing(conn, "proxy_request_logs", name, definition)?;
+            }
+            if has(
+                "proxy_request_logs",
+                &[
+                    "input_tokens",
+                    "output_tokens",
+                    "cache_read_tokens",
+                    "cache_creation_tokens",
+                ],
+            )? {
+                conn.execute_batch(
+                    "UPDATE proxy_request_logs SET token_usage_known = 0, pricing_known = 0
+                      WHERE input_tokens = 0 AND output_tokens = 0
+                        AND cache_read_tokens = 0 AND cache_creation_tokens = 0;",
+                )?;
+            }
+            if has(
+                "proxy_request_logs",
+                &[
+                    "input_cost_usd",
+                    "output_cost_usd",
+                    "cache_read_cost_usd",
+                    "cache_creation_cost_usd",
+                    "total_cost_usd",
+                ],
+            )? {
+                conn.execute_batch(
+                    "UPDATE proxy_request_logs SET pricing_known = 1
+                      WHERE token_usage_known != 0 AND (
+                        CAST(input_cost_usd AS REAL) != 0 OR CAST(output_cost_usd AS REAL) != 0 OR
+                        CAST(cache_read_cost_usd AS REAL) != 0 OR CAST(cache_creation_cost_usd AS REAL) != 0 OR
+                        CAST(total_cost_usd AS REAL) != 0);",
+                )?;
+            }
+        }
+        if Self::table_exists(conn, "usage_daily_rollups")? {
+            for (name, definition) in [
+                ("token_usage_known_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("measured_request_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("priced_request_count", "INTEGER"),
+                ("latency_sum", "INTEGER NOT NULL DEFAULT 0"),
+            ] {
+                Self::add_column_if_missing(conn, "usage_daily_rollups", name, definition)?;
+            }
+            if has(
+                "usage_daily_rollups",
+                &["success_count", "request_count", "avg_latency_ms"],
+            )? {
+                conn.execute_batch(
+                    "UPDATE usage_daily_rollups
+                        SET token_usage_known_count = success_count,
+                            priced_request_count = CASE WHEN request_count = 0 THEN 0 ELSE NULL END,
+                            measured_request_count = 0, success_count = 0,
+                            avg_latency_ms = 0, latency_sum = 0;",
+                )?;
+            }
+        }
+        conn.execute("DROP TABLE IF EXISTS proxy_trace_logs", [])?;
+        Ok(())
+    }
+
+    /// Normalize databases opened by short-lived prerelease builds that used
+    /// v13-v16 for pieces now consolidated into stable v12. The version is only
+    /// a hint: lineage markers must be present, and existing classifications are
+    /// never recomputed. Only a newly added column receives conservative legacy
+    /// initialization, making this safe to retry after an interrupted startup.
+    fn normalize_usage_prerelease_schema(conn: &Connection) -> Result<(), AppError> {
+        let recognized = Self::table_exists(conn, "proxy_request_logs")?
+            && Self::table_exists(conn, "usage_daily_rollups")?
+            && Self::has_column(conn, "proxy_request_logs", "token_usage_known")?
+            && Self::has_column(conn, "usage_daily_rollups", "token_usage_known_count")?;
+        if !recognized {
+            return Err(AppError::Database(
+                "Database version resembles a Nexus usage prerelease, but its schema shape is not recognized"
+                    .to_string(),
+            ));
+        }
+
+        let pricing_added =
+            Self::add_column_if_missing(conn, "proxy_request_logs", "pricing_known", "INTEGER")?;
+        if pricing_added {
+            if Self::has_column(conn, "proxy_request_logs", "token_usage_known")? {
+                conn.execute(
+                    "UPDATE proxy_request_logs SET pricing_known = 0 WHERE token_usage_known = 0",
+                    [],
+                )?;
+            }
+            let cost_columns = [
+                "input_cost_usd",
+                "output_cost_usd",
+                "cache_read_cost_usd",
+                "cache_creation_cost_usd",
+                "total_cost_usd",
+            ];
+            if cost_columns.iter().try_fold(true, |present, column| {
+                Ok::<_, AppError>(present && Self::has_column(conn, "proxy_request_logs", column)?)
+            })? {
+                conn.execute_batch(
+                    "UPDATE proxy_request_logs SET pricing_known = 1
+                     WHERE token_usage_known != 0 AND (
+                       CAST(input_cost_usd AS REAL) != 0 OR CAST(output_cost_usd AS REAL) != 0 OR
+                       CAST(cache_read_cost_usd AS REAL) != 0 OR CAST(cache_creation_cost_usd AS REAL) != 0 OR
+                       CAST(total_cost_usd AS REAL) != 0);",
+                )?;
+            }
+        }
+        Self::add_column_if_missing(conn, "proxy_request_logs", "stream_outcome", "TEXT")?;
+
+        let measured_added = Self::add_column_if_missing(
+            conn,
+            "usage_daily_rollups",
+            "measured_request_count",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        if measured_added {
+            conn.execute_batch(
+                "UPDATE usage_daily_rollups
+                 SET measured_request_count = 0, success_count = 0, avg_latency_ms = 0;",
+            )?;
+        }
+
+        let priced_added = Self::add_column_if_missing(
+            conn,
+            "usage_daily_rollups",
+            "priced_request_count",
+            "INTEGER",
+        )?;
+        if priced_added && Self::has_column(conn, "usage_daily_rollups", "request_count")? {
+            conn.execute(
+                "UPDATE usage_daily_rollups SET priced_request_count = 0 WHERE request_count = 0",
+                [],
+            )?;
+        }
+
+        let latency_added = Self::add_column_if_missing(
+            conn,
+            "usage_daily_rollups",
+            "latency_sum",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        if latency_added && !measured_added {
+            conn.execute_batch(
+                "UPDATE usage_daily_rollups
+                 SET latency_sum = avg_latency_ms * measured_request_count;",
+            )?;
+        }
+
+        conn.execute("DROP TABLE IF EXISTS proxy_trace_logs", [])?;
+        Ok(())
+    }
+
     /// 插入默认模型定价数据
     /// 格式: (model_id, display_name, input, output, cache_read, cache_creation)
     /// 注意: model_id 使用短横线格式（如 claude-haiku-4-5），与 API 返回的模型名称标准化后一致
@@ -1883,7 +2071,6 @@ impl Database {
             ("glm-5", "GLM-5", "1", "3.2", "0.2", "0"),
             ("glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0"),
             ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
-            ("glm-5.2-sglang", "GLM-5.2 SGLang", "1.4", "4.4", "0.26", "0"),
             // MiMo (小米)
             (
                 "mimo-v2-flash",
@@ -2452,7 +2639,17 @@ impl Database {
     fn ensure_model_pricing_seeded_on_conn(conn: &Connection) -> Result<(), AppError> {
         // 每次启动都执行 INSERT OR IGNORE，增量追加新模型；仅修复仍等于旧内置值的定价。
         Self::seed_model_pricing(conn)?;
-        Self::repair_current_model_pricing(conn)
+        Self::repair_current_model_pricing(conn)?;
+        // The serving implementation is not a distinct billable model. Remove
+        // the legacy internal alias; lookup normalization resolves it to glm-5.2.
+        conn.execute(
+            "DELETE FROM model_pricing WHERE model_id = 'glm-5.2-sglang'",
+            [],
+        )
+        .map_err(|e| {
+            AppError::Database(format!("Failed to remove legacy GLM pricing alias: {e}"))
+        })?;
+        Ok(())
     }
 
     // --- 辅助方法 ---

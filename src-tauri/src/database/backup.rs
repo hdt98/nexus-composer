@@ -10,6 +10,7 @@ use rusqlite::backup::Backup;
 use rusqlite::types::ValueRef;
 use rusqlite::Connection;
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -43,6 +44,44 @@ pub struct BackupEntry {
 }
 
 impl Database {
+    pub(crate) fn sanitize_legacy_trace_backup(backup_path: &Path) -> Result<(), AppError> {
+        if !backup_path.exists() {
+            return Ok(());
+        }
+        let sanitized = Connection::open(backup_path).and_then(|conn| {
+            conn.execute_batch(
+                "PRAGMA secure_delete = ON;
+                 DROP TABLE IF EXISTS proxy_trace_logs;
+                 VACUUM;",
+            )
+        });
+        match sanitized {
+            Ok(()) => Self::remove_sqlite_files(backup_path, false),
+            Err(sanitize_error) => Self::remove_sqlite_files(backup_path, true).map_err(|error| {
+                AppError::Database(format!(
+                    "Could not sanitize migration backup ({sanitize_error}) or delete it ({error})"
+                ))
+            }),
+        }
+    }
+
+    fn remove_sqlite_files(path: &Path, include_main: bool) -> Result<(), AppError> {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            if suffix.is_empty() && !include_main {
+                continue;
+            }
+            let mut file = path.as_os_str().to_os_string();
+            file.push(suffix);
+            let file = PathBuf::from(file);
+            match fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(AppError::io(&file, error)),
+            }
+        }
+        Ok(())
+    }
+
     /// 导出为 SQLite 兼容的 SQL 文本（内存字符串，完整导出）
     pub fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
@@ -692,7 +731,60 @@ mod tests {
     use super::Database;
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
+    use rusqlite::Connection;
     use serial_test::serial;
+    use std::{fs, path::PathBuf};
+
+    #[test]
+    fn migration_backup_sanitization_removes_trace_table_and_raw_bytes() -> Result<(), AppError> {
+        const SENTINEL: &str = "NEXUS_RAW_TRACE_BODY_SENTINEL_7c834fbe93d14c4c";
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let backup_path = temp_dir.path().join("legacy-migration-backup.db");
+        {
+            let conn = Connection::open(&backup_path)?;
+            conn.execute(
+                "CREATE TABLE proxy_trace_logs (
+                    request_id TEXT PRIMARY KEY,
+                    request_body TEXT,
+                    upstream_response_body TEXT,
+                    downstream_response_body TEXT
+                )",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO proxy_trace_logs (
+                    request_id, request_body,
+                    upstream_response_body, downstream_response_body
+                ) VALUES ('trace-1', ?1, ?1, ?1)",
+                [SENTINEL],
+            )?;
+        }
+
+        let before = fs::read(&backup_path).unwrap();
+        assert!(
+            before
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes()),
+            "fixture must contain sentinel"
+        );
+        let mut shm_path = backup_path.as_os_str().to_os_string();
+        shm_path.push("-shm");
+        let shm_path = PathBuf::from(shm_path);
+        fs::write(&shm_path, SENTINEL).unwrap();
+
+        Database::sanitize_legacy_trace_backup(&backup_path)?;
+        assert!(!shm_path.exists());
+        let after = fs::read(&backup_path).unwrap();
+        assert!(
+            !after
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL.as_bytes()),
+            "VACUUM must remove raw trace bytes"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {

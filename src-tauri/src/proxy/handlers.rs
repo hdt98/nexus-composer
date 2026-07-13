@@ -12,8 +12,7 @@ use super::{
     error_mapper::{get_error_message, map_proxy_error_to_status},
     forwarder::ActiveConnectionGuard,
     handler_config::{
-        claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
-        CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
+        CLAUDE_PARSER_CONFIG, CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
     },
     handler_context::RequestContext,
     providers::{
@@ -28,9 +27,9 @@ use super::{
         transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
-        create_logged_passthrough_stream, process_response, read_decoded_body,
-        strip_entity_headers_for_rebuilt_body, strip_hop_by_hop_response_headers,
-        usage_logging_enabled, SseUsageCollector,
+        create_logged_passthrough_stream, create_usage_collector, process_response,
+        read_decoded_body, strip_entity_headers_for_rebuilt_body,
+        strip_hop_by_hop_response_headers, usage_logging_enabled,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -42,8 +41,13 @@ use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use bytes::Bytes;
+use futures::StreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 fn adapts_reasoning_boundaries(ctx: &RequestContext) -> bool {
     ReasoningPolicy::from_provider(&ctx.provider).adapts_boundaries()
@@ -230,7 +234,7 @@ async fn handle_messages_for_app(
 
     // Claude 特有：格式转换处理
     if needs_transform {
-        return handle_claude_transform(
+        let transformed = handle_claude_transform(
             response,
             &ctx,
             &state,
@@ -240,6 +244,10 @@ async fn handle_messages_for_app(
             connection_guard,
         )
         .await;
+        if let Err(error) = &transformed {
+            log_forward_error(&state, &ctx, is_stream, error);
+        }
+        return transformed;
     }
 
     // 通用响应处理（透传模式）
@@ -278,6 +286,54 @@ fn validate_claude_desktop_gateway_auth(
         ));
     }
     Ok(())
+}
+
+fn track_upstream_usage_presence<E: Send + 'static>(
+    stream: impl futures::Stream<Item = Result<Bytes, E>> + Send + 'static,
+    api_format: String,
+    usage_reported: Arc<AtomicBool>,
+) -> impl futures::Stream<Item = Result<Bytes, E>> + Send {
+    async_stream::stream! {
+        let mut buffer = String::new();
+        let mut utf8_remainder = Vec::new();
+        tokio::pin!(stream);
+
+        while let Some(chunk) = stream.next().await {
+            if let Ok(bytes) = &chunk {
+                crate::proxy::sse::append_utf8_safe(
+                    &mut buffer,
+                    &mut utf8_remainder,
+                    bytes,
+                );
+                while let Some(block) = take_sse_block(&mut buffer) {
+                    let data = block
+                        .lines()
+                        .filter_map(|line| strip_sse_field(line, "data"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if data.is_empty() || data.trim() == "[DONE]" {
+                        continue;
+                    }
+                    if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                        let present = if api_format == "gemini_native" {
+                            value.get("usageMetadata").is_some_and(Value::is_object)
+                        } else if api_format == "openai_responses" {
+                            value
+                                .pointer("/response/usage")
+                                .or_else(|| value.get("usage"))
+                                .is_some_and(Value::is_object)
+                        } else {
+                            value.get("usage").is_some_and(Value::is_object)
+                        };
+                        if present {
+                            usage_reported.store(true, Ordering::Release);
+                        }
+                    }
+                }
+            }
+            yield chunk;
+        }
+    }
 }
 
 /// Claude 格式转换处理（独有逻辑）
@@ -321,7 +377,12 @@ async fn handle_claude_transform(
 
     if use_streaming {
         // 根据 api_format 选择流式转换器
-        let stream = response.bytes_stream();
+        let upstream_usage_reported = Arc::new(AtomicBool::new(false));
+        let stream = track_upstream_usage_presence(
+            response.bytes_stream(),
+            api_format.to_string(),
+            upstream_usage_reported.clone(),
+        );
         let sse_stream: Box<
             dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
         > = if api_format == "openai_responses" {
@@ -342,66 +403,13 @@ async fn handle_claude_transform(
             Box::new(Box::pin(create_anthropic_sse_stream(stream)))
         };
 
-        // 创建使用量收集器；关闭 usage logging 时不要再解析转换后的 SSE。
-        let usage_collector = if usage_logging_enabled(state) {
-            let state = state.clone();
-            let provider_id = ctx.provider.id.clone();
-            let request_model = ctx.request_model.clone();
-            // 上游/转换层未回显模型时，优先用映射后的出站模型兜底（路由接管真值），
-            // 其次才是客户端请求别名。空字符串视为缺失（转换器对无回显上游会合成 ""）。
-            let fallback_model = ctx
-                .outbound_model
-                .clone()
-                .unwrap_or_else(|| ctx.request_model.clone());
-            let status_code = status.as_u16();
-            let start_time = ctx.start_time;
-            let session_id = ctx.session_id.clone();
-            // 用 ctx 的 app_type：Claude Desktop 网关也走此转换路径，硬编码
-            // "claude" 会把 claude-desktop 的行错记到 claude 名下
-            let app_type_str = ctx.app_type_str;
-
-            Some(SseUsageCollector::new(
-                start_time,
-                Some(claude_stream_usage_event_filter),
-                move |events, first_token_ms| {
-                    if let Some(usage) = TokenUsage::from_claude_stream_events(&events) {
-                        let model = usage
-                            .model
-                            .clone()
-                            .filter(|m| !m.is_empty())
-                            .unwrap_or_else(|| fallback_model.clone());
-                        let latency_ms = start_time.elapsed().as_millis() as u64;
-                        let state = state.clone();
-                        let provider_id = provider_id.clone();
-                        let session_id = session_id.clone();
-                        let request_model = request_model.clone();
-                        let outbound_model = fallback_model.clone();
-
-                        tokio::spawn(async move {
-                            log_usage(
-                                &state,
-                                &provider_id,
-                                app_type_str,
-                                &model,
-                                &request_model,
-                                &outbound_model,
-                                usage,
-                                latency_ms,
-                                first_token_ms,
-                                true,
-                                status_code,
-                                Some(session_id),
-                            )
-                            .await;
-                        });
-                    } else {
-                        log::debug!("[Claude] OpenRouter 流式响应缺少 usage 统计，跳过消费记录");
-                    }
-                },
-            ))
-        } else {
-            None
-        };
+        let usage_collector = create_usage_collector(
+            ctx,
+            state,
+            status.as_u16(),
+            &CLAUDE_PARSER_CONFIG,
+            Some(upstream_usage_reported),
+        );
 
         // 获取流式超时配置
         let timeout_config = ctx.streaming_timeout_config();
@@ -483,6 +491,13 @@ async fn handle_claude_transform(
             ProxyError::TransformError(format!("Nexus rejected upstream output: {error}"))
         })?;
     }
+    let upstream_usage_reported = if api_format == "gemini_native" {
+        upstream_response
+            .get("usageMetadata")
+            .is_some_and(Value::is_object)
+    } else {
+        upstream_response.get("usage").is_some_and(Value::is_object)
+    };
 
     // 根据 api_format 选择非流式转换器
     let anthropic_response = if api_format == "openai_responses" {
@@ -503,12 +518,10 @@ async fn handle_claude_transform(
         e
     })?;
 
-    // 记录使用量
-    // 全 0 usage 不落账（对齐 Codex 流式收集器的 skip）：SSE 聚合兜底救回的流
-    // 在上游缺 stream_options.include_usage 时没有 usage，写入只会产生无意义空行
-    if let Some(usage) =
-        TokenUsage::from_claude_response(&anthropic_response).filter(|u| u.has_billable_tokens())
     {
+        let parsed_usage = TokenUsage::from_claude_response(&anthropic_response);
+        let token_usage_known = upstream_usage_reported && parsed_usage.is_some();
+        let usage = parsed_usage.unwrap_or_default();
         // 转换后的响应缺失/合成空 model 时，回退到映射后的出站模型（接管真值），
         // 再回退到客户端请求别名
         let model = anthropic_response
@@ -539,11 +552,14 @@ async fn handle_claude_transform(
                     &request_model,
                     &outbound_model,
                     usage,
+                    token_usage_known,
                     latency_ms,
                     None,
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    None,
+                    None,
                 )
                 .await;
             }
@@ -870,11 +886,26 @@ async fn handle_codex_chat_to_responses_transform(
         // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
         // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
         // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
+        log_forward_error(
+            state,
+            ctx,
+            is_stream,
+            &ProxyError::UpstreamError {
+                status: status.as_u16(),
+                body: None,
+            },
+        );
         return handle_codex_chat_error_response(response, ctx, status).await;
     }
 
     if is_stream || response.is_sse() {
         let stream = response.bytes_stream();
+        let upstream_usage_reported = Arc::new(AtomicBool::new(false));
+        let stream = track_upstream_usage_presence(
+            stream,
+            "openai_chat".to_string(),
+            upstream_usage_reported.clone(),
+        );
         let sse_stream: Box<
             dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
         > = if adapts_reasoning_boundaries(ctx) {
@@ -891,69 +922,13 @@ async fn handle_codex_chat_to_responses_transform(
         };
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
-        let usage_collector = if usage_logging_enabled(state) {
-            let state = state.clone();
-            let provider_id = ctx.provider.id.clone();
-            let request_model = ctx.request_model.clone();
-            // 接管/模型覆写场景的归因兜底：出站真值优先于客户端请求别名
-            let fallback_model = ctx
-                .outbound_model
-                .clone()
-                .unwrap_or_else(|| ctx.request_model.clone());
-            let app_type_str = ctx.app_type_str;
-            let start_time = ctx.start_time;
-            let session_id = ctx.session_id.clone();
-
-            Some(SseUsageCollector::new(
-                start_time,
-                Some(codex_stream_usage_event_filter),
-                move |events, first_token_ms| {
-                    let usage =
-                        TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
-                    // 上游遵守 OpenAI 语义省略 usage 时，Chat→Responses 转换器会合成一个
-                    // 全 0 的 response.completed，from_codex_response 对 input/output 字段
-                    // 存在（哪怕=0）即返回 Some。缺 nonzero 闸门会让全 0 usage 也被写入：
-                    // message_id=None → dedup_request_id 退化为随机 UUID，无法去重，每笔
-                    // 请求插入一条无意义空行、虚增请求数。对齐 Claude transform handler 的 skip。
-                    if !usage.has_billable_tokens() {
-                        log::debug!("[Codex] 流式响应 usage 全 0 或缺失，跳过消费记录");
-                        return;
-                    }
-                    let model = usage
-                        .model
-                        .clone()
-                        .filter(|m| !m.is_empty())
-                        .unwrap_or_else(|| fallback_model.clone());
-                    let latency_ms = start_time.elapsed().as_millis() as u64;
-
-                    let state = state.clone();
-                    let provider_id = provider_id.clone();
-                    let request_model = request_model.clone();
-                    let outbound_model = fallback_model.clone();
-                    let session_id = session_id.clone();
-
-                    tokio::spawn(async move {
-                        log_usage(
-                            &state,
-                            &provider_id,
-                            app_type_str,
-                            &model,
-                            &request_model,
-                            &outbound_model,
-                            usage,
-                            latency_ms,
-                            first_token_ms,
-                            true,
-                            status.as_u16(),
-                            Some(session_id),
-                        )
-                        .await;
-                    });
-                },
-            ))
-        } else {
-            None
-        };
+        let usage_collector = create_usage_collector(
+            ctx,
+            state,
+            status.as_u16(),
+            &CODEX_PARSER_CONFIG,
+            Some(upstream_usage_reported),
+        );
 
         let logged_stream = create_logged_passthrough_stream(
             sse_stream,
@@ -1014,6 +989,7 @@ async fn handle_codex_chat_to_responses_transform(
             ProxyError::TransformError(format!("Nexus rejected upstream output: {error}"))
         })?;
     }
+    let upstream_usage_reported = chat_response.get("usage").is_some_and(Value::is_object);
     let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
         &tool_context,
@@ -1027,13 +1003,10 @@ async fn handle_codex_chat_to_responses_transform(
         .record_response(&responses_response)
         .await;
 
-    // 上游非流式 Chat 省略 usage 时，chat_usage_to_responses_usage 会合成全 0 usage
-    // (transform_codex_chat.rs:1581)，from_codex_response 对 input/output 字段存在(哪怕=0)
-    // 即返回 Some。用 has_billable_tokens 闸门跳过全 0，避免空行虚增请求数——与流式分支
-    // 及 Claude transform handler 的 skip 行为对齐。
-    if let Some(usage) = TokenUsage::from_codex_response_auto(&responses_response)
-        .filter(TokenUsage::has_billable_tokens)
     {
+        let parsed_usage = TokenUsage::from_codex_response_auto(&responses_response);
+        let token_usage_known = upstream_usage_reported && parsed_usage.is_some();
+        let usage = parsed_usage.unwrap_or_default();
         let model = responses_response
             .get("model")
             .and_then(|m| m.as_str())
@@ -1061,11 +1034,14 @@ async fn handle_codex_chat_to_responses_transform(
                     &request_model,
                     &outbound_model,
                     usage,
+                    token_usage_known,
                     latency_ms,
                     None,
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    None,
+                    None,
                 )
                 .await;
             }
@@ -2031,11 +2007,14 @@ async fn log_usage(
     request_model: &str,
     outbound_model: &str,
     usage: TokenUsage,
+    token_usage_known: bool,
     latency_ms: u64,
     first_token_ms: Option<u64>,
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    stream_outcome: Option<String>,
+    error_message: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -2063,6 +2042,7 @@ async fn log_usage(
         request_model.to_string(),
         pricing_model.to_string(),
         usage,
+        token_usage_known,
         multiplier,
         latency_ms,
         first_token_ms,
@@ -2070,6 +2050,8 @@ async fn log_usage(
         session_id,
         None, // provider_type
         is_streaming,
+        stream_outcome,
+        error_message,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
@@ -2079,10 +2061,16 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        responses_sse_to_response_value, should_use_claude_transform_streaming,
+        track_upstream_usage_presence, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
+    use bytes::Bytes;
+    use futures::{stream, StreamExt};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {
@@ -2101,6 +2089,31 @@ mod tests {
         assert!(!body_looks_like_sse("<html><body>blocked</body></html>"));
         assert!(!body_looks_like_sse("Bad Gateway"));
         assert!(!body_looks_like_sse(""));
+    }
+
+    #[tokio::test]
+    async fn usage_presence_tracker_distinguishes_reported_zero_from_omission() {
+        let reported = Arc::new(AtomicBool::new(false));
+        let tracked = track_upstream_usage_presence(
+            stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+                b"data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0}}\n\n",
+            ))]),
+            "openai_chat".to_string(),
+            reported.clone(),
+        );
+        let _: Vec<_> = tracked.collect().await;
+        assert!(reported.load(Ordering::Acquire));
+
+        let omitted = Arc::new(AtomicBool::new(false));
+        let tracked = track_upstream_usage_presence(
+            stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
+                b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            ))]),
+            "openai_chat".to_string(),
+            omitted.clone(),
+        );
+        let _: Vec<_> = tracked.collect().await;
+        assert!(!omitted.load(Ordering::Acquire));
     }
 
     #[test]

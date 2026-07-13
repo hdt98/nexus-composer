@@ -37,18 +37,6 @@ impl TokenUsage {
             .map(|mid| format!("{SESSION_REQUEST_ID_PREFIX}{mid}"))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
-
-    /// 是否产生了任一计费维度的 token。
-    ///
-    /// 用于在写入前过滤全 0 的空 usage：当 OpenAI 兼容上游在流式下省略 usage 时，
-    /// 转换器会合成一个全 0 的终止事件，若无 message_id 则 `dedup_request_id`
-    /// 退化为随机 UUID，导致每笔请求插入一条无意义的空行、虚增请求数。
-    pub fn has_billable_tokens(&self) -> bool {
-        self.input_tokens > 0
-            || self.output_tokens > 0
-            || self.cache_read_tokens > 0
-            || self.cache_creation_tokens > 0
-    }
 }
 
 /// API 类型
@@ -98,6 +86,7 @@ impl TokenUsage {
         let mut model: Option<String> = None;
         let mut message_id: Option<String> = None;
         let mut input_from_delta = false;
+        let mut saw_usage = false;
 
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
@@ -116,6 +105,7 @@ impl TokenUsage {
                             }
                         }
                         if let Some(msg_usage) = event.get("message").and_then(|m| m.get("usage")) {
+                            saw_usage = msg_usage.is_object();
                             // 从 message_start 获取 input_tokens（原生 Claude API）
                             if let Some(input) =
                                 msg_usage.get("input_tokens").and_then(|v| v.as_u64())
@@ -136,6 +126,7 @@ impl TokenUsage {
                     }
                     "message_delta" => {
                         if let Some(delta_usage) = event.get("usage") {
+                            saw_usage |= delta_usage.is_object();
                             // 从 message_delta 获取 output_tokens
                             if let Some(output) =
                                 delta_usage.get("output_tokens").and_then(|v| v.as_u64())
@@ -197,11 +188,7 @@ impl TokenUsage {
             }
         }
 
-        // 用 has_billable_tokens 而非仅看 input/output：完全缓存命中、无输出的流式请求
-        // （input==0 && output==0 但 cache_read>0）是真实的 cache-read 计费，必须保留。
-        // Gemini→Anthropic 路径在 input 改为 fresh(promptTokenCount - cachedContentTokenCount)
-        // 后尤其会出现这种全缓存场景；旧 gate 会把它当成"无 usage"丢弃。
-        if usage.has_billable_tokens() {
+        if saw_usage {
             usage.model = model;
             usage.message_id = message_id;
             Some(usage)
@@ -465,9 +452,11 @@ impl TokenUsage {
         let mut total_tokens = 0u32;
         let mut total_cache_read = 0u32;
         let mut model: Option<String> = None;
+        let mut saw_usage = false;
 
         for chunk in chunks {
             if let Some(usage) = chunk.get("usageMetadata") {
+                saw_usage |= usage.is_object();
                 // 输入 tokens (通常在所有 chunk 中保持不变)
                 total_input = usage
                     .get("promptTokenCount")
@@ -498,7 +487,7 @@ impl TokenUsage {
         // 输出 tokens = 总 tokens - 输入 tokens
         let total_output = total_tokens.saturating_sub(total_input);
 
-        if total_input > 0 || total_output > 0 {
+        if saw_usage {
             Some(Self {
                 input_tokens: total_input,
                 output_tokens: total_output,
@@ -539,25 +528,6 @@ mod tests {
     }
 
     #[test]
-    fn test_has_billable_tokens_gates_empty_usage() {
-        // 全 0 usage（如上游省略 usage 时合成的全 0 终止事件）不应计费——
-        // 这是 Codex 流式空行多记修复（D）的闸门依据。
-        assert!(!TokenUsage::default().has_billable_tokens());
-        // 仅有 cache_read 也属于真实计费 token，必须计入。
-        let only_cache = TokenUsage {
-            cache_read_tokens: 100,
-            ..Default::default()
-        };
-        assert!(only_cache.has_billable_tokens());
-        let normal = TokenUsage {
-            input_tokens: 10,
-            output_tokens: 5,
-            ..Default::default()
-        };
-        assert!(normal.has_billable_tokens());
-    }
-
-    #[test]
     fn test_claude_stream_cache_only_request_is_recorded() {
         // P2 回归：完全缓存命中、无输出的流式请求（input==0 && output==0 但 cache_read>0）
         // 是真实计费，必须保留——旧 gate `input>0 || output>0` 会把它丢弃。
@@ -589,18 +559,31 @@ mod tests {
 
     #[test]
     fn test_codex_response_auto_returns_some_for_synthetic_all_zero() {
-        // P3 回归：上游非流式 Chat 省略 usage 时转换器合成的全 0 usage，from_codex_response_auto
-        // 仍返回 Some（字段存在、无 positivity check）——证明 handlers 必须用 has_billable_tokens
-        // 闸门才能挡住空行，单靠 `if let Some` 不够。
+        // Presence and numeric magnitude are independent: an explicitly
+        // reported all-zero usage object is still a known measurement.
         let synthetic = json!({
             "usage": { "input_tokens": 0, "output_tokens": 0, "total_tokens": 0 }
         });
         let usage = TokenUsage::from_codex_response_auto(&synthetic)
             .expect("全 0 usage 字段存在时 from_codex_response_auto 返回 Some");
-        assert!(
-            !usage.has_billable_tokens(),
-            "全 0 usage 必须被 has_billable_tokens 判为非计费，由 handlers 闸门跳过"
-        );
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_claude_stream_all_zero_usage_is_present() {
+        let events = vec![json!({
+            "type": "message_start",
+            "message": {
+                "id": "msg_zero",
+                "model": "free-model",
+                "usage": {"input_tokens": 0, "cache_read_input_tokens": 0}
+            }
+        })];
+        let usage = TokenUsage::from_claude_stream_events(&events)
+            .expect("reported all-zero usage remains known");
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 0);
     }
 
     #[test]

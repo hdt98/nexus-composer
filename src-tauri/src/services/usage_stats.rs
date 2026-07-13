@@ -17,12 +17,25 @@ use std::str::FromStr;
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
     pub total_requests: u64,
+    /// Requests whose source reported token usage. When lower than
+    /// total_requests, token totals intentionally cover only this subset.
+    pub token_usage_known_requests: u64,
+    /// Requests whose token usage matched a configured pricing rule. This can
+    /// be lower than token_usage_known_requests; a priced request may still
+    /// have an exact zero cost when its configured model is free.
+    /// Exact number of priced requests, or None when legacy data does not
+    /// retain enough evidence to reconstruct the denominator.
+    pub priced_request_count: Option<u64>,
+    /// Requests backed by an observed proxy response. Imported sessions have no
+    /// measured outcome or latency and are excluded from success-rate samples.
+    pub measured_request_count: u64,
+    pub successful_request_count: u64,
     pub total_cost: String,
     pub total_input_tokens: u64,
     pub total_output_tokens: u64,
     pub total_cache_creation_tokens: u64,
     pub total_cache_read_tokens: u64,
-    pub success_rate: f32,
+    pub success_rate: Option<f32>,
     /// input + output + cache_creation + cache_read — the total tokens
     /// actually processed by the model (including cache hits). Used as the
     /// headline "real consumption" number in the usage hero.
@@ -77,12 +90,21 @@ pub struct DailyStats {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderStats {
     pub provider_id: String,
+    /// Logical client surface that generated this usage. Provider IDs are only
+    /// unique within an app type, so omitting this field makes identically
+    /// named Claude/Codex provider rows impossible to distinguish in clients.
+    #[serde(default)]
+    pub app_type: String,
     pub provider_name: String,
     pub request_count: u64,
     pub total_tokens: u64,
     pub total_cost: String,
-    pub success_rate: f32,
-    pub avg_latency_ms: u64,
+    /// Requests with an observed proxy response. Imported session rows do not
+    /// contain a measured outcome or latency and must not be presented as
+    /// synthetic 100% success / 0 ms samples.
+    pub measured_request_count: u64,
+    pub success_rate: Option<f32>,
+    pub avg_latency_ms: Option<u64>,
 }
 
 /// 模型统计
@@ -141,28 +163,43 @@ pub struct RequestLogDetail {
     pub cache_creation_cost_usd: String,
     pub total_cost_usd: String,
     pub is_streaming: bool,
+    /// Elapsed proxy request time through upstream response completion.
+    /// Streaming rows are recorded when the stream reaches its terminal event
+    /// or EOF; non-streaming rows are recorded after the full body is read.
     pub latency_ms: u64,
+    /// Elapsed time to the first meaningful streaming payload. None for
+    /// non-streaming requests or streams without an observed payload.
     pub first_token_ms: Option<u64>,
+    /// Legacy total-request-duration alias. Reads preserve an explicitly
+    /// stored historical value and otherwise fall back to `latency_ms`.
     pub duration_ms: Option<u64>,
     pub status_code: u16,
     pub error_message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_outcome: Option<String>,
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
     /// 写入时实际用于计价的模型名。None = v11 前的历史行，"" = 未计价的错误行。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_model: Option<String>,
+    /// False when the upstream response omitted token usage. The request still
+    /// has an observed status and timing, but token/cost values are unavailable.
+    pub token_usage_known: bool,
+    /// True/false when pricing classification is exact. None marks legacy rows
+    /// whose stored zero cannot distinguish a free rule from missing pricing.
+    pub pricing_known: Option<bool>,
 }
 
-/// 把 25 列的查询结果映射为 `RequestLogDetail`。
+/// Map the 28 selected columns into `RequestLogDetail`.
 ///
-/// 调用方的 SELECT **必须**按以下顺序返回 25 列：
+/// Callers must select columns in this order:
 /// `request_id, provider_id, provider_name, app_type, model, request_model,
 ///  cost_multiplier, input_tokens, output_tokens, cache_read_tokens,
 ///  cache_creation_tokens, input_cost_usd, output_cost_usd, cache_read_cost_usd,
 ///  cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
-///  first_token_ms, duration_ms, status_code, error_message, created_at,
-///  data_source, pricing_model`
+///  first_token_ms, duration_ms, status_code, error_message, stream_outcome, created_at,
+///  data_source, pricing_model, token_usage_known, pricing_known`
 ///
 /// 不需要 provider_name 时（如 backfill）SELECT `NULL AS provider_name` 占位即可。
 fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestLogDetail> {
@@ -191,9 +228,12 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         duration_ms: row.get::<_, Option<i64>>(19)?.map(|v| v as u64),
         status_code: row.get::<_, i64>(20)? as u16,
         error_message: row.get(21)?,
-        created_at: row.get(22)?,
-        data_source: row.get(23)?,
-        pricing_model: row.get(24)?,
+        stream_outcome: row.get(22)?,
+        created_at: row.get(23)?,
+        data_source: row.get(24)?,
+        pricing_model: row.get(25)?,
+        token_usage_known: row.get::<_, i64>(26)? != 0,
+        pricing_known: row.get::<_, Option<i64>>(27)?.map(|value| value != 0),
     })
 }
 
@@ -261,6 +301,40 @@ fn effective_model_sql(alias: &str) -> String {
     format!("COALESCE(NULLIF({alias}.pricing_model, ''), {alias}.model)")
 }
 
+/// Returns a detail-log expression only when token usage was reported.
+/// Request counts, outcomes, latency, and TTFT deliberately do not use this gate.
+fn known_usage_value_sql(alias: &str, expression: &str) -> String {
+    format!("CASE WHEN {alias}.token_usage_known != 0 THEN ({expression}) ELSE 0 END")
+}
+
+/// Returns a detail-log cost only when a pricing rule was actually resolved.
+/// Do not infer pricing from a numeric zero: zero is valid for a free rule and
+/// also the placeholder used by an unpriced request.
+fn priced_cost_value_sql(alias: &str, expression: &str) -> String {
+    format!("CASE WHEN {alias}.pricing_known = 1 THEN ({expression}) ELSE 0 END")
+}
+
+/// Exact priced-request count for one detail-log group. NULL propagates an
+/// indeterminate legacy row instead of silently treating it as unpriced.
+fn exact_detail_priced_count_sql(alias: &str) -> String {
+    format!(
+        "CASE WHEN COUNT(*) = COUNT({alias}.pricing_known) \
+         THEN COALESCE(SUM(CASE WHEN {alias}.pricing_known = 1 THEN 1 ELSE 0 END), 0) \
+         ELSE NULL END"
+    )
+}
+
+/// Exact priced-request count for a rollup group. A NULL bucket means v12 did
+/// not preserve an exact denominator, and must make every containing aggregate
+/// indeterminate as well.
+fn exact_rollup_priced_count_sql(alias: &str) -> String {
+    format!(
+        "CASE WHEN COUNT(*) = COUNT({alias}.priced_request_count) \
+         THEN COALESCE(SUM({alias}.priced_request_count), 0) \
+         ELSE NULL END"
+    )
+}
+
 /// 把 Dashboard 顶部的 Provider/模型筛选追加到查询条件。
 ///
 /// Provider 按展示名精确匹配（复用 [`provider_name_coalesce`]，会话占位行的
@@ -301,6 +375,7 @@ pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
                   AND proxy_dedup.app_type = {log_alias}.app_type
                   AND proxy_dedup.status_code >= 200
                   AND proxy_dedup.status_code < 300
+                  AND proxy_dedup.token_usage_known != 0
                   AND proxy_dedup.input_tokens = {log_alias}.input_tokens
                   AND proxy_dedup.output_tokens = {log_alias}.output_tokens
                   AND proxy_dedup.cache_read_tokens = {log_alias}.cache_read_tokens
@@ -339,28 +414,154 @@ pub(crate) struct DedupKey<'a> {
     pub created_at: i64,
 }
 
-/// session 日志写入前的统一去重判定。
-///
-/// 命中以下任一条件即跳过插入：① `request_id` 已存在；② 时间窗口内存在
-/// 与 `key` 匹配的 proxy 日志（指纹去重）。
-pub(crate) fn should_skip_session_insert(
-    conn: &Connection,
-    request_id: &str,
-    key: &DedupKey,
-) -> Result<bool, AppError> {
-    if proxy_request_id_exists(conn, request_id)? {
-        return Ok(true);
-    }
-    has_matching_proxy_usage_log(conn, key)
+/// Measured token/cost values discovered later from a harness session log.
+/// These enrich an already-counted proxy outcome instead of inserting a
+/// second logical request.
+pub(crate) struct SessionUsageEnrichment<'a> {
+    pub key: DedupKey<'a>,
+    pub session_id: Option<&'a str>,
+    pub request_model: &'a str,
+    pub pricing_model: &'a str,
+    pub costs: [&'a str; 5],
+    pub pricing_known: bool,
 }
 
-fn proxy_request_id_exists(conn: &Connection, request_id: &str) -> Result<bool, AppError> {
-    conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM proxy_request_logs WHERE request_id = ?1)",
-        params![request_id],
-        |row| row.get::<_, bool>(0),
-    )
-    .map_err(|e| AppError::Database(format!("查询 request_id 失败: {e}")))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionReconciliation {
+    Insert,
+    Enriched,
+    Skip,
+}
+
+/// Reconcile a later session import with its proxy row before inserting.
+pub(crate) fn reconcile_session_usage(
+    conn: &Connection,
+    request_id: &str,
+    enrichment: &SessionUsageEnrichment<'_>,
+) -> Result<SessionReconciliation, AppError> {
+    let exact: Option<(bool, bool)> = conn
+        .query_row(
+            "SELECT token_usage_known != 0,
+                    COALESCE(data_source, 'proxy') = 'proxy'
+             FROM proxy_request_logs WHERE request_id = ?1",
+            [request_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("Failed to query request_id: {e}")))?;
+    if let Some((known, is_proxy)) = exact {
+        if !known && is_proxy && apply_session_enrichment(conn, request_id, enrichment)? {
+            return Ok(SessionReconciliation::Enriched);
+        }
+        return Ok(SessionReconciliation::Skip);
+    }
+    if has_matching_proxy_usage_log(conn, &enrichment.key)? {
+        return Ok(SessionReconciliation::Skip);
+    }
+    Ok(if enrich_unknown_proxy_usage_log(conn, enrichment)? {
+        SessionReconciliation::Enriched
+    } else {
+        SessionReconciliation::Insert
+    })
+}
+
+/// Enrich the nearest successful proxy row whose upstream omitted usage. The
+/// proxy row remains the source of truth for outcome/latency/provider identity;
+/// the session import contributes only the measurements it can observe.
+fn enrich_unknown_proxy_usage_log(
+    conn: &Connection,
+    enrichment: &SessionUsageEnrichment<'_>,
+) -> Result<bool, AppError> {
+    let key = enrichment.key;
+    let request_id: Option<String> = conn
+        .query_row(
+            "SELECT l.request_id
+             FROM proxy_request_logs l
+             WHERE COALESCE(l.data_source, 'proxy') = 'proxy'
+               AND l.app_type = ?1
+               AND l.status_code >= 200 AND l.status_code < 300
+               AND l.token_usage_known = 0
+               AND l.created_at BETWEEN ?4 - ?5 AND ?4 + ?5
+               AND (LOWER(l.model) = LOWER(?2)
+                    OR LOWER(COALESCE(l.request_model, '')) = LOWER(?2)
+                    OR LOWER(l.model) = 'unknown' OR LOWER(?2) = 'unknown'
+                    OR (?3 IS NOT NULL AND l.session_id = ?3))
+               AND (?3 IS NULL OR l.session_id IS NULL OR l.session_id = ?3)
+             ORDER BY CASE WHEN ?3 IS NOT NULL AND l.session_id = ?3 THEN 0
+                           WHEN l.session_id IS NULL THEN 1 ELSE 2 END,
+                      ABS(l.created_at - ?4), l.request_id
+             LIMIT 1",
+            params![
+                key.app_type,
+                key.model,
+                enrichment.session_id,
+                key.created_at,
+                SESSION_PROXY_DEDUP_WINDOW_SECONDS,
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| AppError::Database(format!("Failed to find unknown proxy usage: {e}")))?;
+
+    let Some(request_id) = request_id else {
+        return Ok(false);
+    };
+
+    apply_session_enrichment(conn, &request_id, enrichment)
+}
+
+fn apply_session_enrichment(
+    conn: &Connection,
+    request_id: &str,
+    enrichment: &SessionUsageEnrichment<'_>,
+) -> Result<bool, AppError> {
+    let key = enrichment.key;
+    let [input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost] =
+        enrichment.costs;
+    let updated = conn
+        .execute(
+            "UPDATE proxy_request_logs
+             SET token_usage_known = 1,
+                 pricing_known = ?2,
+                 input_tokens = ?3,
+                 output_tokens = ?4,
+                 cache_read_tokens = ?5,
+                 cache_creation_tokens = ?6,
+                 input_cost_usd = ?7,
+                 output_cost_usd = ?8,
+                 cache_read_cost_usd = ?9,
+                 cache_creation_cost_usd = ?10,
+                 total_cost_usd = ?11,
+                 request_model = CASE WHEN request_model IS NULL OR request_model = ''
+                                      THEN ?12 ELSE request_model END,
+                 pricing_model = ?13,
+                 model = CASE WHEN model = '' OR LOWER(model) = 'unknown' THEN ?14 ELSE model END,
+                 session_id = COALESCE(session_id, ?15)
+             WHERE request_id = ?1 AND token_usage_known = 0",
+            params![
+                request_id,
+                enrichment.pricing_known as i64,
+                key.input_tokens as i64,
+                key.output_tokens as i64,
+                key.cache_read_tokens as i64,
+                key.cache_creation_tokens as i64,
+                input_cost,
+                output_cost,
+                cache_read_cost,
+                cache_creation_cost,
+                total_cost,
+                enrichment.request_model,
+                enrichment.pricing_model,
+                key.model,
+                enrichment.session_id,
+            ],
+        )
+        .map_err(|e| AppError::Database(format!("Failed to enrich proxy usage: {e}")))?;
+
+    if updated > 0 {
+        crate::usage_events::notify_log_recorded();
+    }
+    Ok(updated > 0)
 }
 
 pub(crate) fn has_matching_proxy_usage_log(
@@ -379,6 +580,7 @@ pub(crate) fn has_matching_proxy_usage_log(
               AND l.app_type = ?1
               AND l.status_code >= 200
               AND l.status_code < 300
+              AND l.token_usage_known != 0
               AND l.input_tokens = ?3
               AND l.output_tokens = ?4
               AND l.cache_read_tokens = ?5
@@ -583,8 +785,15 @@ impl Database {
             String::new()
         };
 
-        let fresh_input_detail = fresh_input_sql("l");
+        let fresh_input_detail = known_usage_value_sql("l", &fresh_input_sql("l"));
+        let output_detail = known_usage_value_sql("l", "l.output_tokens");
+        let cache_creation_detail = known_usage_value_sql("l", "l.cache_creation_tokens");
+        let cache_read_detail = known_usage_value_sql("l", "l.cache_read_tokens");
+        let cost_detail = priced_cost_value_sql("l", "CAST(l.total_cost_usd AS REAL)");
+        let priced_count_detail = exact_detail_priced_count_sql("l");
+        let detail_data_source = data_source_expr("l");
         let fresh_input_rollup = fresh_input_sql("r");
+        let priced_count_rollup = exact_rollup_priced_count_sql("r");
         let sql = format!(
             "SELECT
                 COALESCE(d.total_requests, 0) + COALESCE(r.total_requests, 0),
@@ -593,16 +802,26 @@ impl Database {
                 COALESCE(d.total_output_tokens, 0) + COALESCE(r.total_output_tokens, 0),
                 COALESCE(d.total_cache_creation_tokens, 0) + COALESCE(r.total_cache_creation_tokens, 0),
                 COALESCE(d.total_cache_read_tokens, 0) + COALESCE(r.total_cache_read_tokens, 0),
+                COALESCE(d.token_usage_known_requests, 0) + COALESCE(r.token_usage_known_requests, 0),
+                CASE WHEN d.priced_request_count IS NULL OR r.priced_request_count IS NULL
+                     THEN NULL
+                     ELSE d.priced_request_count + r.priced_request_count END,
+                COALESCE(d.measured_request_count, 0) + COALESCE(r.measured_request_count, 0),
                 COALESCE(d.success_count, 0) + COALESCE(r.success_count, 0)
             FROM
                 (SELECT
                     COUNT(*) as total_requests,
-                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
+                    COALESCE(SUM({cost_detail}), 0) as total_cost,
                     COALESCE(SUM({fresh_input_detail}), 0) as total_input_tokens,
-                    COALESCE(SUM(l.output_tokens), 0) as total_output_tokens,
-                    COALESCE(SUM(l.cache_creation_tokens), 0) as total_cache_creation_tokens,
-                    COALESCE(SUM(l.cache_read_tokens), 0) as total_cache_read_tokens,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
+                    COALESCE(SUM({output_detail}), 0) as total_output_tokens,
+                    COALESCE(SUM({cache_creation_detail}), 0) as total_cache_creation_tokens,
+                    COALESCE(SUM({cache_read_detail}), 0) as total_cache_read_tokens,
+                    COALESCE(SUM(CASE WHEN l.token_usage_known != 0 THEN 1 ELSE 0 END), 0) as token_usage_known_requests,
+                    {priced_count_detail} as priced_request_count,
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy' THEN 1 ELSE 0 END), 0) as measured_request_count,
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy'
+                                      AND l.status_code >= 200 AND l.status_code < 300
+                                     THEN 1 ELSE 0 END), 0) as success_count
                  FROM proxy_request_logs l {detail_join} {where_clause}) d,
                 (SELECT
                     COALESCE(SUM(r.request_count), 0) as total_requests,
@@ -611,6 +830,9 @@ impl Database {
                     COALESCE(SUM(r.output_tokens), 0) as total_output_tokens,
                     COALESCE(SUM(r.cache_creation_tokens), 0) as total_cache_creation_tokens,
                     COALESCE(SUM(r.cache_read_tokens), 0) as total_cache_read_tokens,
+                    COALESCE(SUM(r.token_usage_known_count), 0) as token_usage_known_requests,
+                    {priced_count_rollup} as priced_request_count,
+                    COALESCE(SUM(r.measured_request_count), 0) as measured_request_count,
                     COALESCE(SUM(r.success_count), 0) as success_count
                  FROM usage_daily_rollups r {rollup_join} {rollup_where}) r"
         );
@@ -627,12 +849,15 @@ impl Database {
             let total_output_tokens: i64 = row.get(3)?;
             let total_cache_creation_tokens: i64 = row.get(4)?;
             let total_cache_read_tokens: i64 = row.get(5)?;
-            let success_count: i64 = row.get(6)?;
+            let token_usage_known_requests: i64 = row.get(6)?;
+            let priced_request_count: Option<i64> = row.get(7)?;
+            let measured_request_count: i64 = row.get(8)?;
+            let success_count: i64 = row.get(9)?;
 
-            let success_rate = if total_requests > 0 {
-                (success_count as f32 / total_requests as f32) * 100.0
+            let success_rate = if measured_request_count > 0 {
+                Some((success_count as f32 / measured_request_count as f32) * 100.0)
             } else {
-                0.0
+                None
             };
 
             let (real_total_tokens, cache_hit_rate) = derive_real_total_and_hit_rate(
@@ -644,6 +869,10 @@ impl Database {
 
             Ok(UsageSummary {
                 total_requests: total_requests as u64,
+                token_usage_known_requests: token_usage_known_requests as u64,
+                priced_request_count: priced_request_count.map(|count| count as u64),
+                measured_request_count: measured_request_count as u64,
+                successful_request_count: success_count as u64,
                 total_cost: format!("{total_cost:.6}"),
                 total_input_tokens: total_input_tokens as u64,
                 total_output_tokens: total_output_tokens as u64,
@@ -725,8 +954,15 @@ impl Database {
             String::new()
         };
 
-        let fresh_input_detail = fresh_input_sql("l");
+        let fresh_input_detail = known_usage_value_sql("l", &fresh_input_sql("l"));
+        let output_detail = known_usage_value_sql("l", "l.output_tokens");
+        let cache_creation_detail = known_usage_value_sql("l", "l.cache_creation_tokens");
+        let cache_read_detail = known_usage_value_sql("l", "l.cache_read_tokens");
+        let cost_detail = priced_cost_value_sql("l", "CAST(l.total_cost_usd AS REAL)");
+        let priced_count_detail = exact_detail_priced_count_sql("l");
+        let detail_data_source = data_source_expr("l");
         let fresh_input_rollup = fresh_input_sql("r");
+        let priced_count_rollup = exact_rollup_priced_count_sql("r");
         // 折叠 claude-desktop → claude：内层投影成同一桶名，外层 GROUP BY 自然合并。
         let detail_app_type = folded_app_type_sql("l.app_type");
         let rollup_app_type = folded_app_type_sql("r.app_type");
@@ -739,16 +975,25 @@ impl Database {
                 SUM(output_t) as output_t,
                 SUM(cache_create_t) as cache_create_t,
                 SUM(cache_read_t) as cache_read_t,
+                SUM(token_usage_known_count) as token_usage_known_count,
+                CASE WHEN COUNT(priced_request_count) = COUNT(*)
+                     THEN SUM(priced_request_count) ELSE NULL END as priced_request_count,
+                SUM(measured_request_count) as measured_request_count,
                 SUM(success_count) as success_count
             FROM (
                 SELECT {detail_app_type} as app_type,
                     COUNT(*) as req_count,
-                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as cost,
+                    COALESCE(SUM({cost_detail}), 0) as cost,
                     COALESCE(SUM({fresh_input_detail}), 0) as input_t,
-                    COALESCE(SUM(l.output_tokens), 0) as output_t,
-                    COALESCE(SUM(l.cache_creation_tokens), 0) as cache_create_t,
-                    COALESCE(SUM(l.cache_read_tokens), 0) as cache_read_t,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
+                    COALESCE(SUM({output_detail}), 0) as output_t,
+                    COALESCE(SUM({cache_creation_detail}), 0) as cache_create_t,
+                    COALESCE(SUM({cache_read_detail}), 0) as cache_read_t,
+                    COALESCE(SUM(CASE WHEN l.token_usage_known != 0 THEN 1 ELSE 0 END), 0) as token_usage_known_count,
+                    {priced_count_detail} as priced_request_count,
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy' THEN 1 ELSE 0 END), 0) as measured_request_count,
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy'
+                                      AND l.status_code >= 200 AND l.status_code < 300
+                                     THEN 1 ELSE 0 END), 0) as success_count
                 FROM proxy_request_logs l {detail_join} {detail_where}
                 GROUP BY l.app_type
                 UNION ALL
@@ -759,6 +1004,9 @@ impl Database {
                     COALESCE(SUM(r.output_tokens), 0),
                     COALESCE(SUM(r.cache_creation_tokens), 0),
                     COALESCE(SUM(r.cache_read_tokens), 0),
+                    COALESCE(SUM(r.token_usage_known_count), 0),
+                    {priced_count_rollup},
+                    COALESCE(SUM(r.measured_request_count), 0),
                     COALESCE(SUM(r.success_count), 0)
                 FROM usage_daily_rollups r {rollup_join} {rollup_where}
                 GROUP BY r.app_type
@@ -779,12 +1027,15 @@ impl Database {
             let total_output_tokens: i64 = row.get(4)?;
             let total_cache_creation_tokens: i64 = row.get(5)?;
             let total_cache_read_tokens: i64 = row.get(6)?;
-            let success_count: i64 = row.get(7)?;
+            let token_usage_known_requests: i64 = row.get(7)?;
+            let priced_request_count: Option<i64> = row.get(8)?;
+            let measured_request_count: i64 = row.get(9)?;
+            let success_count: i64 = row.get(10)?;
 
-            let success_rate = if total_requests > 0 {
-                (success_count as f32 / total_requests as f32) * 100.0
+            let success_rate = if measured_request_count > 0 {
+                Some((success_count as f32 / measured_request_count as f32) * 100.0)
             } else {
-                0.0
+                None
             };
             let (real_total_tokens, cache_hit_rate) = derive_real_total_and_hit_rate(
                 total_input_tokens as u64,
@@ -797,6 +1048,10 @@ impl Database {
                 app_type,
                 summary: UsageSummary {
                     total_requests: total_requests as u64,
+                    token_usage_known_requests: token_usage_known_requests as u64,
+                    priced_request_count: priced_request_count.map(|count| count as u64),
+                    measured_request_count: measured_request_count as u64,
+                    successful_request_count: success_count as u64,
                     total_cost: format!("{total_cost:.6}"),
                     total_input_tokens: total_input_tokens as u64,
                     total_output_tokens: total_output_tokens as u64,
@@ -1236,40 +1491,49 @@ impl Database {
         let rollup_pname = provider_name_coalesce("r", "p2");
         let fresh_input_detail = fresh_input_sql("l");
         let fresh_input_rollup = fresh_input_sql("r");
+        let detail_data_source = data_source_expr("l");
+        // Provider identity is the raw composite (provider_id, app_type).
+        // claude-desktop folding belongs only in app-level presentation/filtering.
+        let detail_app_type = "l.app_type";
+        let rollup_app_type = "r.app_type";
         let sql = format!(
             "SELECT
-                provider_id, app_type, provider_name,
+                provider_id, app_type, MIN(provider_name) as provider_name,
                 SUM(request_count) as request_count,
                 SUM(total_tokens) as total_tokens,
                 SUM(total_cost) as total_cost,
                 SUM(success_count) as success_count,
-                CASE WHEN SUM(request_count) > 0
-                    THEN SUM(latency_sum) / SUM(request_count)
-                    ELSE 0 END as avg_latency
+                SUM(measured_request_count) as measured_request_count,
+                CASE WHEN SUM(measured_request_count) > 0
+                    THEN 1.0 * SUM(latency_sum) / SUM(measured_request_count)
+                    ELSE NULL END as avg_latency
             FROM (
-                SELECT l.provider_id, l.app_type,
-                    {detail_pname} as provider_name,
+                SELECT l.provider_id, {detail_app_type} as app_type,
+                    MIN({detail_pname}) as provider_name,
                     COUNT(*) as request_count,
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
-                    COALESCE(SUM(l.latency_ms), 0) as latency_sum
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy'
+                        AND l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy' THEN 1 ELSE 0 END), 0) as measured_request_count,
+                    COALESCE(SUM(CASE WHEN {detail_data_source} = 'proxy' THEN l.latency_ms ELSE 0 END), 0) as latency_sum
                 FROM proxy_request_logs l
                 LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
                 {detail_where}
-                GROUP BY l.provider_id, l.app_type
+                GROUP BY l.provider_id, {detail_app_type}
                 UNION ALL
-                SELECT r.provider_id, r.app_type,
-                    {rollup_pname} as provider_name,
+                SELECT r.provider_id, {rollup_app_type} as app_type,
+                    MIN({rollup_pname}) as provider_name,
                     COALESCE(SUM(r.request_count), 0),
                     COALESCE(SUM({fresh_input_rollup} + r.output_tokens), 0),
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
                     COALESCE(SUM(r.success_count), 0),
-                    COALESCE(SUM(r.avg_latency_ms * r.request_count), 0)
+                    COALESCE(SUM(r.measured_request_count), 0),
+                    COALESCE(SUM(r.latency_sum), 0)
                 FROM usage_daily_rollups r
                 LEFT JOIN providers p2 ON r.provider_id = p2.id AND r.app_type = p2.app_type
                 {rollup_where}
-                GROUP BY r.provider_id, r.app_type
+                GROUP BY r.provider_id, {rollup_app_type}
             )
             GROUP BY provider_id, app_type
             ORDER BY total_cost DESC"
@@ -1282,20 +1546,23 @@ impl Database {
         let row_mapper = |row: &rusqlite::Row| {
             let request_count: i64 = row.get(3)?;
             let success_count: i64 = row.get(6)?;
-            let success_rate = if request_count > 0 {
-                (success_count as f32 / request_count as f32) * 100.0
+            let measured_request_count: i64 = row.get(7)?;
+            let success_rate = if measured_request_count > 0 {
+                Some((success_count as f32 / measured_request_count as f32) * 100.0)
             } else {
-                0.0
+                None
             };
 
             Ok(ProviderStats {
                 provider_id: row.get(0)?,
+                app_type: row.get(1)?,
                 provider_name: row.get(2)?,
                 request_count: request_count as u64,
                 total_tokens: row.get::<_, i64>(4)? as u64,
                 total_cost: format!("{:.6}", row.get::<_, f64>(5)?),
+                measured_request_count: measured_request_count as u64,
                 success_rate,
-                avg_latency_ms: row.get::<_, f64>(7)? as u64,
+                avg_latency_ms: row.get::<_, Option<f64>>(8)?.map(|value| value as u64),
             })
         };
 
@@ -1485,6 +1752,10 @@ impl Database {
             filters.model.as_deref(),
         );
         if let Some(status) = filters.status_code {
+            // Imported session rows carry a synthetic 200 for storage compatibility, but their
+            // outcome is displayed as N/A. A status filter therefore applies only to measured
+            // proxy traffic; legacy NULL data_source rows are effective proxy rows.
+            conditions.push(format!("{} = 'proxy'", data_source_expr("l")));
             conditions.push("l.status_code = ?".to_string());
             params.push(Box::new(status as i64));
         }
@@ -1525,12 +1796,14 @@ impl Database {
                     l.request_model, l.cost_multiplier,
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
-                    l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
-                    l.status_code, l.error_message, l.created_at, l.data_source, l.pricing_model
+                    l.is_streaming, l.latency_ms, l.first_token_ms,
+                    COALESCE(l.duration_ms, l.latency_ms) AS duration_ms,
+                    l.status_code, l.error_message, l.stream_outcome, l.created_at, l.data_source, l.pricing_model,
+                    l.token_usage_known, l.pricing_known
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              {where_clause}
-             ORDER BY l.created_at DESC
+             ORDER BY l.created_at DESC, l.request_id DESC
              LIMIT ? OFFSET ?"
         );
 
@@ -1540,11 +1813,34 @@ impl Database {
 
         let mut logs = Vec::new();
         let mut pricing_cache = HashMap::new();
+        let mut backfilled = false;
 
         for row in rows {
-            let mut log = row?;
-            Self::maybe_backfill_log_costs(&conn, &mut log, &mut pricing_cache)?;
+            let mut log = match row {
+                Ok(log) => log,
+                Err(error) => {
+                    if backfilled {
+                        crate::usage_events::notify_log_recorded();
+                    }
+                    return Err(error.into());
+                }
+            };
+            match Self::maybe_backfill_log_costs(&conn, &mut log, &mut pricing_cache) {
+                Ok(updated) => backfilled |= updated,
+                Err(error) => {
+                    // Earlier rows are autocommit updates. Notify for those durable
+                    // mutations even though a later malformed price aborts the page.
+                    if backfilled {
+                        crate::usage_events::notify_log_recorded();
+                    }
+                    return Err(error);
+                }
+            }
             logs.push(log);
+        }
+
+        if backfilled {
+            crate::usage_events::notify_log_recorded();
         }
 
         Ok(PaginatedLogs {
@@ -1566,10 +1862,13 @@ impl Database {
         let detail_sql = format!(
             "SELECT l.request_id, l.provider_id, {detail_pname} as provider_name, l.app_type, l.model,
                     l.request_model, l.cost_multiplier,
-                    input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
-                    input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
-                    is_streaming, latency_ms, first_token_ms, duration_ms,
-                    status_code, error_message, created_at, l.data_source, l.pricing_model
+                    l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
+                    l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd,
+                    l.cache_creation_cost_usd, l.total_cost_usd,
+                    l.is_streaming, l.latency_ms, l.first_token_ms,
+                    COALESCE(l.duration_ms, l.latency_ms) AS duration_ms,
+                    l.status_code, l.error_message, l.stream_outcome, l.created_at, l.data_source, l.pricing_model,
+                    l.token_usage_known, l.pricing_known
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              WHERE l.request_id = ?"
@@ -1579,7 +1878,11 @@ impl Database {
         match result {
             Ok(mut detail) => {
                 let mut pricing_cache = HashMap::new();
-                Self::maybe_backfill_log_costs(&conn, &mut detail, &mut pricing_cache)?;
+                let backfilled =
+                    Self::maybe_backfill_log_costs(&conn, &mut detail, &mut pricing_cache)?;
+                if backfilled {
+                    crate::usage_events::notify_log_recorded();
+                }
                 Ok(Some(detail))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -1627,6 +1930,7 @@ impl Database {
                     SELECT CAST(total_cost_usd AS REAL) as cost
                     FROM proxy_request_logs
                     WHERE provider_id = ? AND app_type = ?
+                      AND pricing_known = 1
                       AND date(datetime(created_at, 'unixepoch', 'localtime')) = date('now', 'localtime')
                     UNION ALL
                     SELECT CAST(total_cost_usd AS REAL)
@@ -1646,6 +1950,7 @@ impl Database {
                     SELECT CAST(total_cost_usd AS REAL) as cost
                     FROM proxy_request_logs
                     WHERE provider_id = ? AND app_type = ?
+                      AND pricing_known = 1
                       AND strftime('%Y-%m', datetime(created_at, 'unixepoch', 'localtime')) = strftime('%Y-%m', 'now', 'localtime')
                     UNION ALL
                     SELECT CAST(total_cost_usd AS REAL)
@@ -1724,12 +2029,13 @@ impl Database {
                         input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                         input_cost_usd, output_cost_usd, cache_read_cost_usd,
                         cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
-                        first_token_ms, duration_ms, status_code, error_message, created_at,
-                        data_source, pricing_model
+                        first_token_ms, COALESCE(duration_ms, latency_ms) AS duration_ms,
+                        status_code, error_message, stream_outcome, created_at,
+                        data_source, pricing_model, token_usage_known, pricing_known
              FROM proxy_request_logs
-             WHERE CAST(total_cost_usd AS REAL) <= 0
-               AND (input_tokens > 0 OR output_tokens > 0
-                    OR cache_read_tokens > 0 OR cache_creation_tokens > 0)";
+             WHERE (pricing_known IS NULL OR pricing_known = 0)
+               AND token_usage_known != 0
+             ORDER BY request_id";
 
         let mut logs = {
             let mut stmt = conn.prepare(BASE_SQL)?;
@@ -1766,6 +2072,7 @@ impl Database {
 
         if updated > 0 {
             log::info!("已回填 {updated} 条缺失的用量成本");
+            crate::usage_events::notify_log_recorded();
         }
 
         Ok(updated)
@@ -1777,15 +2084,7 @@ impl Database {
         log: &mut RequestLogDetail,
         pricing_cache: &mut HashMap<String, PricingInfo>,
     ) -> Result<bool, AppError> {
-        let existing_cost = rust_decimal::Decimal::from_str(&log.total_cost_usd)
-            .unwrap_or(rust_decimal::Decimal::ZERO);
-        let has_cost = existing_cost > rust_decimal::Decimal::ZERO;
-        let has_usage = log.input_tokens > 0
-            || log.output_tokens > 0
-            || log.cache_read_tokens > 0
-            || log.cache_creation_tokens > 0;
-
-        if has_cost || !has_usage {
+        if log.pricing_known == Some(true) || !log.token_usage_known {
             return Ok(false);
         }
 
@@ -1834,6 +2133,7 @@ impl Database {
         log.cache_read_cost_usd = format!("{cache_read_cost:.6}");
         log.cache_creation_cost_usd = format!("{cache_creation_cost:.6}");
         log.total_cost_usd = format!("{total_cost:.6}");
+        log.pricing_known = Some(true);
 
         conn.execute(
             "UPDATE proxy_request_logs
@@ -1841,7 +2141,8 @@ impl Database {
                  output_cost_usd = ?2,
                  cache_read_cost_usd = ?3,
                  cache_creation_cost_usd = ?4,
-                 total_cost_usd = ?5
+                 total_cost_usd = ?5,
+                 pricing_known = 1
              WHERE request_id = ?6",
             params![
                 log.input_cost_usd,
@@ -2327,6 +2628,7 @@ mod tests {
                 output_tokens INTEGER NOT NULL,
                 cache_read_tokens INTEGER NOT NULL,
                 cache_creation_tokens INTEGER NOT NULL,
+                token_usage_known INTEGER NOT NULL DEFAULT 1,
                 status_code INTEGER NOT NULL,
                 created_at INTEGER NOT NULL,
                 data_source TEXT
@@ -2394,7 +2696,7 @@ mod tests {
                 &conn,
                 "cc-1",
                 "claude",
-                "p-claude",
+                "p-shared",
                 "claude-sonnet-4-5",
                 "proxy",
                 ts,
@@ -2409,7 +2711,7 @@ mod tests {
                 &conn,
                 "cd-1",
                 "claude-desktop",
-                "p-desktop",
+                "p-shared",
                 "claude-opus-4-8",
                 "proxy",
                 ts,
@@ -2449,6 +2751,19 @@ mod tests {
         assert!(
             logs.data.iter().any(|r| r.app_type == "claude-desktop"),
             "详情面板需要看到真实入口，行投影不可被折叠"
+        );
+
+        // Provider grouping preserves the raw composite identity even when the
+        // same provider id exists on both Claude surfaces.
+        let provider_stats = db.get_provider_stats(None, None, Some("claude"), None, None)?;
+        let mut provider_identities: Vec<_> = provider_stats
+            .iter()
+            .map(|stat| (stat.provider_id.as_str(), stat.app_type.as_str()))
+            .collect();
+        provider_identities.sort_unstable();
+        assert_eq!(
+            provider_identities,
+            vec![("p-shared", "claude"), ("p-shared", "claude-desktop")]
         );
 
         // ④ 折叠不外溢：codex 过滤为空。
@@ -2494,6 +2809,49 @@ mod tests {
         assert_eq!(output_cost, "30.000000");
         assert_eq!(total_cost, "35.000000");
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_backfill_marks_reported_all_zero_usage_as_priced() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "codex-gpt-5-5-known-zero",
+                "codex",
+                "provider-1",
+                "gpt-5.5",
+                "proxy",
+                1000,
+                0,
+                0,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+            conn.execute(
+                "UPDATE proxy_request_logs
+                 SET token_usage_known = 1, pricing_known = 0
+                 WHERE request_id = 'codex-gpt-5-5-known-zero'",
+                [],
+            )?;
+        }
+
+        assert_eq!(db.backfill_missing_usage_costs()?, 1);
+
+        let conn = lock_conn!(db.conn);
+        let (pricing_known, total_cost): (i64, String) = conn.query_row(
+            "SELECT pricing_known, total_cost_usd
+             FROM proxy_request_logs WHERE request_id = 'codex-gpt-5-5-known-zero'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(pricing_known, 1);
+        assert_eq!(total_cost, "0.000000");
         Ok(())
     }
 
@@ -2815,7 +3173,11 @@ mod tests {
 
         let summary = db.get_usage_summary(None, None, None, None, None)?;
         assert_eq!(summary.total_requests, 2);
-        assert_eq!(summary.success_rate, 100.0);
+        assert_eq!(summary.success_rate, Some(100.0));
+        assert_eq!(summary.token_usage_known_requests, 2);
+        assert_eq!(summary.priced_request_count, None);
+        assert_eq!(summary.measured_request_count, 2);
+        assert_eq!(summary.successful_request_count, 2);
 
         Ok(())
     }
@@ -3549,6 +3911,14 @@ mod tests {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params!["new", "p1", "claude", "claude-3", 200, 75, "0.02", 120, 200, 2000],
             )?;
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, total_cost_usd,
+                    latency_ms, status_code, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params!["codex", "p1", "codex", "gpt", 10, 5, "0", 80, 200, 2000],
+            )?;
         }
 
         let stats = db.get_provider_stats(Some(1500), Some(2500), Some("claude"), None, None)?;
@@ -3556,6 +3926,14 @@ mod tests {
         assert_eq!(stats[0].provider_id, "p1");
         assert_eq!(stats[0].request_count, 1);
         assert_eq!(stats[0].total_tokens, 275);
+
+        let identities: Vec<_> = db
+            .get_provider_stats(None, None, None, None, None)?
+            .into_iter()
+            .map(|stat| (stat.provider_id, stat.app_type))
+            .collect();
+        assert!(identities.contains(&("p1".into(), "claude".into())));
+        assert!(identities.contains(&("p1".into(), "codex".into())));
 
         Ok(())
     }

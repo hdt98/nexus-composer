@@ -49,7 +49,8 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 11;
+pub(crate) const SCHEMA_VERSION: i32 = 12;
+pub(crate) const USAGE_PRERELEASE_SCHEMA_VERSIONS: std::ops::RangeInclusive<i32> = 13..=16;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -115,27 +116,44 @@ impl Database {
         }
         register_db_change_hook(&conn);
 
+        let original_version = Self::get_user_version(&conn)?;
+
         let db = Self {
             conn: Mutex::new(conn),
         };
         db.create_tables()?;
 
         // Pre-migration backup: only when upgrading from an existing database
-        {
-            let conn = lock_conn!(db.conn);
-            let version = Self::get_user_version(&conn)?;
-            drop(conn);
-            if version > 0 && version < SCHEMA_VERSION {
-                log::info!(
-                    "Creating pre-migration database backup (v{version} → v{SCHEMA_VERSION})"
-                );
-                if let Err(e) = db.backup_database_file() {
+        let needs_migration = original_version > 0
+            && (original_version < SCHEMA_VERSION
+                || USAGE_PRERELEASE_SCHEMA_VERSIONS.contains(&original_version));
+        let migration_backup_path = if needs_migration {
+            log::info!(
+                "Creating pre-migration database backup (v{original_version} → v{SCHEMA_VERSION})"
+            );
+            match db.backup_database_file() {
+                Ok(path) => path,
+                Err(e) => {
                     log::warn!("Pre-migration backup failed, continuing migration: {e}");
+                    None
                 }
             }
-        }
+        } else {
+            None
+        };
 
         db.apply_schema_migrations()?;
+        // The sole post-main migration removes the legacy raw trace table. Only
+        // sanitize the pre-migration backup after that migration has committed.
+        if needs_migration {
+            if let Some(backup_path) = migration_backup_path.as_deref() {
+                Self::sanitize_legacy_trace_backup(backup_path)?;
+                log::info!(
+                    "Removed legacy raw proxy traces from migration backup: {}",
+                    backup_path.display()
+                );
+            }
+        }
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }
@@ -172,7 +190,10 @@ impl Database {
         }
         let conn = Connection::open(db_path).map_err(|e| AppError::Database(e.to_string()))?;
         let version = Self::get_user_version(&conn)?;
-        Ok((version > SCHEMA_VERSION).then_some(version))
+        Ok(
+            (version > SCHEMA_VERSION && !USAGE_PRERELEASE_SCHEMA_VERSIONS.contains(&version))
+                .then_some(version),
+        )
     }
 
     /// 创建内存数据库（用于测试）

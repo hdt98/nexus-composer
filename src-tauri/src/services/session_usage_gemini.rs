@@ -21,7 +21,10 @@ use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
     get_sync_state, metadata_modified_nanos, update_sync_state, SessionSyncResult,
 };
-use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
+use crate::services::usage_stats::{
+    find_model_pricing, reconcile_session_usage, DedupKey, SessionReconciliation,
+    SessionUsageEnrichment,
+};
 use rust_decimal::Decimal;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -260,10 +263,6 @@ fn insert_gemini_session_entry(
         cache_creation_tokens: 0,
         created_at,
     };
-    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
-        return Ok(false);
-    }
-
     // 计算费用
     let usage = TokenUsage {
         input_tokens: tokens.input,
@@ -275,6 +274,7 @@ fn insert_gemini_session_entry(
     };
 
     let pricing = find_gemini_pricing(&conn, model);
+    let pricing_known = pricing.is_some();
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -297,6 +297,29 @@ fn insert_gemini_session_entry(
         ),
     };
 
+    match reconcile_session_usage(
+        &conn,
+        request_id,
+        &SessionUsageEnrichment {
+            key: dedup_key,
+            session_id,
+            request_model: model,
+            pricing_model: model,
+            costs: [
+                &input_cost,
+                &output_cost,
+                &cache_read_cost,
+                &cache_creation_cost,
+                &total_cost,
+            ],
+            pricing_known,
+        },
+    )? {
+        SessionReconciliation::Skip => return Ok(false),
+        SessionReconciliation::Enriched => return Ok(true),
+        SessionReconciliation::Insert => {}
+    }
+
     // 使用 UPSERT：新记录插入，已存在记录更新 token 和费用（Gemini 全量重读可能携带更新值）
     conn.execute(
         "INSERT INTO proxy_request_logs (
@@ -304,10 +327,13 @@ fn insert_gemini_session_entry(
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+            provider_type, is_streaming, cost_multiplier, created_at, data_source,
+            pricing_model, pricing_known
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
         ON CONFLICT(request_id) DO UPDATE SET
             model = excluded.model,
+            request_model = excluded.request_model,
+            pricing_model = excluded.pricing_model,
             input_tokens = excluded.input_tokens,
             output_tokens = excluded.output_tokens,
             cache_read_tokens = excluded.cache_read_tokens,
@@ -315,11 +341,15 @@ fn insert_gemini_session_entry(
             output_cost_usd = excluded.output_cost_usd,
             cache_read_cost_usd = excluded.cache_read_cost_usd,
             cache_creation_cost_usd = excluded.cache_creation_cost_usd,
-            total_cost_usd = excluded.total_cost_usd
+            total_cost_usd = excluded.total_cost_usd,
+            pricing_known = excluded.pricing_known
         WHERE input_tokens != excluded.input_tokens
            OR output_tokens != excluded.output_tokens
            OR cache_read_tokens != excluded.cache_read_tokens
-           OR model != excluded.model",
+           OR model != excluded.model
+           OR COALESCE(request_model, '') != COALESCE(excluded.request_model, '')
+           OR COALESCE(pricing_model, '') != COALESCE(excluded.pricing_model, '')
+           OR pricing_known IS NOT excluded.pricing_known",
         rusqlite::params![
             request_id,
             "_gemini_session",   // provider_id
@@ -345,6 +375,8 @@ fn insert_gemini_session_entry(
             "1.0",               // cost_multiplier
             created_at,
             "gemini_session",    // data_source
+            model,               // pricing_model
+            pricing_known as i64,
         ],
     )
     .map_err(|e| AppError::Database(format!("插入 Gemini 会话日志失败: {e}")))?;

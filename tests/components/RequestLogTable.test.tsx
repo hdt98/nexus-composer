@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestLogTable } from "@/components/usage/RequestLogTable";
-import type { UsageRangeSelection } from "@/types/usage";
+import type { RequestLog, UsageRangeSelection } from "@/types/usage";
 
 const useRequestLogsMock = vi.hoisted(() => vi.fn());
 
@@ -157,5 +157,69 @@ describe("RequestLogTable", () => {
         }),
       );
     });
+  });
+
+  it("distinguishes unknown usage, unpriced usage, and a priced zero", () => {
+    const base: Omit<
+      RequestLog,
+      "requestId" | "tokenUsageKnown" | "pricingKnown"
+    > = {
+      providerId: "provider-1",
+      providerName: "Provider",
+      appType: "codex",
+      model: "glm-5.2",
+      costMultiplier: "1",
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      inputCostUsd: "0",
+      outputCostUsd: "0",
+      cacheReadCostUsd: "0",
+      cacheCreationCostUsd: "0",
+      totalCostUsd: "0",
+      isStreaming: true,
+      latencyMs: 100,
+      statusCode: 200,
+      createdAt: 1_710_000_000,
+      dataSource: "proxy",
+    };
+    const logs: RequestLog[] = [
+      {
+        ...base,
+        requestId: "unknown",
+        tokenUsageKnown: false,
+        pricingKnown: null,
+      },
+      {
+        ...base,
+        requestId: "unpriced",
+        tokenUsageKnown: true,
+        pricingKnown: false,
+      },
+      {
+        ...base,
+        requestId: "priced-zero",
+        tokenUsageKnown: true,
+        pricingKnown: true,
+      },
+    ];
+    useRequestLogsMock.mockReturnValue({
+      data: { data: logs, total: logs.length, page: 0, pageSize: 20 },
+      isLoading: false,
+    });
+
+    render(
+      <RequestLogTable
+        range={{ preset: "today" }}
+        rangeLabel="Today"
+        appType="all"
+        refreshIntervalMs={0}
+      />,
+    );
+
+    expect(screen.getByText("usage.unpriced")).toBeInTheDocument();
+    expect(screen.getAllByText("common.unknown").length).toBeGreaterThan(0);
+    expect(screen.getByText("$0.0000")).toBeInTheDocument();
   });
 });

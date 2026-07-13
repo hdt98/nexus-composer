@@ -20,7 +20,6 @@ import {
 import { useRequestLogs } from "@/lib/query/usage";
 import {
   getFreshInputTokens,
-  isUnpricedUsage,
   type LogFilters,
   type UsageRangeSelection,
 } from "@/types/usage";
@@ -195,7 +194,17 @@ export function RequestLogTable({
                   </TableRow>
                 ) : (
                   logs.map((log) => {
-                    const unpriced = isUnpricedUsage(log);
+                    const measured = (log.dataSource ?? "proxy") === "proxy";
+                    const hasUsage = log.tokenUsageKnown;
+                    const hasPrice = log.pricingKnown === true;
+                    const unavailable = t("common.unknown");
+                    const costDisplay = !hasUsage
+                      ? unavailable
+                      : log.pricingKnown === false
+                        ? t("usage.unpriced")
+                        : log.pricingKnown == null
+                          ? unavailable
+                          : fmtUsd(log.totalCostUsd, 4);
                     return (
                       <TableRow key={log.requestId}>
                         <TableCell className="text-center whitespace-nowrap text-xs px-1.5">
@@ -236,51 +245,51 @@ export function RequestLogTable({
                           </div>
                         </TableCell>
                         <TableCell className="text-center px-1.5">
-                          {(() => {
-                            const freshInput = getFreshInputTokens(log);
-                            const isCacheInclusive =
-                              log.inputTokens !== freshInput;
-                            return (
-                              <div
-                                className="tabular-nums"
-                                title={
-                                  isCacheInclusive
-                                    ? `Raw: ${log.inputTokens.toLocaleString()}`
-                                    : undefined
-                                }
-                              >
-                                {fmtInt(freshInput, locale)}
+                          {hasUsage
+                            ? (() => {
+                                const freshInput = getFreshInputTokens(log);
+                                const isCacheInclusive =
+                                  log.inputTokens !== freshInput;
+                                return (
+                                  <div
+                                    className="tabular-nums"
+                                    title={
+                                      isCacheInclusive
+                                        ? `Raw: ${log.inputTokens.toLocaleString()}`
+                                        : undefined
+                                    }
+                                  >
+                                    {fmtInt(freshInput, locale)}
+                                  </div>
+                                );
+                              })()
+                            : unavailable}
+                          {hasUsage &&
+                            (log.cacheReadTokens > 0 ||
+                              log.cacheCreationTokens > 0) && (
+                              <div className="text-[10px] text-muted-foreground whitespace-nowrap">
+                                {[
+                                  log.cacheReadTokens > 0 &&
+                                    `R${fmtInt(log.cacheReadTokens, locale)}`,
+                                  log.cacheCreationTokens > 0 &&
+                                    `W${fmtInt(log.cacheCreationTokens, locale)}`,
+                                ]
+                                  .filter(Boolean)
+                                  .join("·")}
                               </div>
-                            );
-                          })()}
-                          {(log.cacheReadTokens > 0 ||
-                            log.cacheCreationTokens > 0) && (
-                            <div className="text-[10px] text-muted-foreground whitespace-nowrap">
-                              {[
-                                log.cacheReadTokens > 0 &&
-                                  `R${fmtInt(log.cacheReadTokens, locale)}`,
-                                log.cacheCreationTokens > 0 &&
-                                  `W${fmtInt(log.cacheCreationTokens, locale)}`,
-                              ]
-                                .filter(Boolean)
-                                .join("·")}
-                            </div>
-                          )}
+                            )}
                         </TableCell>
                         <TableCell className="text-center">
-                          {fmtInt(log.outputTokens, locale)}
+                          {hasUsage
+                            ? fmtInt(log.outputTokens, locale)
+                            : unavailable}
                         </TableCell>
                         <TableCell className="text-center px-1.5">
-                          <div
-                            className={`font-medium tabular-nums ${
-                              unpriced ? "text-muted-foreground" : ""
-                            }`}
-                          >
-                            {unpriced
-                              ? t("usage.unpriced", "未定价")
-                              : fmtUsd(log.totalCostUsd, 4)}
+                          <div className="font-medium tabular-nums">
+                            {costDisplay}
                           </div>
-                          {parseFiniteNumber(log.costMultiplier) != null &&
+                          {hasPrice &&
+                            parseFiniteNumber(log.costMultiplier) != null &&
                             parseFiniteNumber(log.costMultiplier) !== 1 && (
                               <div className="text-[11px] text-muted-foreground">
                                 ×
@@ -291,23 +300,29 @@ export function RequestLogTable({
                             )}
                         </TableCell>
                         <TableCell className="text-center whitespace-nowrap text-xs tabular-nums">
-                          {(log.latencyMs / 1000).toFixed(1)}s
-                          {log.firstTokenMs != null && (
+                          {measured
+                            ? `${(log.latencyMs / 1000).toFixed(1)}s`
+                            : "N/A"}
+                          {measured && log.firstTokenMs != null && (
                             <span className="text-muted-foreground">
                               /{(log.firstTokenMs / 1000).toFixed(1)}s
                             </span>
                           )}
                         </TableCell>
                         <TableCell className="text-center">
-                          <span
-                            className={
-                              log.statusCode >= 200 && log.statusCode < 300
-                                ? "text-green-600"
-                                : "text-red-600"
-                            }
-                          >
-                            {log.statusCode}
-                          </span>
+                          {measured ? (
+                            <span
+                              className={
+                                log.statusCode >= 200 && log.statusCode < 300
+                                  ? "text-green-600"
+                                  : "text-red-600"
+                              }
+                            >
+                              {log.statusCode}
+                            </span>
+                          ) : (
+                            "N/A"
+                          )}
                         </TableCell>
                         <TableCell className="text-center text-xs text-muted-foreground">
                           {log.dataSource || "proxy"}

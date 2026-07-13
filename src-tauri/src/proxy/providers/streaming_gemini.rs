@@ -256,6 +256,7 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
         let mut latest_usage: Option<Value> = None;
         let mut latest_finish_reason: Option<String> = None;
         let mut blocked_text: Option<String> = None;
+        let mut saw_done_sentinel = false;
         tokio::pin!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -281,6 +282,7 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
 
                         let data = data_lines.join("\n");
                         if data.trim() == "[DONE]" {
+                            saw_done_sentinel = true;
                             break;
                         }
 
@@ -407,6 +409,18 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                     return;
                 }
             }
+        }
+
+        if latest_finish_reason.is_none() && blocked_text.is_none() && !saw_done_sentinel {
+            let error = json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Upstream Gemini stream ended before a terminal event"
+                }
+            });
+            yield Ok(encode_sse("error", &error));
+            return;
         }
 
         if !has_sent_message_start {
@@ -642,6 +656,17 @@ mod tests {
         assert!(output.contains("\"text\":\"lo\""));
         assert!(output.contains("\"stop_reason\":\"end_turn\""));
         assert!(output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn raw_eof_without_finish_reason_emits_error_not_message_stop() {
+        let output = collect_stream_output(vec![
+            "data: {\"responseId\":\"resp_truncated\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n",
+        ]);
+
+        assert!(output.contains("event: error"));
+        assert!(output.contains("terminal event"));
+        assert!(!output.contains("event: message_stop"));
     }
 
     #[test]

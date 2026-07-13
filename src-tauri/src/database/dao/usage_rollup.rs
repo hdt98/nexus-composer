@@ -122,23 +122,33 @@ impl Database {
             "INSERT OR REPLACE INTO usage_daily_rollups
                 (date, app_type, provider_id, model, request_model, pricing_model,
                  request_count, success_count,
+                 measured_request_count,
+                 token_usage_known_count,
+                 priced_request_count,
                  input_tokens, output_tokens,
                  cache_read_tokens, cache_creation_tokens,
-                 total_cost_usd, avg_latency_ms)
+                 total_cost_usd, avg_latency_ms, latency_sum)
             SELECT
                 d, a, p, m, rm, pm,
                 COALESCE(old.request_count, 0) + new_req,
                 COALESCE(old.success_count, 0) + new_succ,
+                COALESCE(old.measured_request_count, 0) + new_measured,
+                COALESCE(old.token_usage_known_count, 0) + new_known,
+                CASE
+                    WHEN old.date IS NULL THEN new_priced
+                    WHEN old.priced_request_count IS NULL OR new_priced IS NULL THEN NULL
+                    ELSE old.priced_request_count + new_priced
+                END,
                 COALESCE(old.input_tokens, 0) + new_in,
                 COALESCE(old.output_tokens, 0) + new_out,
                 COALESCE(old.cache_read_tokens, 0) + new_cr,
                 COALESCE(old.cache_creation_tokens, 0) + new_cc,
                 CAST(COALESCE(CAST(old.total_cost_usd AS REAL), 0) + new_cost AS TEXT),
-                CASE WHEN COALESCE(old.request_count, 0) + new_req > 0
-                    THEN (COALESCE(old.avg_latency_ms, 0) * COALESCE(old.request_count, 0)
-                          + new_lat * new_req)
-                         / (COALESCE(old.request_count, 0) + new_req)
-                    ELSE 0 END
+                CASE WHEN COALESCE(old.measured_request_count, 0) + new_measured > 0
+                    THEN (COALESCE(old.latency_sum, 0) + new_lat_sum)
+                         / (COALESCE(old.measured_request_count, 0) + new_measured)
+                    ELSE 0 END,
+                COALESCE(old.latency_sum, 0) + new_lat_sum
             FROM (
                 SELECT
                     date(l.created_at, 'unixepoch', 'localtime') as d,
@@ -146,13 +156,21 @@ impl Database {
                     COALESCE(l.request_model, '') as rm,
                     COALESCE(l.pricing_model, '') as pm,
                     COUNT(*) as new_req,
-                    SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as new_succ,
-                    COALESCE(SUM(l.input_tokens), 0) as new_in,
-                    COALESCE(SUM(l.output_tokens), 0) as new_out,
-                    COALESCE(SUM(l.cache_read_tokens), 0) as new_cr,
-                    COALESCE(SUM(l.cache_creation_tokens), 0) as new_cc,
-                    COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as new_cost,
-                    COALESCE(AVG(l.latency_ms), 0) as new_lat
+                    SUM(CASE WHEN COALESCE(l.data_source, 'proxy') = 'proxy'
+                              AND l.status_code >= 200 AND l.status_code < 300
+                             THEN 1 ELSE 0 END) as new_succ,
+                    SUM(CASE WHEN COALESCE(l.data_source, 'proxy') = 'proxy' THEN 1 ELSE 0 END) as new_measured,
+                    SUM(CASE WHEN l.token_usage_known != 0 THEN 1 ELSE 0 END) as new_known,
+                    CASE WHEN COUNT(*) = COUNT(l.pricing_known)
+                         THEN COALESCE(SUM(CASE WHEN l.pricing_known = 1 THEN 1 ELSE 0 END), 0)
+                         ELSE NULL END as new_priced,
+                    COALESCE(SUM(CASE WHEN l.token_usage_known != 0 THEN l.input_tokens ELSE 0 END), 0) as new_in,
+                    COALESCE(SUM(CASE WHEN l.token_usage_known != 0 THEN l.output_tokens ELSE 0 END), 0) as new_out,
+                    COALESCE(SUM(CASE WHEN l.token_usage_known != 0 THEN l.cache_read_tokens ELSE 0 END), 0) as new_cr,
+                    COALESCE(SUM(CASE WHEN l.token_usage_known != 0 THEN l.cache_creation_tokens ELSE 0 END), 0) as new_cc,
+                    COALESCE(SUM(CASE WHEN l.pricing_known = 1 THEN CAST(l.total_cost_usd AS REAL) ELSE 0 END), 0) as new_cost,
+                    COALESCE(SUM(CASE WHEN COALESCE(l.data_source, 'proxy') = 'proxy'
+                                      THEN l.latency_ms ELSE 0 END), 0) as new_lat_sum
                 FROM proxy_request_logs l
                 WHERE l.created_at < ?1 AND {effective_filter}
                 GROUP BY d, a, p, m, rm, pm
@@ -274,6 +292,53 @@ mod tests {
                 row.get(0)
             })?;
         assert_eq!(remaining, 3);
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_rollups_preserve_exact_latency_sum() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let old_ts = chrono::Utc::now().timestamp() - 40 * 86400;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            for (request_id, latency) in [("lat-1", 1i64), ("lat-2", 2)] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model,
+                        latency_ms, status_code, created_at, data_source
+                     ) VALUES (?1, 'p1', 'claude', 'model', ?2, 200, ?3, 'proxy')",
+                    rusqlite::params![request_id, latency, old_ts],
+                )?;
+            }
+        }
+        assert_eq!(db.rollup_and_prune(30)?, 2);
+
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    latency_ms, status_code, created_at, data_source
+                 ) VALUES ('lat-3', 'p1', 'claude', 'model', 3, 200, ?1, 'proxy')",
+                [old_ts],
+            )?;
+        }
+        assert_eq!(db.rollup_and_prune(30)?, 1);
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (measured, latency_sum, average): (i64, i64, i64) = conn.query_row(
+            "SELECT measured_request_count, latency_sum, avg_latency_ms
+             FROM usage_daily_rollups WHERE provider_id = 'p1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(measured, 3);
+        assert_eq!(latency_sum, 6);
+        assert_eq!(average, 2);
+        drop(conn);
+
+        let stats = db.get_provider_stats(None, None, Some("claude"), None, None)?;
+        assert_eq!(stats[0].avg_latency_ms, Some(2));
         Ok(())
     }
 

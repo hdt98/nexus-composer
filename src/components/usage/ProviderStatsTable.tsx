@@ -74,9 +74,12 @@ export function ProviderStatsTable({
             </TableRow>
           ) : (
             stats?.map((stat) => (
-              <TableRow key={stat.providerId}>
+              <TableRow key={`${stat.appType}:${stat.providerId}`}>
                 <TableCell className="font-medium">
                   {stat.providerName}
+                  <span className="block text-xs text-muted-foreground">
+                    {stat.appType}
+                  </span>
                 </TableCell>
                 <TableCell className="text-right">
                   {stat.requestCount.toLocaleString()}
@@ -88,10 +91,12 @@ export function ProviderStatsTable({
                   {fmtUsd(stat.totalCost, 4)}
                 </TableCell>
                 <TableCell className="text-right">
-                  {stat.successRate.toFixed(1)}%
+                  {stat.successRate == null
+                    ? "N/A"
+                    : `${stat.successRate.toFixed(1)}%`}
                 </TableCell>
                 <TableCell className="text-right">
-                  {stat.avgLatencyMs}ms
+                  {stat.avgLatencyMs == null ? "N/A" : `${stat.avgLatencyMs}ms`}
                 </TableCell>
               </TableRow>
             ))

@@ -21,12 +21,22 @@ pub struct RequestLog {
     /// 用 model/request_model 猜——路由接管下三者可能各不相同。
     /// 错误行（未计价）为空字符串。
     pub pricing_model: String,
+    /// Whether the upstream response reported any token-usage dimensions.
+    /// Unknown usage remains a real request/outcome/timing observation, but its
+    /// zero placeholders must never be interpreted as measured consumption.
+    pub token_usage_known: bool,
+    /// Whether this request matched a configured pricing rule. This is
+    /// independent of the numeric total because a valid rule can be free.
+    pub pricing_known: bool,
     pub usage: TokenUsage,
     pub cost: Option<CostBreakdown>,
     pub latency_ms: u64,
     pub first_token_ms: Option<u64>,
     pub status_code: u16,
     pub error_message: Option<String>,
+    /// Terminal lifecycle state for SSE requests. Non-streaming requests leave
+    /// this unset because their HTTP/body read already has an atomic outcome.
+    pub stream_outcome: Option<String>,
     pub session_id: Option<String>,
     /// 供应商类型 (claude, claude_auth, codex, gemini, gemini_cli, openrouter)
     pub provider_type: Option<String>,
@@ -74,11 +84,12 @@ impl<'a> UsageLogger<'a> {
         conn.execute(
             "INSERT OR REPLACE INTO proxy_request_logs (
                 request_id, provider_id, app_type, model, request_model, pricing_model,
+                token_usage_known, pricing_known,
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
-                latency_ms, first_token_ms, status_code, error_message, session_id,
+                latency_ms, first_token_ms, duration_ms, status_code, error_message, stream_outcome, session_id,
                 provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
             rusqlite::params![
                 log.request_id,
                 log.provider_id,
@@ -86,6 +97,8 @@ impl<'a> UsageLogger<'a> {
                 log.model,
                 log.request_model,
                 log.pricing_model,
+                log.token_usage_known as i64,
+                log.pricing_known as i64,
                 log.usage.input_tokens,
                 log.usage.output_tokens,
                 log.usage.cache_read_tokens,
@@ -97,8 +110,10 @@ impl<'a> UsageLogger<'a> {
                 total_cost,
                 log.latency_ms as i64,
                 log.first_token_ms.map(|v| v as i64),
+                log.latency_ms as i64,
                 log.status_code as i64,
                 log.error_message,
+                log.stream_outcome,
                 log.session_id,
                 log.provider_type,
                 log.is_streaming as i64,
@@ -137,12 +152,15 @@ impl<'a> UsageLogger<'a> {
             request_model,
             // 错误行未经过计价，留空（回填的 has_usage 闸门也不会碰全 0 行）
             pricing_model: String::new(),
+            token_usage_known: false,
+            pricing_known: false,
             usage: TokenUsage::default(),
             cost: None,
             latency_ms,
             first_token_ms: None,
             status_code,
             error_message: Some(error_message),
+            stream_outcome: None,
             session_id: None,
             provider_type: None,
             is_streaming: false,
@@ -178,12 +196,15 @@ impl<'a> UsageLogger<'a> {
             request_model,
             // 错误行未经过计价，留空（回填的 has_usage 闸门也不会碰全 0 行）
             pricing_model: String::new(),
+            token_usage_known: false,
+            pricing_known: false,
             usage: TokenUsage::default(),
             cost: None,
             latency_ms,
             first_token_ms: None,
             status_code,
             error_message: Some(error_message),
+            stream_outcome: None,
             session_id,
             provider_type,
             is_streaming,
@@ -313,6 +334,7 @@ impl<'a> UsageLogger<'a> {
         request_model: String,
         pricing_model: String,
         usage: TokenUsage,
+        token_usage_known: bool,
         cost_multiplier: Decimal,
         latency_ms: u64,
         first_token_ms: Option<u64>,
@@ -320,24 +342,34 @@ impl<'a> UsageLogger<'a> {
         session_id: Option<String>,
         provider_type: Option<String>,
         is_streaming: bool,
+        stream_outcome: Option<String>,
+        error_message: Option<String>,
     ) -> Result<(), AppError> {
-        let pricing = self.get_model_pricing(&pricing_model)?;
+        // Several OpenAI-compatible providers omit usage, especially on
+        // streams. Persist the request so counts, success, latency, and TTFT
+        // remain accurate, but explicitly exclude its placeholder zeros from
+        // consumption and pricing.
+        let pricing = if token_usage_known {
+            self.get_model_pricing(&pricing_model)?
+        } else {
+            None
+        };
+        let pricing_known = pricing.is_some();
 
-        let has_usage = usage.input_tokens > 0
-            || usage.output_tokens > 0
-            || usage.cache_read_tokens > 0
-            || usage.cache_creation_tokens > 0;
-
-        if pricing.is_none() && has_usage && !is_placeholder_pricing_model(&pricing_model) {
+        if pricing.is_none() && token_usage_known && !is_placeholder_pricing_model(&pricing_model) {
             log::warn!("[USG-002] 模型定价未找到，成本将记录为 0: {pricing_model}");
         }
 
-        let cost = CostCalculator::try_calculate_for_app(
-            &app_type,
-            &usage,
-            pricing.as_ref(),
-            cost_multiplier,
-        );
+        let cost = token_usage_known
+            .then(|| {
+                CostCalculator::try_calculate_for_app(
+                    &app_type,
+                    &usage,
+                    pricing.as_ref(),
+                    cost_multiplier,
+                )
+            })
+            .flatten();
 
         let log = RequestLog {
             request_id,
@@ -346,12 +378,15 @@ impl<'a> UsageLogger<'a> {
             model,
             request_model,
             pricing_model,
+            token_usage_known,
+            pricing_known,
             usage,
             cost,
             latency_ms,
             first_token_ms,
             status_code,
-            error_message: None,
+            error_message,
+            stream_outcome,
             session_id,
             provider_type,
             is_streaming,
@@ -400,6 +435,7 @@ mod tests {
             "req-model".to_string(),
             "test-model".to_string(),
             usage,
+            true,
             Decimal::from(1),
             100,
             None,
@@ -407,6 +443,8 @@ mod tests {
             None,
             Some("claude".to_string()),
             false,
+            None,
+            None,
         )?;
 
         // 验证记录已插入
@@ -449,6 +487,112 @@ mod tests {
             .unwrap();
         assert_eq!(status, 500);
         assert_eq!(error, Some("Internal Server Error".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn records_unknown_free_and_unpriced_successes_distinctly() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO model_pricing
+                 (model_id, display_name, input_cost_per_million, output_cost_per_million)
+                 VALUES ('free-model', 'Free', '0', '0')",
+                [],
+            )?;
+        }
+        let logger = UsageLogger::new(&db);
+        for (id, model, input, known) in [
+            ("free", "free-model", 10, true),
+            ("unpriced", "missing-model", 10, true),
+            ("zero-known", "free-model", 0, true),
+            ("unknown", "missing-model", 0, false),
+        ] {
+            logger.log_with_calculation(
+                id.into(),
+                "provider".into(),
+                "codex".into(),
+                model.into(),
+                model.into(),
+                model.into(),
+                TokenUsage {
+                    input_tokens: input,
+                    ..Default::default()
+                },
+                known,
+                Decimal::ONE,
+                25,
+                Some(5),
+                200,
+                None,
+                None,
+                true,
+                None,
+                None,
+            )?;
+        }
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut stmt = conn.prepare(
+            "SELECT request_id, token_usage_known, pricing_known
+             FROM proxy_request_logs ORDER BY request_id",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<(String, i64, i64)>, _>>()?;
+        assert_eq!(
+            rows,
+            [
+                ("free", 1, 1),
+                ("unknown", 0, 0),
+                ("unpriced", 1, 0),
+                ("zero-known", 1, 1),
+            ]
+            .map(|(id, usage, pricing)| (id.into(), usage, pricing))
+        );
+        drop(stmt);
+        drop(conn);
+        let summary = db.get_usage_summary(None, None, None, None, None)?;
+        assert_eq!(summary.total_requests, 4);
+        assert_eq!(summary.token_usage_known_requests, 3);
+        assert_eq!(summary.priced_request_count, Some(2));
+        assert_eq!(summary.successful_request_count, 4);
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_stream_is_failure_with_unknown_usage() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let logger = UsageLogger::new(&db);
+        logger.log_with_calculation(
+            "interrupted".into(),
+            "provider".into(),
+            "codex".into(),
+            "model".into(),
+            "model".into(),
+            "model".into(),
+            TokenUsage::default(),
+            false,
+            Decimal::ONE,
+            90,
+            Some(20),
+            502,
+            Some("session".into()),
+            None,
+            true,
+            Some("upstream-error".into()),
+            Some("Upstream stream ended before protocol completion".into()),
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let row: (i64, i64, String) = conn.query_row(
+            "SELECT status_code, token_usage_known, stream_outcome
+             FROM proxy_request_logs WHERE request_id = 'interrupted'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(row, (502, 0, "upstream-error".into()));
         Ok(())
     }
 }

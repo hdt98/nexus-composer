@@ -124,7 +124,7 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
     expect(nexus.codexChatReasoning).toMatchObject({
       supportsThinking: true,
       supportsEffort: false,
-      thinkingParam: "none",
+      thinkingParam: "chat_template_kwargs.enable_thinking",
       effortParam: "none",
     });
     expect(nexus.nexusCapabilities).toEqual(NEXUS_CAPABILITIES);

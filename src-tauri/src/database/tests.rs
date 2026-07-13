@@ -173,7 +173,8 @@ fn schema_migration_sets_user_version_when_missing() {
 fn schema_migration_rejects_future_version() {
     let conn = Connection::open_in_memory().expect("open memory db");
     Database::create_tables_on_conn(&conn).expect("create tables");
-    Database::set_user_version(&conn, SCHEMA_VERSION + 1).expect("set future version");
+    Database::set_user_version(&conn, *USAGE_PRERELEASE_SCHEMA_VERSIONS.end() + 1)
+        .expect("set future version");
 
     let err =
         Database::apply_schema_migrations_on_conn(&conn).expect_err("should reject higher version");
@@ -181,6 +182,19 @@ fn schema_migration_rejects_future_version() {
         err.to_string().contains("数据库版本过新"),
         "unexpected error: {err}"
     );
+}
+
+#[test]
+fn schema_migration_rejects_unrecognized_prerelease_shape() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute("CREATE TABLE unrelated (id INTEGER PRIMARY KEY)", [])
+        .expect("create unrelated schema");
+    Database::set_user_version(&conn, 13).expect("set prerelease version");
+
+    let err = Database::apply_schema_migrations_on_conn(&conn)
+        .expect_err("unrecognized prerelease schema must fail closed");
+    assert!(err.to_string().contains("schema shape is not recognized"));
+    assert_eq!(Database::get_user_version(&conn).unwrap(), 13);
 }
 
 #[test]
@@ -289,6 +303,18 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    for column in ["token_usage_known", "pricing_known", "stream_outcome"] {
+        assert!(Database::has_column(&conn, "proxy_request_logs", column).unwrap());
+    }
+    for column in [
+        "measured_request_count",
+        "token_usage_known_count",
+        "priced_request_count",
+        "latency_sum",
+    ] {
+        assert!(Database::has_column(&conn, "usage_daily_rollups", column).unwrap());
+    }
 }
 
 #[test]
@@ -769,6 +795,14 @@ fn model_pricing_seed_repairs_known_outdated_builtin_prices() {
             [],
         )
         .expect("set custom GLM price");
+        conn.execute(
+            "INSERT INTO model_pricing
+                 (model_id, display_name, input_cost_per_million, output_cost_per_million,
+                  cache_read_cost_per_million, cache_creation_cost_per_million)
+             VALUES ('glm-5.2-sglang', 'Legacy internal alias', '1.4', '4.4', '0.26', '0')",
+            [],
+        )
+        .expect("insert legacy GLM alias");
     }
 
     db.ensure_model_pricing_seeded()
@@ -801,6 +835,14 @@ fn model_pricing_seed_repairs_known_outdated_builtin_prices() {
         )
         .expect("query GLM price");
     assert_eq!(glm, ("9".to_string(), "9".to_string(), "9".to_string()));
+    let aliases: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM model_pricing WHERE model_id = 'glm-5.2-sglang'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("query legacy GLM alias");
+    assert_eq!(aliases, 0);
 }
 
 #[test]
@@ -830,4 +872,228 @@ fn ensure_incremental_auto_vacuum_rebuilds_existing_file_db() {
         2,
         "file db should persist INCREMENTAL auto_vacuum after VACUUM rebuild"
     );
+}
+
+#[test]
+fn migration_v11_adds_usage_stream_columns_and_removes_legacy_traces() {
+    let conn = Connection::open_in_memory().expect("open db");
+    conn.execute_batch(
+        "CREATE TABLE proxy_request_logs (
+             request_id TEXT PRIMARY KEY, provider_id TEXT NOT NULL,
+             app_type TEXT NOT NULL, model TEXT NOT NULL, request_model TEXT,
+             pricing_model TEXT, input_tokens INTEGER NOT NULL DEFAULT 0,
+             output_tokens INTEGER NOT NULL DEFAULT 0,
+             cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+             cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+             input_cost_usd TEXT NOT NULL DEFAULT '0',
+             output_cost_usd TEXT NOT NULL DEFAULT '0',
+             cache_read_cost_usd TEXT NOT NULL DEFAULT '0',
+             cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
+             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL,
+             first_token_ms INTEGER, duration_ms INTEGER, status_code INTEGER NOT NULL,
+             error_message TEXT, session_id TEXT, provider_type TEXT,
+             is_streaming INTEGER NOT NULL DEFAULT 0,
+             cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL,
+             data_source TEXT NOT NULL DEFAULT 'proxy'
+         );
+         INSERT INTO proxy_request_logs
+             (request_id, provider_id, app_type, model, input_tokens,
+              input_cost_usd, total_cost_usd, latency_ms, status_code, created_at)
+         VALUES ('priced', 'p1', 'codex', 'model', 10, '0.1', '0.1', 20, 200, 1),
+                ('unknown', 'p1', 'codex', 'model', 0, '0', '0', 30, 502, 2);
+         CREATE TABLE proxy_trace_logs (request_id TEXT, request_body TEXT);
+         INSERT INTO proxy_trace_logs VALUES ('trace-1', 'raw-body');
+         CREATE TABLE usage_daily_rollups (
+             date TEXT, app_type TEXT, provider_id TEXT, model TEXT,
+             request_model TEXT DEFAULT '', pricing_model TEXT DEFAULT '',
+             request_count INTEGER DEFAULT 0, success_count INTEGER DEFAULT 0,
+             avg_latency_ms INTEGER DEFAULT 0
+         );
+         INSERT INTO usage_daily_rollups VALUES
+             ('2026-05-01', 'claude', 'p1', 'model', '', '', 7, 7, 120);
+         PRAGMA user_version = 11;",
+    )
+    .expect("seed v11 database");
+
+    Database::create_tables_on_conn(&conn).expect("startup create tables");
+    assert!(!Database::has_column(&conn, "usage_daily_rollups", "latency_sum").unwrap());
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v11");
+    assert_eq!(Database::get_user_version(&conn).unwrap(), SCHEMA_VERSION);
+    assert!(!Database::table_exists(&conn, "proxy_trace_logs").unwrap());
+    for column in ["token_usage_known", "pricing_known", "stream_outcome"] {
+        assert!(Database::has_column(&conn, "proxy_request_logs", column).unwrap());
+    }
+
+    let classifications: Vec<(String, i64, Option<i64>)> = conn
+        .prepare(
+            "SELECT request_id, token_usage_known, pricing_known
+             FROM proxy_request_logs ORDER BY request_id",
+        )
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        classifications,
+        vec![
+            ("priced".to_string(), 1, Some(1)),
+            ("unknown".to_string(), 0, Some(0)),
+        ]
+    );
+    let coverage: (i64, i64, i64, Option<i64>, i64) = conn
+        .query_row(
+            "SELECT token_usage_known_count, measured_request_count, success_count,
+                    priced_request_count, latency_sum FROM usage_daily_rollups",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(coverage, (7, 0, 0, None, 0));
+}
+
+#[test]
+fn usage_schema_v12_through_v16_normalizes_by_shape_without_reclassification() {
+    for version in SCHEMA_VERSION..=*USAGE_PRERELEASE_SCHEMA_VERSIONS.end() {
+        let shape_stage = if version == SCHEMA_VERSION {
+            16
+        } else {
+            version
+        };
+        let conn = Connection::open_in_memory().expect("open db");
+        conn.execute_batch(
+            "CREATE TABLE proxy_request_logs (
+                 request_id TEXT PRIMARY KEY,
+                 token_usage_known INTEGER NOT NULL,
+                 input_cost_usd TEXT NOT NULL DEFAULT '0',
+                 output_cost_usd TEXT NOT NULL DEFAULT '0',
+                 cache_read_cost_usd TEXT NOT NULL DEFAULT '0',
+                 cache_creation_cost_usd TEXT NOT NULL DEFAULT '0',
+                 total_cost_usd TEXT NOT NULL DEFAULT '0'
+             );
+             INSERT INTO proxy_request_logs
+                 (request_id, token_usage_known, input_cost_usd, total_cost_usd)
+             VALUES ('known', 1, '0.1', '0.1'), ('unknown', 0, '0', '0');
+             CREATE TABLE usage_daily_rollups (
+                 request_count INTEGER NOT NULL,
+                 success_count INTEGER NOT NULL,
+                 token_usage_known_count INTEGER NOT NULL,
+                 avg_latency_ms INTEGER NOT NULL
+             );
+             INSERT INTO usage_daily_rollups VALUES (7, 5, 4, 120);",
+        )
+        .expect("seed prerelease base shape");
+
+        if version > SCHEMA_VERSION {
+            conn.execute_batch(
+                "CREATE TABLE proxy_trace_logs (request_body TEXT);
+                 INSERT INTO proxy_trace_logs VALUES ('legacy raw trace');",
+            )
+            .expect("seed legacy prerelease trace");
+        }
+        if shape_stage >= 14 {
+            conn.execute_batch(
+                "ALTER TABLE proxy_request_logs ADD COLUMN pricing_known INTEGER;
+                 UPDATE proxy_request_logs SET pricing_known = 0 WHERE request_id = 'unknown';
+                 ALTER TABLE usage_daily_rollups
+                     ADD COLUMN measured_request_count INTEGER NOT NULL DEFAULT 3;
+                 ALTER TABLE usage_daily_rollups ADD COLUMN priced_request_count INTEGER;
+                 UPDATE usage_daily_rollups SET success_count = 2, priced_request_count = 1;",
+            )
+            .expect("seed classified prerelease shape");
+        }
+        if shape_stage >= 15 {
+            conn.execute_batch(
+                "ALTER TABLE proxy_request_logs ADD COLUMN stream_outcome TEXT;
+                 UPDATE proxy_request_logs SET stream_outcome = 'completed' WHERE request_id = 'known';",
+            )
+            .expect("seed stream outcome shape");
+        }
+        if shape_stage >= 16 {
+            conn.execute_batch(
+                "ALTER TABLE usage_daily_rollups
+                     ADD COLUMN latency_sum INTEGER NOT NULL DEFAULT 777;",
+            )
+            .expect("seed exact latency shape");
+        }
+        Database::set_user_version(&conn, version).expect("set prerelease version");
+
+        Database::apply_schema_migrations_on_conn(&conn).expect("normalize prerelease schema");
+        assert_eq!(Database::get_user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert!(!Database::table_exists(&conn, "proxy_trace_logs").unwrap());
+        for column in ["pricing_known", "stream_outcome"] {
+            assert!(Database::has_column(&conn, "proxy_request_logs", column).unwrap());
+        }
+        for column in [
+            "measured_request_count",
+            "priced_request_count",
+            "latency_sum",
+        ] {
+            assert!(Database::has_column(&conn, "usage_daily_rollups", column).unwrap());
+        }
+
+        let details: Vec<(String, Option<i64>, Option<String>)> = conn
+            .prepare(
+                "SELECT request_id, pricing_known, stream_outcome
+                 FROM proxy_request_logs ORDER BY request_id",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let expected_stream = (shape_stage >= 15).then(|| "completed".to_string());
+        assert_eq!(
+            details[0],
+            (
+                "known".to_string(),
+                (version == 13).then_some(1),
+                expected_stream
+            )
+        );
+        assert_eq!(details[1], ("unknown".to_string(), Some(0), None));
+
+        let rollup: (i64, i64, i64, Option<i64>, i64, i64) = conn
+            .query_row(
+                "SELECT success_count, measured_request_count, token_usage_known_count,
+                        priced_request_count, avg_latency_ms, latency_sum
+                 FROM usage_daily_rollups",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let expected = match version {
+            13 => (0, 0, 4, None, 0, 0),
+            14 | 15 => (2, 3, 4, Some(1), 120, 360),
+            12 | 16 => (2, 3, 4, Some(1), 120, 777),
+            _ => unreachable!(),
+        };
+        assert_eq!(rollup, expected, "unexpected normalized v{version} data");
+
+        // Stable v12 is a no-op: a second startup must preserve exact values.
+        Database::apply_schema_migrations_on_conn(&conn).expect("reapply stable schema");
+        let stable_latency: i64 = conn
+            .query_row("SELECT latency_sum FROM usage_daily_rollups", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stable_latency, expected.5);
+    }
 }

@@ -19,7 +19,10 @@ use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
     get_sync_state, metadata_modified_nanos, update_sync_state, SessionSyncResult,
 };
-use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
+use crate::services::usage_stats::{
+    find_model_pricing, reconcile_session_usage, DedupKey, SessionReconciliation,
+    SessionUsageEnrichment,
+};
 use rust_decimal::Decimal;
 use std::fs;
 use std::time::SystemTime;
@@ -339,12 +342,8 @@ fn insert_opencode_message(
         cache_creation_tokens: msg.cache_write_tokens,
         created_at,
     };
-    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
-        return Ok(false);
-    }
-
     // 如果 opencode 已经提供了费用，直接使用；否则从模型定价计算
-    let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) =
+    let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost, pricing_known) =
         if msg.cost > 0.0 {
             // opencode 已计算费用，直接使用
             // 简化处理：全部放入 total_cost（opencode 的 cost 是聚合值，无法精确拆分）
@@ -354,6 +353,7 @@ fn insert_opencode_message(
                 "0".to_string(),
                 "0".to_string(),
                 msg.cost.to_string(),
+                true,
             )
         } else {
             // opencode 费用为 0（如免费模型），尝试用 Nexus Composer 自带的模型定价计算
@@ -380,6 +380,7 @@ fn insert_opencode_message(
                         cost.cache_read_cost.to_string(),
                         cost.cache_creation_cost.to_string(),
                         cost.total_cost.to_string(),
+                        true,
                     )
                 }
                 None => (
@@ -388,9 +389,33 @@ fn insert_opencode_message(
                     "0".to_string(),
                     "0".to_string(),
                     "0".to_string(),
+                    false,
                 ),
             }
         };
+
+    match reconcile_session_usage(
+        &conn,
+        request_id,
+        &SessionUsageEnrichment {
+            key: dedup_key,
+            session_id: Some(session_id),
+            request_model: &msg.model_id,
+            pricing_model: &msg.model_id,
+            costs: [
+                &input_cost,
+                &output_cost,
+                &cache_read_cost,
+                &cache_creation_cost,
+                &total_cost,
+            ],
+            pricing_known,
+        },
+    )? {
+        SessionReconciliation::Skip => return Ok(false),
+        SessionReconciliation::Enriched => return Ok(true),
+        SessionReconciliation::Insert => {}
+    }
 
     let inserted_rows = conn.execute(
         "INSERT OR IGNORE INTO proxy_request_logs (
@@ -398,8 +423,9 @@ fn insert_opencode_message(
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at, data_source
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            provider_type, is_streaming, cost_multiplier, created_at, data_source,
+            pricing_model, pricing_known
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         rusqlite::params![
             request_id,
             "_opencode_session",   // provider_id
@@ -425,6 +451,8 @@ fn insert_opencode_message(
             "1.0",                 // cost_multiplier
             created_at,
             "opencode_session",    // data_source
+            msg.model_id,          // pricing_model
+            pricing_known as i64,
         ],
     )
     .map_err(|e| AppError::Database(format!("插入 OpenCode 会话日志失败: {e}")))?;

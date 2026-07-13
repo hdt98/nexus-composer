@@ -16,6 +16,11 @@ export interface RequestLog {
   requestModel?: string;
   /** 写入时实际用于计价的模型名；路由接管 + request 计价模式下可能与 model 不同 */
   pricingModel?: string;
+  /** False when the upstream response omitted token usage. */
+  tokenUsageKnown: boolean;
+  /** True/false when pricing classification is exact; null for legacy rows
+   *  whose historical pricing coverage cannot be reconstructed. */
+  pricingKnown: boolean | null;
   costMultiplier: string;
   inputTokens: number;
   outputTokens: number;
@@ -27,11 +32,16 @@ export interface RequestLog {
   cacheCreationCostUsd: string;
   totalCostUsd: string;
   isStreaming: boolean;
+  /** Elapsed proxy request time through upstream response completion. */
   latencyMs: number;
+  /** Time to the first meaningful streaming payload, when observed. */
   firstTokenMs?: number;
+  /** Legacy total-duration alias; falls back to latencyMs when unstored. */
   durationMs?: number;
   statusCode: number;
   errorMessage?: string;
+  /** Terminal state for streaming requests. */
+  streamOutcome?: "completed" | "timeout" | "upstream-error" | "cancelled";
   createdAt: number;
   dataSource?: string;
 }
@@ -67,12 +77,20 @@ export interface ModelPricing {
 
 export interface UsageSummary {
   totalRequests: number;
+  /** Requests included in token totals. */
+  tokenUsageKnownRequests: number;
+  /** Exact priced-request count, or null for indeterminate legacy coverage. */
+  pricedRequestCount: number | null;
+  /** Requests backed by an observed proxy response. */
+  measuredRequestCount: number;
+  successfulRequestCount: number;
   totalCost: string;
   totalInputTokens: number;
   totalOutputTokens: number;
   totalCacheCreationTokens: number;
   totalCacheReadTokens: number;
-  successRate: number;
+  /** Successful measured proxy responses, or null when no outcome was observed. */
+  successRate: number | null;
   /** input + output + cache_creation + cache_read, all cache-normalized */
   realTotalTokens: number;
   /** cache_read / (input + cache_creation + cache_read), range 0–1 */
@@ -98,11 +116,15 @@ export interface DailyStats {
 export interface ProviderStats {
   providerId: string;
   providerName: string;
+  /** Providers are uniquely identified by the composite (providerId, appType). */
+  appType: string;
   requestCount: number;
   totalTokens: number;
   totalCost: string;
-  successRate: number;
-  avgLatencyMs: number;
+  /** Requests backed by an observed proxy response, excluding imported sessions. */
+  measuredRequestCount: number;
+  successRate?: number | null;
+  avgLatencyMs?: number | null;
 }
 
 export interface ModelStats {
@@ -163,12 +185,13 @@ export interface UsageRangeSelection {
  * `claude-desktop` is intentionally NOT listed: the Desktop gateway's proxy
  * traffic is still recorded under its own `app_type` (preserving route-takeover
  * billing audit — the request detail panel shows the real value), but the
- * dashboard folds it into `claude` for display. It is the embedded Claude Code
+ * dashboard app summaries fold it into `claude` for display. It is the embedded Claude Code
  * runtime running inside the Desktop shell, and Desktop *chat* usage never
  * passes through this app at all, so a separate "Claude Desktop" bucket would
  * only ever show a partial number and mislead users into reading it as the
- * Desktop's full usage. The backend collapses `claude-desktop → claude` in
- * every dashboard query (see `folded_app_type_sql`).
+ * Desktop's full usage. App filters collapse `claude-desktop → claude`;
+ * provider statistics retain raw `(providerId, appType)` identity (see
+ * `folded_app_type_sql`).
  * `opencode` / `openclaw` / `hermes` have no proxy handler at all — they
  * appear only as managed apps elsewhere.
  */
@@ -239,9 +262,12 @@ type UsageCostLog = Pick<
   | "totalCostUsd"
   | "statusCode"
 > &
-  Partial<Pick<RequestLog, "costMultiplier">>;
+  Partial<
+    Pick<RequestLog, "costMultiplier" | "tokenUsageKnown" | "pricingKnown">
+  >;
 
 export function hasUsageTokens(log: UsageCostLog): boolean {
+  if (log.tokenUsageKnown === false) return false;
   return (
     log.inputTokens > 0 ||
     log.outputTokens > 0 ||
@@ -251,6 +277,14 @@ export function hasUsageTokens(log: UsageCostLog): boolean {
 }
 
 export function isUnpricedUsage(log: UsageCostLog): boolean {
+  if (log.tokenUsageKnown === false) return false;
+  if (Object.prototype.hasOwnProperty.call(log, "pricingKnown")) {
+    return log.pricingKnown === false;
+  }
+
+  // Compatibility fallback for request objects produced before pricingKnown
+  // was introduced. New backend responses always use the explicit marker so a
+  // genuinely free model is never confused with missing pricing.
   const totalCost = Number.parseFloat(log.totalCostUsd);
   const multiplier =
     log.costMultiplier == null

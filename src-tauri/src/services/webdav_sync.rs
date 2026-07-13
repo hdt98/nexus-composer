@@ -319,7 +319,15 @@ mod tests {
             ..WebDavSyncSettings::default()
         };
         let segs = remote_dir_segments(&settings, RemoteLayout::Current);
-        assert_eq!(segs, vec!["nexus-composer-sync", "v2", "db-v6", "default"]);
+        assert_eq!(
+            segs,
+            vec![
+                "nexus-composer-sync".to_string(),
+                format!("v{PROTOCOL_VERSION}"),
+                format!("db-v{DB_COMPAT_VERSION}"),
+                "default".to_string(),
+            ]
+        );
     }
 
     #[test]

@@ -14,7 +14,8 @@ use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::usage_stats::{
-    effective_usage_log_filter, find_model_pricing, should_skip_session_insert, DedupKey,
+    effective_usage_log_filter, find_model_pricing, reconcile_session_usage, DedupKey,
+    SessionReconciliation, SessionUsageEnrichment,
 };
 use crate::settings::get_effective_current_provider;
 use crate::AppType;
@@ -440,10 +441,6 @@ fn insert_session_log_entry(
         cache_creation_tokens: msg.cache_creation_tokens,
         created_at,
     };
-    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
-        return Ok(false);
-    }
-
     // When proxy takeover is active, Claude Code reports its native model name
     // (e.g. "claude-fable-5") in session logs, but the actual upstream model is
     // configured in the provider's settings (e.g. "glm-5.2"). Use the provider's
@@ -461,6 +458,7 @@ fn insert_session_log_entry(
     };
 
     let pricing = find_model_pricing_for_session(&conn, &pricing_model);
+    let pricing_known = pricing.is_some();
     let multiplier = Decimal::from(1);
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) = match pricing
     {
@@ -483,6 +481,29 @@ fn insert_session_log_entry(
         ),
     };
 
+    match reconcile_session_usage(
+        &conn,
+        request_id,
+        &SessionUsageEnrichment {
+            key: dedup_key,
+            session_id: msg.session_id.as_deref(),
+            request_model: &msg.model,
+            pricing_model: &pricing_model,
+            costs: [
+                &input_cost,
+                &output_cost,
+                &cache_read_cost,
+                &cache_creation_cost,
+                &total_cost,
+            ],
+            pricing_known,
+        },
+    )? {
+        SessionReconciliation::Skip => return Ok(false),
+        SessionReconciliation::Enriched => return Ok(true),
+        SessionReconciliation::Insert => {}
+    }
+
     let inserted_rows = conn
         .execute(
             "INSERT OR IGNORE INTO proxy_request_logs (
@@ -490,8 +511,9 @@ fn insert_session_log_entry(
             input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
             input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
             latency_ms, first_token_ms, status_code, error_message, session_id,
-            provider_type, is_streaming, cost_multiplier, created_at, data_source, pricing_model
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+            provider_type, is_streaming, cost_multiplier, created_at, data_source, pricing_model,
+            pricing_known
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             rusqlite::params![
                 request_id,
                 "_session",         // provider_id: 标记为会话来源
@@ -518,6 +540,7 @@ fn insert_session_log_entry(
                 created_at,
                 "session_log",      // data_source
                 pricing_model,      // pricing_model: actual upstream model for cost calc
+                pricing_known as i64,
             ],
         )
         .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
@@ -529,7 +552,6 @@ fn insert_session_log_entry(
 
     Ok(true)
 }
-
 
 /// Resolve the actual upstream model for pricing when proxy takeover is active.
 ///
@@ -592,7 +614,9 @@ pub fn get_data_source_breakdown(db: &Database) -> Result<Vec<DataSourceSummary>
     let effective_filter = effective_usage_log_filter("l");
     let sql = format!(
         "SELECT COALESCE(l.data_source, 'proxy') as ds, COUNT(*) as cnt,
-                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as cost
+                COALESCE(SUM(CASE WHEN l.pricing_known = 1
+                                  THEN CAST(l.total_cost_usd AS REAL)
+                                  ELSE 0 END), 0) as cost
          FROM proxy_request_logs l
          WHERE {effective_filter}
          GROUP BY ds
@@ -754,8 +778,70 @@ mod tests {
     }
 
     #[test]
+    fn session_import_enriches_exact_mismatch_and_known_zero() -> Result<(), AppError> {
+        for (proxy_id, import_id, input, output, old) in [
+            ("proxy-exact", "proxy-exact", 100, 20, true),
+            ("proxy-zero", "session:zero", 0, 0, false),
+        ] {
+            let db = Database::memory()?;
+            let timestamp = chrono::Utc::now() - chrono::Duration::days(if old { 40 } else { 0 });
+            {
+                let conn = lock_conn!(db.conn);
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model, request_model,
+                        token_usage_known, pricing_known, latency_ms, status_code,
+                        session_id, created_at, data_source
+                     ) VALUES (?1, 'nexus', 'claude', 'glm-5.2', ?2,
+                               0, 0, 321, 200, ?3, ?4, 'proxy')",
+                    rusqlite::params![
+                        proxy_id,
+                        if old {
+                            "different-model"
+                        } else {
+                            "claude-sonnet-4-5"
+                        },
+                        if old {
+                            "different-session"
+                        } else {
+                            "session-1"
+                        },
+                        timestamp.timestamp(),
+                    ],
+                )?;
+            }
+            let msg = ParsedAssistantUsage {
+                message_id: import_id.into(),
+                model: "claude-sonnet-4-5".into(),
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: if old { 10 } else { 0 },
+                cache_creation_tokens: if old { 5 } else { 0 },
+                stop_reason: Some("end_turn".into()),
+                timestamp: Some(timestamp.to_rfc3339()),
+                session_id: Some("session-1".into()),
+            };
+            assert!(insert_session_log_entry(&db, import_id, &msg)?);
+            let conn = lock_conn!(db.conn);
+            let row: (i64, i64, i64, i64) = conn.query_row(
+                "SELECT COUNT(*), token_usage_known, input_tokens, output_tokens
+                 FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+            assert_eq!(row, (1, 1, input as i64, output as i64));
+            drop(conn);
+            if old {
+                assert_eq!(db.rollup_and_prune(30)?, 1);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_collect_jsonl_files_includes_subagents() {
-        let tmp = std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
         let project = tmp.join("project");
         let session_dir = project.join("test-session");
         let subagents_dir = session_dir.join("subagents");
@@ -780,7 +866,8 @@ mod tests {
     fn test_collect_jsonl_files_includes_workflow_subagents() {
         // Claude Code Workflow 把子 agent transcript 嵌在
         // 项目/SESSION_ID/subagents/workflows/wf_<ID>/ 下，比普通子 agent 深一层。
-        let tmp = std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
         let project = tmp.join("project");
         let session_dir = project.join("test-session");
         let subagents_dir = session_dir.join("subagents");
@@ -817,7 +904,8 @@ mod tests {
         // 子 agent 常见的「只有 message_start 快照、没写最终块」形态）必须被计入，
         // 不能因缺 stop_reason 或 output==0 而整条丢弃；全 0 token 的占位行仍应跳过。
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("agent-wf.jsonl");
 
