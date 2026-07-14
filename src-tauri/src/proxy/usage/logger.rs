@@ -12,6 +12,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone)]
 pub struct RequestLog {
     pub request_id: String,
+    pub correlation_id: Option<String>,
     pub provider_id: String,
     pub app_type: String,
     pub model: String,
@@ -73,14 +74,15 @@ impl<'a> UsageLogger<'a> {
 
         conn.execute(
             "INSERT OR REPLACE INTO proxy_request_logs (
-                request_id, provider_id, app_type, model, request_model, pricing_model,
+                request_id, correlation_id, provider_id, app_type, model, request_model, pricing_model,
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                 latency_ms, first_token_ms, status_code, error_message, session_id,
                 provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![
                 log.request_id,
+                log.correlation_id,
                 log.provider_id,
                 log.app_type,
                 log.model,
@@ -131,6 +133,7 @@ impl<'a> UsageLogger<'a> {
         let request_model = model.clone();
         let log = RequestLog {
             request_id,
+            correlation_id: None,
             provider_id,
             app_type,
             model,
@@ -159,6 +162,7 @@ impl<'a> UsageLogger<'a> {
     pub fn log_error_with_context(
         &self,
         request_id: String,
+        correlation_id: Option<String>,
         provider_id: String,
         app_type: String,
         model: String,
@@ -172,6 +176,7 @@ impl<'a> UsageLogger<'a> {
         let request_model = model.clone();
         let log = RequestLog {
             request_id,
+            correlation_id,
             provider_id,
             app_type,
             model,
@@ -307,6 +312,7 @@ impl<'a> UsageLogger<'a> {
     pub fn log_with_calculation(
         &self,
         request_id: String,
+        correlation_id: Option<String>,
         provider_id: String,
         app_type: String,
         model: String,
@@ -341,6 +347,7 @@ impl<'a> UsageLogger<'a> {
 
         let log = RequestLog {
             request_id,
+            correlation_id,
             provider_id,
             app_type,
             model,
@@ -365,6 +372,8 @@ impl<'a> UsageLogger<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{Provider, ProviderMeta};
+    use crate::proxy::forwarder::nexus_correlation_id;
 
     #[test]
     fn test_log_request() -> Result<(), AppError> {
@@ -394,6 +403,7 @@ mod tests {
 
         logger.log_with_calculation(
             "req-123".to_string(),
+            None,
             "provider-1".to_string(),
             "claude".to_string(),
             "test-model".to_string(),
@@ -449,6 +459,62 @@ mod tests {
             .unwrap();
         assert_eq!(status, 500);
         assert_eq!(error, Some("Internal Server Error".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn correlation_id_is_persisted_without_changing_request_id_dedup() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let logger = UsageLogger::new(&db);
+        let mut provider = Provider::with_id(
+            "provider-1".to_string(),
+            "Nexus".to_string(),
+            serde_json::json!({}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("nexus".to_string()),
+            ..Default::default()
+        });
+        let first_outbound_header =
+            nexus_correlation_id(&provider, "server-request-1").map(str::to_owned);
+        let mut log = RequestLog {
+            request_id: "response-id".to_string(),
+            correlation_id: first_outbound_header,
+            provider_id: "provider-1".to_string(),
+            app_type: "codex".to_string(),
+            model: "glm-5.2".to_string(),
+            request_model: "glm-5.2".to_string(),
+            pricing_model: String::new(),
+            usage: TokenUsage::default(),
+            cost: None,
+            latency_ms: 10,
+            first_token_ms: None,
+            status_code: 200,
+            error_message: None,
+            session_id: None,
+            provider_type: Some("nexus".to_string()),
+            is_streaming: true,
+            cost_multiplier: "1".to_string(),
+        };
+        logger.log_request(&log)?;
+
+        let final_outbound_header =
+            nexus_correlation_id(&provider, "server-request-2").map(str::to_owned);
+        log.correlation_id = final_outbound_header.clone();
+        logger.log_request(&log)?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let stored: (i64, String, Option<String>) = conn.query_row(
+            "SELECT COUNT(*), request_id, correlation_id
+             FROM proxy_request_logs WHERE request_id = 'response-id'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(
+            stored,
+            (1, "response-id".to_string(), final_outbound_header)
+        );
         Ok(())
     }
 }

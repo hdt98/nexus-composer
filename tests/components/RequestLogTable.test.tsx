@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestLogTable } from "@/components/usage/RequestLogTable";
-import type { UsageRangeSelection } from "@/types/usage";
+import type { RequestLog, UsageRangeSelection } from "@/types/usage";
 
 const useRequestLogsMock = vi.hoisted(() => vi.fn());
 
@@ -53,6 +53,12 @@ vi.mock("@/components/ui/table", () => ({
   TableHead: ({ children, ...props }: any) => <th {...props}>{children}</th>,
   TableHeader: ({ children }: any) => <thead>{children}</thead>,
   TableRow: ({ children }: any) => <tr>{children}</tr>,
+}));
+
+vi.mock("@/components/usage/RequestDetailPanel", () => ({
+  RequestDetailPanel: ({ requestId }: { requestId: string }) => (
+    <div>detail:{requestId}</div>
+  ),
 }));
 
 describe("RequestLogTable", () => {
@@ -157,5 +163,47 @@ describe("RequestLogTable", () => {
         }),
       );
     });
+  });
+
+  it("opens request details from a log row", () => {
+    const log: RequestLog = {
+      requestId: "response-id",
+      correlationId: "server-request-id",
+      providerId: "provider-1",
+      providerName: "Nexus",
+      appType: "codex",
+      model: "glm-5.2",
+      costMultiplier: "1",
+      inputTokens: 10,
+      outputTokens: 2,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      inputCostUsd: "0",
+      outputCostUsd: "0",
+      cacheReadCostUsd: "0",
+      cacheCreationCostUsd: "0",
+      totalCostUsd: "0",
+      isStreaming: true,
+      latencyMs: 100,
+      statusCode: 200,
+      createdAt: 1_710_000_000,
+      dataSource: "proxy",
+    };
+    useRequestLogsMock.mockReturnValue({
+      data: { data: [log], total: 1, page: 0, pageSize: 20 },
+      isLoading: false,
+    });
+
+    render(
+      <RequestLogTable
+        range={{ preset: "today" }}
+        rangeLabel="Today"
+        appType="all"
+        refreshIntervalMs={0}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "common.view" }));
+    expect(screen.getByText("detail:response-id")).toBeInTheDocument();
   });
 });

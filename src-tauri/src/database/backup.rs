@@ -695,6 +695,40 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    fn sql_backup_round_trips_request_correlation_id() -> Result<(), AppError> {
+        let source = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(source.conn);
+            Database::set_user_version(&conn, super::super::SCHEMA_VERSION)?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('nexus', 'codex', 'Nexus', '{}', '{}')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, correlation_id, provider_id, app_type, model,
+                    latency_ms, status_code, created_at
+                 ) VALUES ('response-id', 'server-request-id', 'nexus', 'codex',
+                           'glm-5.2', 100, 200, 1000)",
+                [],
+            )?;
+        }
+
+        let sql = source.export_sql_string()?;
+        let restored = rusqlite::Connection::open_in_memory()?;
+        restored.execute_batch(&sql)?;
+        let correlation_id: Option<String> = restored.query_row(
+            "SELECT correlation_id FROM proxy_request_logs
+             WHERE request_id = 'response-id'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(correlation_id.as_deref(), Some("server-request-id"));
+        Ok(())
+    }
+
+    #[test]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {
         let remote_db = Database::memory()?;
         {

@@ -506,6 +506,7 @@ fn create_usage_collector(
     let stream_parser = parser_config.stream_parser;
     let model_extractor = parser_config.model_extractor;
     let session_id = ctx.session_id.clone();
+    let correlation_id = ctx.correlation_id();
 
     Some(SseUsageCollector::new(
         start_time,
@@ -520,6 +521,7 @@ fn create_usage_collector(
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let correlation_id = correlation_id.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
@@ -535,6 +537,7 @@ fn create_usage_collector(
                         true, // is_streaming
                         status_code,
                         Some(session_id),
+                        correlation_id,
                     )
                     .await;
                 });
@@ -546,6 +549,7 @@ fn create_usage_collector(
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let correlation_id = correlation_id.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
@@ -561,6 +565,7 @@ fn create_usage_collector(
                         true, // is_streaming
                         status_code,
                         Some(session_id),
+                        correlation_id,
                     )
                     .await;
                 });
@@ -599,6 +604,7 @@ fn spawn_log_usage(
         .unwrap_or_else(|| ctx.request_model.clone());
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
+    let correlation_id = ctx.correlation_id();
 
     tokio::spawn(async move {
         log_usage_internal(
@@ -614,6 +620,7 @@ fn spawn_log_usage(
             is_streaming,
             status_code,
             Some(session_id),
+            correlation_id,
         )
         .await;
     });
@@ -647,6 +654,7 @@ async fn log_usage_internal(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    correlation_id: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -672,6 +680,7 @@ async fn log_usage_internal(
 
     if let Err(e) = logger.log_with_calculation(
         request_id,
+        correlation_id,
         provider_id.to_string(),
         app_type.to_string(),
         model.to_string(),
@@ -1166,6 +1175,7 @@ mod tests {
             false,
             200,
             None,
+            None,
         )
         .await;
 
@@ -1235,6 +1245,7 @@ mod tests {
             None,
             false,
             200,
+            None,
             None,
         )
         .await;
@@ -1315,6 +1326,7 @@ mod tests {
             None,
             false,
             200,
+            None,
             None,
         )
         .await;

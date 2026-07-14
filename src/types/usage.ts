@@ -9,6 +9,8 @@ export interface TokenUsage {
 
 export interface RequestLog {
   requestId: string;
+  /** Nexus outbound x-request-id used to join server logs. */
+  correlationId?: string;
   providerId: string;
   providerName?: string;
   appType: string;

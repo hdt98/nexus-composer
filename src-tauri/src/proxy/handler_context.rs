@@ -7,7 +7,7 @@ use crate::provider::Provider;
 use crate::proxy::session::{extract_harness_identity, extract_request_id, HarnessIdentity};
 use crate::proxy::{
     extract_session_id,
-    forwarder::RequestForwarder,
+    forwarder::{nexus_correlation_id, RequestForwarder},
     server::ProxyState,
     types::{AppProxyConfig, CopilotOptimizerConfig, OptimizerConfig, RectifierConfig},
     ProxyError,
@@ -259,6 +259,11 @@ impl RequestContext {
     /// 返回在创建上下文时已选择的 providers，避免重复调用 select_providers()
     pub fn get_providers(&self) -> Vec<Provider> {
         self.providers.clone()
+    }
+
+    /// ID sent to Nexus upstreams for server-log correlation.
+    pub(crate) fn correlation_id(&self) -> Option<String> {
+        nexus_correlation_id(&self.provider, &self.request_id).map(str::to_owned)
     }
 
     /// 计算请求延迟（毫秒）

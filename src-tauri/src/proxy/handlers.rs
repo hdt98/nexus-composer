@@ -397,6 +397,7 @@ async fn handle_claude_transform(
             let status_code = status.as_u16();
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
+            let correlation_id = ctx.correlation_id();
             // 用 ctx 的 app_type：Claude Desktop 网关也走此转换路径，硬编码
             // "claude" 会把 claude-desktop 的行错记到 claude 名下
             let app_type_str = ctx.app_type_str;
@@ -417,6 +418,7 @@ async fn handle_claude_transform(
                         let session_id = session_id.clone();
                         let request_model = request_model.clone();
                         let outbound_model = fallback_model.clone();
+                        let correlation_id = correlation_id.clone();
 
                         tokio::spawn(async move {
                             log_usage(
@@ -432,6 +434,7 @@ async fn handle_claude_transform(
                                 true,
                                 status_code,
                                 Some(session_id),
+                                correlation_id,
                             )
                             .await;
                         });
@@ -568,6 +571,7 @@ async fn handle_claude_transform(
             let state = state.clone();
             let provider_id = ctx.provider.id.clone();
             let session_id = ctx.session_id.clone();
+            let correlation_id = ctx.correlation_id();
             async move {
                 log_usage(
                     &state,
@@ -582,6 +586,7 @@ async fn handle_claude_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    correlation_id,
                 )
                 .await;
             }
@@ -947,6 +952,7 @@ async fn handle_codex_chat_to_responses_transform(
             let app_type_str = ctx.app_type_str;
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
+            let correlation_id = ctx.correlation_id();
 
             Some(SseUsageCollector::new(
                 start_time,
@@ -975,6 +981,7 @@ async fn handle_codex_chat_to_responses_transform(
                     let request_model = request_model.clone();
                     let outbound_model = fallback_model.clone();
                     let session_id = session_id.clone();
+                    let correlation_id = correlation_id.clone();
 
                     tokio::spawn(async move {
                         log_usage(
@@ -990,6 +997,7 @@ async fn handle_codex_chat_to_responses_transform(
                             true,
                             status.as_u16(),
                             Some(session_id),
+                            correlation_id,
                         )
                         .await;
                     });
@@ -1094,6 +1102,7 @@ async fn handle_codex_chat_to_responses_transform(
             let provider_id = ctx.provider.id.clone();
             let session_id = ctx.session_id.clone();
             let latency_ms = ctx.latency_ms();
+            let correlation_id = ctx.correlation_id();
             async move {
                 log_usage(
                     &state,
@@ -1108,6 +1117,7 @@ async fn handle_codex_chat_to_responses_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    correlation_id,
                 )
                 .await;
             }
@@ -2046,6 +2056,7 @@ fn log_forward_error(
 
     if let Err(e) = logger.log_error_with_context(
         request_id,
+        ctx.correlation_id(),
         ctx.provider.id.clone(),
         ctx.app_type_str.to_string(),
         ctx.request_model.clone(),
@@ -2078,6 +2089,7 @@ async fn log_usage(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    correlation_id: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -2099,6 +2111,7 @@ async fn log_usage(
 
     if let Err(e) = logger.log_with_calculation(
         request_id,
+        correlation_id,
         provider_id.to_string(),
         app_type.to_string(),
         model.to_string(),

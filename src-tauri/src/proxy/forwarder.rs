@@ -2741,20 +2741,27 @@ fn apply_local_proxy_header_overrides(
     }
 }
 
+pub(crate) fn nexus_correlation_id<'a>(
+    provider: &Provider,
+    request_id: &'a str,
+) -> Option<&'a str> {
+    (provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("nexus"))
+    .then_some(request_id)
+}
+
 fn apply_nexus_correlation_headers(
     headers: &mut http::HeaderMap,
     provider: &Provider,
     request_id: &str,
     harness_identity: Option<&HarnessIdentity>,
 ) {
-    if provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.provider_type.as_deref())
-        != Some("nexus")
-    {
+    let Some(request_id) = nexus_correlation_id(provider, request_id) else {
         return;
-    }
+    };
     for name in [
         "x-request-id",
         "x-codex-thread-id",
@@ -3200,14 +3207,16 @@ mod tests {
             HeaderValue::from_static("wrong-harness"),
         );
 
+        let provider = test_provider_with_type(Some("nexus"));
+        let correlation_id = nexus_correlation_id(&provider, "request-123").unwrap();
         apply_nexus_correlation_headers(
             &mut headers,
-            &test_provider_with_type(Some("nexus")),
-            "request-123",
+            &provider,
+            correlation_id,
             Some(&HarnessIdentity::CodexThread("thread-456".to_string())),
         );
 
-        assert_eq!(headers.get("x-request-id").unwrap(), "request-123");
+        assert_eq!(headers.get("x-request-id").unwrap(), correlation_id);
         assert_eq!(headers.get("x-codex-thread-id").unwrap(), "thread-456");
         assert!(!headers.contains_key("x-claude-code-session-id"));
 

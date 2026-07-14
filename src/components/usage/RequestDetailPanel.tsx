@@ -7,6 +7,8 @@ import {
 } from "@/components/ui/dialog";
 import { useRequestDetail } from "@/lib/query/usage";
 import { getFreshInputTokens, isUnpricedUsage } from "@/types/usage";
+import { Button } from "@/components/ui/button";
+import { Copy } from "lucide-react";
 
 interface RequestDetailPanelProps {
   requestId: string;
@@ -19,8 +21,7 @@ export function RequestDetailPanel({
 }: RequestDetailPanelProps) {
   const { t, i18n } = useTranslation();
   const { data: request, isLoading } = useRequestDetail(requestId);
-  const dateLocale =
-    i18n.language === "vi" ? "vi-VN" : "en-US";
+  const dateLocale = i18n.language === "vi" ? "vi-VN" : "en-US";
 
   if (isLoading) {
     return (
@@ -50,6 +51,7 @@ export function RequestDetailPanel({
   const freshInput = getFreshInputTokens(request);
   const isCacheInclusive = request.inputTokens !== freshInput;
   const unpriced = isUnpricedUsage(request);
+  const correlationId = request.correlationId;
 
   return (
     <Dialog open onOpenChange={onClose}>
@@ -71,6 +73,31 @@ export function RequestDetailPanel({
                 </dt>
                 <dd className="font-mono">{request.requestId}</dd>
               </div>
+              {correlationId && (
+                <div className="col-span-2">
+                  <dt className="text-muted-foreground">
+                    {t("usage.correlationId", "Server request ID")}
+                  </dt>
+                  <dd className="flex items-center gap-2">
+                    <span className="break-all font-mono">{correlationId}</span>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7 shrink-0"
+                      aria-label={t(
+                        "usage.copyCorrelationId",
+                        "Copy server request ID",
+                      )}
+                      onClick={() => {
+                        void navigator.clipboard.writeText(correlationId);
+                      }}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                  </dd>
+                </div>
+              )}
               <div>
                 <dt className="text-muted-foreground">
                   {t("usage.time", "时间")}

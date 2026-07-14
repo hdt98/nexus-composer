@@ -1524,6 +1524,8 @@
     "avgLatency": "Average Latency",
     "successRate": "Success Rate",
     "requestId": "Request ID",
+    "correlationId": "Mã yêu cầu máy chủ",
+    "copyCorrelationId": "Sao chép mã yêu cầu máy chủ",
     "never": "Never",
     "modelId": "Model ID",
     "modelIdRequired": "Model ID is required",
