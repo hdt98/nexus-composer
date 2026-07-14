@@ -28,6 +28,7 @@ use crate::proxy::providers::copilot_auth::CopilotAuthManager;
 use crate::{
     app_config::AppType,
     provider::{LocalProxyRequestOverrides, Provider},
+    proxy::session::HarnessIdentity,
 };
 use futures::StreamExt;
 use http::Extensions;
@@ -112,6 +113,9 @@ pub struct RequestForwarder {
     session_id: String,
     /// Session ID 是否由客户端提供；生成值不能作为上游缓存身份。
     session_client_provided: bool,
+    /// Correlation values reused across every provider attempt.
+    request_id: String,
+    harness_identity: Option<HarnessIdentity>,
     /// 整流器配置
     rectifier_config: RectifierConfig,
     /// 优化器配置
@@ -189,6 +193,8 @@ impl RequestForwarder {
         current_provider_id_at_start: String,
         session_id: String,
         session_client_provided: bool,
+        request_id: String,
+        harness_identity: Option<HarnessIdentity>,
         streaming_first_byte_timeout: u64,
         _streaming_idle_timeout: u64,
         rectifier_config: RectifierConfig,
@@ -210,6 +216,8 @@ impl RequestForwarder {
             current_provider_id_at_start,
             session_id,
             session_client_provided,
+            request_id,
+            harness_identity,
             rectifier_config,
             optimizer_config,
             copilot_optimizer_config,
@@ -1696,6 +1704,8 @@ impl RequestForwarder {
                     | "akamai-origin-hop"
                     | "x-akamai-config-log-detail"
                     | "x-request-id"
+                    | "x-codex-thread-id"
+                    | "x-claude-code-session-id"
                     | "x-correlation-id"
                     | "x-trace-id"
                     | "x-amzn-trace-id"
@@ -1855,6 +1865,12 @@ impl RequestForwarder {
                 .as_ref()
                 .and_then(|meta| meta.local_proxy_request_overrides.as_ref()),
             is_copilot,
+        );
+        apply_nexus_correlation_headers(
+            &mut ordered_headers,
+            provider,
+            &self.request_id,
+            self.harness_identity.as_ref(),
         );
 
         reject_proxy_placeholder_for_managed_account_upstream(&url, &ordered_headers)?;
@@ -2680,6 +2696,43 @@ fn apply_local_proxy_header_overrides(
     }
 }
 
+fn apply_nexus_correlation_headers(
+    headers: &mut http::HeaderMap,
+    provider: &Provider,
+    request_id: &str,
+    harness_identity: Option<&HarnessIdentity>,
+) {
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        != Some("nexus")
+    {
+        return;
+    }
+    for name in [
+        "x-request-id",
+        "x-codex-thread-id",
+        "x-claude-code-session-id",
+    ] {
+        headers.remove(name);
+    }
+
+    if let Ok(value) = http::HeaderValue::from_str(request_id) {
+        headers.insert(http::HeaderName::from_static("x-request-id"), value);
+    }
+
+    let Some((name, identity)) = harness_identity.map(|identity| match identity {
+        HarnessIdentity::CodexThread(value) => ("x-codex-thread-id", value),
+        HarnessIdentity::ClaudeCodeSession(value) => ("x-claude-code-session-id", value),
+    }) else {
+        return;
+    };
+    if let Ok(value) = http::HeaderValue::from_str(identity) {
+        headers.insert(http::HeaderName::from_static(name), value);
+    }
+}
+
 fn is_protected_local_proxy_override_header(name: &http::HeaderName) -> bool {
     matches!(
         name.as_str(),
@@ -2717,6 +2770,8 @@ fn is_protected_local_proxy_override_header(name: &http::HeaderName) -> bool {
             | "akamai-origin-hop"
             | "x-akamai-config-log-detail"
             | "x-request-id"
+            | "x-codex-thread-id"
+            | "x-claude-code-session-id"
             | "x-correlation-id"
             | "x-trace-id"
             | "x-amzn-trace-id"
@@ -2838,6 +2893,8 @@ mod tests {
             current_provider_id_at_start: String::new(),
             session_id: String::new(),
             session_client_provided: false,
+            request_id: "request-123".to_string(),
+            harness_identity: None,
             rectifier_config: RectifierConfig::default(),
             optimizer_config: OptimizerConfig::default(),
             copilot_optimizer_config: CopilotOptimizerConfig::default(),
@@ -3048,6 +3105,12 @@ mod tests {
                 ("X-Test".to_string(), "ok".to_string()),
                 ("Authorization".to_string(), "Bearer bad".to_string()),
                 ("Content-Type".to_string(), "text/plain".to_string()),
+                ("X-Request-Id".to_string(), "forged-request".to_string()),
+                ("X-Codex-Thread-Id".to_string(), "forged-thread".to_string()),
+                (
+                    "X-Claude-Code-Session-Id".to_string(),
+                    "forged-session".to_string(),
+                ),
                 ("X-Bad".to_string(), "bad\nvalue".to_string()),
             ]),
             body: None,
@@ -3078,6 +3141,60 @@ mod tests {
             Some("ok")
         );
         assert!(headers.get("x-bad").is_none());
+        assert!(headers.get("x-request-id").is_none());
+        assert!(headers.get("x-codex-thread-id").is_none());
+        assert!(headers.get("x-claude-code-session-id").is_none());
+    }
+
+    #[test]
+    fn nexus_correlation_is_canonical_and_harness_specific() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", HeaderValue::from_static("stale"));
+        headers.insert(
+            "x-claude-code-session-id",
+            HeaderValue::from_static("wrong-harness"),
+        );
+
+        apply_nexus_correlation_headers(
+            &mut headers,
+            &test_provider_with_type(Some("nexus")),
+            "request-123",
+            Some(&HarnessIdentity::CodexThread("thread-456".to_string())),
+        );
+
+        assert_eq!(headers.get("x-request-id").unwrap(), "request-123");
+        assert_eq!(headers.get("x-codex-thread-id").unwrap(), "thread-456");
+        assert!(!headers.contains_key("x-claude-code-session-id"));
+
+        let claude = HarnessIdentity::ClaudeCodeSession("session-789".to_string());
+        apply_nexus_correlation_headers(
+            &mut headers,
+            &test_provider_with_type(Some("nexus")),
+            "request-123",
+            Some(&claude),
+        );
+        assert_eq!(headers["x-claude-code-session-id"], "session-789");
+        assert!(!headers.contains_key("x-codex-thread-id"));
+    }
+
+    #[test]
+    fn non_nexus_provider_preserves_adapter_request_id_without_harness_injection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-request-id",
+            HeaderValue::from_static("adapter-fingerprint"),
+        );
+
+        apply_nexus_correlation_headers(
+            &mut headers,
+            &test_provider_with_type(None),
+            "request-123",
+            Some(&HarnessIdentity::CodexThread("thread-456".to_string())),
+        );
+
+        assert_eq!(headers["x-request-id"], "adapter-fingerprint");
+        assert!(!headers.contains_key("x-codex-thread-id"));
+        assert!(!headers.contains_key("x-claude-code-session-id"));
     }
 
     #[test]

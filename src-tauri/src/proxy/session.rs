@@ -6,7 +6,7 @@
 //!
 //! 支持从客户端请求中提取 Session ID，用于关联同一对话的多个请求：
 //! - Claude: 从 `metadata.user_id` (格式: `user_xxx_session_yyy`) 或 `metadata.session_id` 提取
-//! - Codex: 从 headers 中的 `session_id` / `x-session-id` 或 `metadata.session_id` 提取
+//! - Codex: 从客户端会话/线程 header、`client_metadata` 或旧版 `metadata.session_id` 提取
 //! - 其他: 生成新的 UUID
 
 use axum::http::HeaderMap;
@@ -212,6 +212,69 @@ pub struct SessionIdResult {
     pub client_provided: bool,
 }
 
+const MAX_CORRELATION_ID_LEN: usize = 128;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HarnessIdentity {
+    CodexThread(String),
+    ClaudeCodeSession(String),
+}
+
+pub(crate) fn extract_request_id(headers: &HeaderMap) -> String {
+    bounded_header(headers, "x-request-id").unwrap_or_else(|| Uuid::new_v4().to_string())
+}
+
+pub(crate) fn extract_harness_identity(
+    headers: &HeaderMap,
+    body: &serde_json::Value,
+    client_format: &str,
+) -> Option<HarnessIdentity> {
+    match client_format {
+        "codex" | "openai" => first_bounded_header(headers, &["x-codex-thread-id", "thread-id"])
+            .or_else(|| bounded_json_pointer(body, "/client_metadata/thread_id"))
+            .map(HarnessIdentity::CodexThread),
+        "claude" => ["x-claude-code-session-id", "claude-code-session-id"]
+            .into_iter()
+            .find_map(|name| bounded_header(headers, name))
+            .or_else(|| {
+                body.pointer("/metadata/user_id")
+                    .and_then(|value| value.as_str())
+                    .and_then(claude_code_session_from_user_id)
+            })
+            .map(HarnessIdentity::ClaudeCodeSession),
+        _ => None,
+    }
+}
+
+fn first_bounded_header(headers: &HeaderMap, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| bounded_header(headers, name))
+}
+
+fn bounded_header(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(bounded_value)
+}
+
+fn bounded_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= MAX_CORRELATION_ID_LEN).then(|| value.to_string())
+}
+
+fn bounded_json_pointer(body: &serde_json::Value, pointer: &str) -> Option<String> {
+    body.pointer(pointer)
+        .and_then(|value| value.as_str())
+        .and_then(bounded_value)
+}
+
+fn claude_code_session_from_user_id(user_id: &str) -> Option<String> {
+    user_id.strip_prefix("user_")?;
+    let session_id = parse_session_from_user_id(user_id)?;
+    Uuid::parse_str(&session_id).ok()?;
+    bounded_value(&session_id)
+}
+
 /// 从请求中提取或生成 Session ID
 ///
 /// 轻量化实现，仅提取 session_id 用于日志记录，不做复杂的 Session 管理。
@@ -224,9 +287,10 @@ pub struct SessionIdResult {
 /// 3. 生成新 UUID
 ///
 /// ### Codex 请求
-/// 1. Headers: `session_id` 或 `x-session-id`
-/// 2. `metadata.session_id`
-/// 3. 生成新 UUID
+/// 1. Headers: Codex thread/session identity
+/// 2. `client_metadata.session_id` / `client_metadata.thread_id`
+/// 3. Legacy `metadata.session_id`
+/// 4. 生成新 UUID
 ///
 /// ## 示例
 ///
@@ -285,19 +349,31 @@ fn extract_claude_session(
 
 /// 提取 Codex Session ID
 fn extract_codex_session(headers: &HeaderMap, body: &serde_json::Value) -> Option<SessionIdResult> {
-    // 1. 从 headers 提取
-    for header_name in &["session_id", "x-session-id"] {
-        if let Some(value) = headers.get(*header_name) {
-            if let Ok(session_id) = value.to_str() {
-                // Codex Session ID 通常较长（UUID 格式）
-                if session_id.len() > 20 {
-                    return Some(SessionIdResult {
-                        session_id: format!("codex_{session_id}"),
-                        source: SessionIdSource::Header,
-                        client_provided: true,
-                    });
-                }
-            }
+    let candidates = [
+        (
+            first_bounded_header(headers, &["session-id", "session_id", "x-session-id"]),
+            SessionIdSource::Header,
+        ),
+        (
+            bounded_json_pointer(body, "/client_metadata/session_id"),
+            SessionIdSource::MetadataSessionId,
+        ),
+        (
+            first_bounded_header(headers, &["x-codex-thread-id", "thread-id"]),
+            SessionIdSource::Header,
+        ),
+        (
+            bounded_json_pointer(body, "/client_metadata/thread_id"),
+            SessionIdSource::MetadataSessionId,
+        ),
+    ];
+    for (session_id, source) in candidates {
+        if let Some(session_id) = session_id.filter(|value| value.len() > 20) {
+            return Some(SessionIdResult {
+                session_id: format!("codex_{session_id}"),
+                source,
+                client_provided: true,
+            });
         }
     }
 
@@ -590,6 +666,37 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_codex_desktop_session_and_current_thread() {
+        let session_id = "019f6022-fd7f-78e3-ba3f-a1168a613f3d";
+        let thread_id = "019f6023-1111-7222-8333-444455556666";
+        let mut headers = HeaderMap::new();
+        headers.insert("session-id", session_id.parse().unwrap());
+        headers.insert("thread-id", thread_id.parse().unwrap());
+        let body = json!({
+            "input": "hello",
+            "client_metadata": {"session_id": session_id, "thread_id": thread_id}
+        });
+
+        let result = extract_session_id(&headers, &body, "codex");
+
+        assert_eq!(result.session_id, format!("codex_{session_id}"));
+        assert_eq!(result.source, SessionIdSource::Header);
+        assert!(result.client_provided);
+        assert_eq!(
+            extract_harness_identity(&headers, &body, "codex"),
+            Some(HarnessIdentity::CodexThread(thread_id.to_string()))
+        );
+
+        let body_only = extract_session_id(&HeaderMap::new(), &body, "codex");
+        assert_eq!(body_only.session_id, format!("codex_{session_id}"));
+        assert_eq!(body_only.source, SessionIdSource::MetadataSessionId);
+        assert_eq!(
+            extract_harness_identity(&HeaderMap::new(), &body, "codex"),
+            Some(HarnessIdentity::CodexThread(thread_id.to_string()))
+        );
+    }
+
+    #[test]
     fn test_extract_session_generates_new_when_not_found() {
         let headers = HeaderMap::new();
         let body = json!({
@@ -622,5 +729,62 @@ mod tests {
         // 没有 "_session_" 分隔符的情况
         assert_eq!(parse_session_from_user_id("user_john_abc123"), None);
         assert_eq!(parse_session_from_user_id("_session_"), None);
+    }
+
+    #[test]
+    fn request_id_is_preserved_when_bounded_otherwise_generated() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", " request-123 ".parse().unwrap());
+        assert_eq!(extract_request_id(&headers), "request-123");
+
+        headers.insert(
+            "x-request-id",
+            "x".repeat(MAX_CORRELATION_ID_LEN + 1).parse().unwrap(),
+        );
+        assert!(Uuid::parse_str(&extract_request_id(&headers)).is_ok());
+    }
+
+    #[test]
+    fn harness_identity_uses_only_proven_sources() {
+        let mut codex_headers = HeaderMap::new();
+        codex_headers.insert("session-id", "generic-session".parse().unwrap());
+        codex_headers.insert("thread-id", " ".parse().unwrap());
+        assert!(extract_harness_identity(&codex_headers, &json!({}), "codex").is_none());
+        codex_headers.insert("thread-id", "thread-123".parse().unwrap());
+        assert_eq!(
+            extract_harness_identity(&codex_headers, &json!({}), "codex"),
+            Some(HarnessIdentity::CodexThread("thread-123".to_string()))
+        );
+        codex_headers.insert(
+            "thread-id",
+            "x".repeat(MAX_CORRELATION_ID_LEN + 1).parse().unwrap(),
+        );
+        assert!(extract_harness_identity(&codex_headers, &json!({}), "codex").is_none());
+
+        let claude_body = json!({
+            "metadata": {
+                "user_id": "user_abc_session_d937243f-2702-4f20-97b6-c9682235ab81"
+            }
+        });
+        assert_eq!(
+            extract_harness_identity(&HeaderMap::new(), &claude_body, "claude"),
+            Some(HarnessIdentity::ClaudeCodeSession(
+                "d937243f-2702-4f20-97b6-c9682235ab81".to_string()
+            ))
+        );
+        let mut claude_headers = HeaderMap::new();
+        claude_headers.insert("x-claude-code-session-id", "header-123".parse().unwrap());
+        assert_eq!(
+            extract_harness_identity(&claude_headers, &json!({}), "claude"),
+            Some(HarnessIdentity::ClaudeCodeSession("header-123".to_string()))
+        );
+        assert_eq!(
+            extract_harness_identity(
+                &HeaderMap::new(),
+                &json!({"metadata": {"user_id": "no_session_marker", "session_id": "generic"}}),
+                "claude"
+            ),
+            None
+        );
     }
 }
