@@ -937,16 +937,31 @@ fn backfill_tool_call_reasoning_placeholders(messages: &mut [Value]) {
 // history. Requiring at least two avoids stripping genuine single-paragraph
 // reasoning with the same words.
 fn remove_legacy_tool_call_placeholders(messages: &mut [Value]) {
+    let exact_placeholder = |message: &Value| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message["tool_calls"]
+                .as_array()
+                .is_some_and(|calls| !calls.is_empty())
+            && message.get("reasoning_content").and_then(Value::as_str) == Some("tool call")
+    };
+    let repeated_exact = messages
+        .iter()
+        .filter(|message| exact_placeholder(message))
+        .nth(1)
+        .is_some();
+
     for message in messages.iter_mut() {
         if message.get("role").and_then(Value::as_str) != Some("assistant")
             || message["tool_calls"].as_array().is_none_or(Vec::is_empty)
         {
             continue;
         }
-        let Some(remainder) = message
-            .get("reasoning_content")
-            .and_then(Value::as_str)
-            .and_then(strip_leading_tool_call_placeholders)
+        let Some(reasoning) = message.get("reasoning_content").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(remainder) = (repeated_exact && reasoning == "tool call")
+            .then_some("")
+            .or_else(|| strip_leading_tool_call_placeholders(reasoning))
             .map(ToString::to_string)
         else {
             continue;
@@ -2786,6 +2801,31 @@ mod tests {
         assert_eq!(
             strip_leading_tool_call_placeholders("tool call\n\nreasoning"),
             None
+        );
+    }
+
+    #[test]
+    fn glm_placeholder_migration_handles_separate_historical_messages() {
+        let assistant = |reasoning| {
+            json!({
+                "role": "assistant", "reasoning_content": reasoning, "tool_calls": [{}]
+            })
+        };
+        let mut isolated = vec![assistant("tool call")];
+        remove_legacy_tool_call_placeholders(&mut isolated);
+        assert_eq!(isolated[0]["reasoning_content"], "tool call");
+
+        let mut assistants = vec![
+            assistant("tool call"),
+            assistant("tool call"),
+            assistant("tool call with real context"),
+        ];
+        remove_legacy_tool_call_placeholders(&mut assistants);
+        assert!(assistants[0].get("reasoning_content").is_none());
+        assert!(assistants[1].get("reasoning_content").is_none());
+        assert_eq!(
+            assistants[2]["reasoning_content"],
+            "tool call with real context"
         );
     }
 
