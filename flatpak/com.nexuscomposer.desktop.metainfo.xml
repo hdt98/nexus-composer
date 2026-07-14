@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>com.nexus-composer.desktop</id>
+  <id>com.nexuscomposer.desktop</id>
   <name>Nexus Composer</name>
   <summary>All-in-One Assistant for Claude Code, Codex &amp; Gemini CLI</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -15,11 +15,11 @@
     </ul>
   </description>
 
-  <launchable type="desktop-id">com.nexus-composer.desktop.desktop</launchable>
+  <launchable type="desktop-id">com.nexuscomposer.desktop.desktop</launchable>
   <provides>
     <binary>nexus-composer</binary>
   </provides>
 
-  <url type="homepage">https://github.com/farion1231/nexus-composer</url>
-  <url type="bugtracker">https://github.com/farion1231/nexus-composer/issues</url>
+  <url type="homepage">https://github.com/hdt98/nexus-composer</url>
+  <url type="bugtracker">https://github.com/hdt98/nexus-composer/issues</url>
 </component>
