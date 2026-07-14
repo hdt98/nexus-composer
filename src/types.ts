@@ -260,8 +260,8 @@ export interface CodexCatalogModel {
   model: string;
   displayName?: string;
   contextWindow?: string | number;
-  // Native Responses (direct) profile overrides for the generated
-  // model-catalogs.json. Ignored by the chat/proxy profile.
+  // Overrides for generated model-catalogs.json entries. Parallel-tool support
+  // applies to Native Responses; input modalities apply to every profile.
   // e.g. MiniMax: supportsParallelToolCalls=true, inputModalities=["text","image"].
   supportsParallelToolCalls?: boolean;
   inputModalities?: string[];

@@ -2027,6 +2027,11 @@ impl ProxyService {
                 .map_err(|e| format!("构建 {app_type} 有效配置失败: {e}"))?;
 
         if matches!(app_type_enum, AppType::Codex) {
+            effective_settings["apiFormat"] = json!(provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.api_format.as_deref())
+                .unwrap_or("openai_chat"));
             let existing_backup_value = self
                 .db
                 .get_live_backup(app_type)
@@ -2528,18 +2533,26 @@ impl ProxyService {
         // living in the config's `experimental_bearer_token`). Computing it up here
         // keeps every config-writing branch — write-auth, delete-auth, no-auth —
         // consistent instead of letting the empty-auth path skip projection.
-        // Verbatim restore has no Provider in hand (we only have the stored
-        // backup config), so the catalog tool profile can't be recovered here.
-        // Default to ProxyChat: a restored native-direct backup keeps its inline
-        // modelCatalog but would not get apply_patch re-stripped until the next
-        // provider switch rewrites it via write_live_snapshot. Acceptable known
-        // limitation (restore-of-deleted-provider-backup only).
+        let api_format = config
+            .get("apiFormat")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                let catalog = config.get("modelCatalog")?;
+                let provider = self
+                    .get_current_provider_for_app(&AppType::Codex)
+                    .ok()
+                    .flatten()?;
+                (provider.settings_config.get("modelCatalog") == Some(catalog))
+                    .then(|| provider.meta?.api_format)
+                    .flatten()
+            });
+        let profile =
+            crate::codex_config::CodexCatalogToolProfile::from_api_format(api_format.as_deref());
         let prepared_cfg = config_str
             .map(|cfg| {
                 crate::codex_config::prepare_codex_live_config_text_with_optional_catalog(
-                    config,
-                    cfg,
-                    crate::codex_config::CodexCatalogToolProfile::ProxyChat,
+                    config, cfg, profile,
                 )
             })
             .transpose()
@@ -2836,18 +2849,13 @@ mod tests {
     fn seed_codex_model_template() {
         let codex_dir = crate::codex_config::get_codex_config_dir();
         std::fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let template: Value =
+            serde_json::from_str(include_str!("../resources/gpt5_6_sol_template.json"))
+                .expect("parse bundled Sol template");
         std::fs::write(
             codex_dir.join("models_cache.json"),
-            serde_json::to_string(&serde_json::json!({
-                "models": [{
-                    "slug": "gpt-5.5",
-                    "display_name": "GPT-5.5",
-                    "model_messages": { "instructions_template": "t" },
-                    "additional_speed_tiers": [],
-                    "context_window": 128000
-                }]
-            }))
-            .expect("serialize models_cache"),
+            serde_json::to_string(&json!({ "models": [template] }))
+                .expect("serialize models_cache"),
         )
         .expect("write models_cache.json");
     }
@@ -5844,15 +5852,9 @@ requires_openai_auth = true
         let db = Arc::new(Database::memory().expect("init db"));
         let service = ProxyService::new(db.clone());
 
-        // Catalog projection needs a model template; seed `models_cache.json`
-        // with the template slug so we don't depend on the `codex` CLI.
-        let codex_dir = crate::codex_config::get_codex_config_dir();
-        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
-        std::fs::write(
-            codex_dir.join("models_cache.json"),
-            r#"{"models":[{"slug":"gpt-5.5"}]}"#,
-        )
-        .expect("seed models_cache template");
+        // Catalog projection needs a valid Sol template; seed the bundled copy
+        // so the test does not depend on an installed `codex` CLI.
+        seed_codex_model_template();
 
         // Provider-rebuilt backup shape: inline modelCatalog, pointer-less config.
         let backup_json = serde_json::to_string(&json!({
@@ -5902,6 +5904,81 @@ requires_openai_auth = true
         );
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_native_backup_preserves_direct_tool_profile() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut provider = Provider::with_id(
+            "native".to_string(),
+            "Native".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "native-key" },
+                "config": "model_provider = \"custom\"\nmodel = \"native-model\"\n",
+                "modelCatalog": { "models": [{
+                    "model": "native-model",
+                    "inputModalities": ["text"]
+                }] }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("save native backup");
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("read native backup")
+            .expect("native backup exists");
+        let mut legacy: Value =
+            serde_json::from_str(&backup.original_config).expect("parse native backup");
+        assert_eq!(legacy["apiFormat"], "openai_responses");
+        legacy
+            .as_object_mut()
+            .expect("backup object")
+            .remove("apiFormat");
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&legacy).expect("serialize legacy"),
+        )
+        .await
+        .expect("save legacy backup");
+        db.save_provider("codex", &provider)
+            .expect("save current native provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("select current native provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("select local native provider");
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore native backup");
+
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated catalog"),
+        )
+        .expect("parse generated catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["tool_mode"], "direct");
+        assert_eq!(entry["multi_agent_version"], "v2");
+        assert!(entry["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
+        for key in ["apply_patch_tool_type", "web_search_tool_type", "tools"] {
+            assert!(entry.get(key).is_none(), "native restore leaked {key}");
+        }
+    }
+
     /// Regression: a provider-rebuilt backup can pair an inline `modelCatalog`
     /// with EMPTY `auth.json` (`{}`) — the bearer-token / Mobile-compat shape
     /// where the API key lives in the config's `experimental_bearer_token`. The
@@ -5917,13 +5994,7 @@ requires_openai_auth = true
         let db = Arc::new(Database::memory().expect("init db"));
         let service = ProxyService::new(db.clone());
 
-        let codex_dir = crate::codex_config::get_codex_config_dir();
-        std::fs::create_dir_all(&codex_dir).expect("create codex dir");
-        std::fs::write(
-            codex_dir.join("models_cache.json"),
-            r#"{"models":[{"slug":"gpt-5.5"}]}"#,
-        )
-        .expect("seed models_cache template");
+        seed_codex_model_template();
 
         // Empty auth.json + key carried in config.toml's experimental_bearer_token,
         // plus the inline modelCatalog (DB SSOT).

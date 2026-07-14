@@ -6,14 +6,32 @@
   "default_reasoning_level": "high",
   "supported_reasoning_levels": [
     {
-      "effort": "none",
-      "description": "Disable Thinking"
+      "effort": "low",
+      "description": "Fast responses with lighter reasoning"
+    },
+    {
+      "effort": "medium",
+      "description": "Balances speed and reasoning depth for everyday tasks"
     },
     {
       "effort": "high",
-      "description": "Enabled Thinking"
+      "description": "Greater reasoning depth for complex problems"
+    },
+    {
+      "effort": "xhigh",
+      "description": "Extra high reasoning depth for complex problems"
+    },
+    {
+      "effort": "max",
+      "description": "Maximum reasoning depth for the hardest problems"
+    },
+    {
+      "effort": "ultra",
+      "description": "Maximum reasoning with automatic task delegation"
     }
   ],
+  "multi_agent_version": "v2",
+  "tool_mode": "direct",
   "shell_type": "shell_command",
   "visibility": "list",
   "supported_in_api": true,
