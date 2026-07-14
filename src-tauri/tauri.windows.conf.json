@@ -4,7 +4,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "CC Switch",
+        "title": "Nexus Composer",
         "titleBarStyle": "Visible",
         "visible": false,
         "minWidth": 900,
