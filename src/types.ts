@@ -139,7 +139,8 @@ export type CodexChatThinkingParam =
   | "none"
   | "thinking"
   | "enable_thinking"
-  | "reasoning_split";
+  | "reasoning_split"
+  | "chat_template_kwargs.enable_thinking";
 
 export type CodexChatEffortParam =
   | "none"
@@ -226,6 +227,8 @@ export interface ProviderMeta {
   customUserAgent?: string;
   // Local proxy request overrides. Only applied by the local proxy after route transforms.
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
+  // Version of the managed Nexus preset already applied to this provider.
+  managedNexusPresetVersion?: number;
   // 供应商类型（用于识别 Copilot 等特殊供应商）
   providerType?: string;
   // GitHub Copilot 关联账号 ID（旧字段，保留兼容读取）

@@ -23,6 +23,7 @@ import type {
   CodexCatalogModel,
   CodexChatReasoning,
   ClaudeApiKeyField,
+  LocalProxyRequestOverrides,
 } from "@/types";
 import {
   providerPresets,
@@ -307,6 +308,8 @@ function ProviderFormFull({
   const [activePreset, setActivePreset] = useState<{
     id: string;
     category?: ProviderCategory;
+    providerType?: string;
+    managedNexusPresetVersion?: number;
     isPartner?: boolean;
     partnerPromotionKey?: string;
     suggestedDefaults?: OpenClawSuggestedDefaults;
@@ -1433,9 +1436,10 @@ function ProviderFormFull({
     const baseMeta: ProviderMeta | undefined =
       payload.meta ?? (initialData?.meta ? { ...initialData.meta } : undefined);
 
-    // 确定 providerType（新建时从预设获取，编辑时从现有数据获取）
     const providerType =
-      templatePreset?.providerType || initialData?.meta?.providerType;
+      selectedPresetId === null
+        ? initialData?.meta?.providerType
+        : (activePreset?.providerType ?? templatePreset?.providerType);
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
@@ -1451,6 +1455,10 @@ function ProviderFormFull({
       claudeDesktopMode: undefined,
       // 保存 providerType（用于识别 Copilot / Codex OAuth 等特殊供应商）
       providerType,
+      managedNexusPresetVersion:
+        selectedPresetId === null
+          ? initialData?.meta?.managedNexusPresetVersion
+          : activePreset?.managedNexusPresetVersion,
       authBinding: isCopilotProvider
         ? {
             source: "managed_account",
@@ -1615,6 +1623,8 @@ function ProviderFormFull({
     setSelectedPresetId(value);
     if (value === "custom") {
       setActivePreset(null);
+      setLocalProxyHeadersOverride("");
+      setLocalProxyBodyOverride("");
       form.reset(defaultValues);
 
       if (appId === "codex") {
@@ -1648,9 +1658,25 @@ function ProviderFormFull({
       return;
     }
 
+    const requestOverrides = (
+      entry.preset as {
+        localProxyRequestOverrides?: LocalProxyRequestOverrides;
+      }
+    ).localProxyRequestOverrides;
+    setLocalProxyHeadersOverride(
+      formatRequestOverrideObject(requestOverrides?.headers),
+    );
+    setLocalProxyBodyOverride(
+      formatRequestOverrideObject(requestOverrides?.body),
+    );
+
     setActivePreset({
       id: value,
       category: entry.preset.category,
+      providerType: (entry.preset as { providerType?: string }).providerType,
+      managedNexusPresetVersion: (
+        entry.preset as { managedNexusPresetVersion?: number }
+      ).managedNexusPresetVersion,
       isPartner: entry.preset.isPartner,
       partnerPromotionKey: entry.preset.partnerPromotionKey,
     });

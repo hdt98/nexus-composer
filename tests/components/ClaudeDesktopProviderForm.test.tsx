@@ -3,6 +3,8 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
+import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
+import { NEXUS_TEXT_MODEL_CATALOG } from "@/config/nexus";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 vi.mock("@/lib/api/providers", () => ({
@@ -30,6 +32,58 @@ function renderForm(
 }
 
 describe("ClaudeDesktopProviderForm", () => {
+  it("persists the managed Nexus catalog and request override", async () => {
+    const onSubmit = vi.fn();
+    renderForm(undefined, onSubmit);
+    const preset = claudeDesktopProviderPresets.find(
+      (candidate) => candidate.providerType === "nexus",
+    )!;
+
+    fireEvent.click(
+      screen.getByRole("button", { name: new RegExp(preset.name) }),
+    );
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(JSON.parse(submitted.settingsConfig).modelCatalog).toEqual(
+      NEXUS_TEXT_MODEL_CATALOG,
+    );
+    expect(submitted.meta).toMatchObject({
+      providerType: "nexus",
+      managedNexusPresetVersion: 1,
+      localProxyRequestOverrides: {
+        body: { chat_template_kwargs: { enable_thinking: true } },
+      },
+    });
+  });
+
+  it("clears managed Nexus metadata when another preset replaces it", async () => {
+    const onSubmit = vi.fn();
+    renderForm(undefined, onSubmit);
+
+    fireEvent.click(screen.getByRole("button", { name: /Nexus GLM-5\.2/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Claude Desktop Official/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
+      "managedNexusPresetVersion",
+    );
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
+      "localProxyRequestOverrides",
+    );
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty("providerType");
+    expect(
+      JSON.parse(onSubmit.mock.calls[0][0].settingsConfig),
+    ).not.toHaveProperty("modelCatalog");
+  });
+
   it("编辑模型映射的菜单显示名时保持输入框焦点", () => {
     renderForm({
       name: "Proxy Provider",
