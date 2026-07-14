@@ -415,6 +415,7 @@ fn insert_session_log_entry(
     request_id: &str,
     msg: &ParsedAssistantUsage,
 ) -> Result<bool, AppError> {
+    let pricing_model = resolve_pricing_model_for_session(db, &msg.model)?;
     let conn = lock_conn!(db.conn);
 
     let created_at = msg
@@ -441,12 +442,6 @@ fn insert_session_log_entry(
         cache_creation_tokens: msg.cache_creation_tokens,
         created_at,
     };
-    // When proxy takeover is active, Claude Code reports its native model name
-    // (e.g. "claude-fable-5") in session logs, but the actual upstream model is
-    // configured in the provider's settings (e.g. "glm-5.2"). Use the provider's
-    // model for pricing so costs are calculated at the correct rate.
-    let pricing_model = resolve_pricing_model_for_session(db, &conn, &msg.model);
-
     // 计算费用
     let usage = TokenUsage {
         input_tokens: msg.input_tokens,
@@ -561,42 +556,43 @@ fn insert_session_log_entry(
 /// We look up the current provider and use its configured model for pricing.
 fn resolve_pricing_model_for_session(
     db: &Database,
-    conn: &rusqlite::Connection,
     client_model: &str,
-) -> String {
+) -> Result<String, AppError> {
     // Check if proxy takeover is active for Claude (sync query on proxy_config table)
-    let takeover_active = conn
-        .query_row(
+    let takeover_active = {
+        let conn = lock_conn!(db.conn);
+        conn.query_row(
             "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude' AND enabled = 1",
             [],
             |row| row.get::<_, i64>(0),
         )
         .unwrap_or(0)
-        > 0;
+            > 0
+    };
     if !takeover_active {
-        return client_model.to_string();
+        return Ok(client_model.to_string());
     }
 
     // Get the current Claude provider
     let provider_id = match get_effective_current_provider(db, &AppType::Claude) {
         Ok(Some(id)) => id,
-        _ => return client_model.to_string(),
+        _ => return Ok(client_model.to_string()),
     };
 
     // Get the provider's settings_config and extract ANTHROPIC_MODEL
-    match db.get_provider_by_id(&provider_id, "claude") {
+    Ok(match db.get_provider_by_id(&provider_id, "claude") {
         Ok(Some(provider)) => {
             if let Some(env) = provider.settings_config.get("env") {
                 if let Some(model) = env.get("ANTHROPIC_MODEL").and_then(|v| v.as_str()) {
                     if !model.is_empty() {
-                        return model.to_string();
+                        return Ok(model.to_string());
                     }
                 }
             }
             client_model.to_string()
         }
         _ => client_model.to_string(),
-    }
+    })
 }
 
 /// 从 model_pricing 表查找模型定价（支持模糊匹配）
@@ -773,6 +769,54 @@ mod tests {
             row.get(0)
         })?;
         assert_eq!(count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn claude_takeover_session_insert_uses_upstream_pricing_model() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let provider_id = crate::settings::get_current_provider(&AppType::Claude)
+            .unwrap_or_else(|| "claude-takeover-test".to_string());
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (
+                    id, app_type, name, settings_config, is_current
+                 ) VALUES (?1, 'claude', 'Takeover test', ?2, 1)",
+                rusqlite::params![
+                    provider_id,
+                    serde_json::json!({"env": {"ANTHROPIC_MODEL": "glm-5.2"}}).to_string(),
+                ],
+            )?;
+            conn.execute(
+                "UPDATE proxy_config SET enabled = 1 WHERE app_type = 'claude'",
+                [],
+            )?;
+        }
+
+        let msg = ParsedAssistantUsage {
+            message_id: "msg_takeover".to_string(),
+            model: "claude-sonnet-4-5".to_string(),
+            input_tokens: 100,
+            output_tokens: 20,
+            cache_read_tokens: 0,
+            cache_creation_tokens: 0,
+            stop_reason: Some("end_turn".to_string()),
+            timestamp: Some("2026-07-14T00:00:00Z".to_string()),
+            session_id: Some("session-takeover".to_string()),
+        };
+
+        assert!(insert_session_log_entry(&db, "session:msg_takeover", &msg)?);
+
+        let conn = lock_conn!(db.conn);
+        let pricing_model: String = conn.query_row(
+            "SELECT pricing_model FROM proxy_request_logs WHERE request_id = 'session:msg_takeover'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(pricing_model, "glm-5.2");
 
         Ok(())
     }

@@ -10,7 +10,7 @@ use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
-    build_effective_settings_with_common_config, write_live_with_common_config,
+    build_effective_settings_with_common_config, write_live_with_common_config, ProviderService,
 };
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
@@ -1877,6 +1877,51 @@ impl ProxyService {
     /// 检测到 Live 备份残留时调用此方法。
     /// 会恢复 Live 配置、清除接管标志、删除备份。
     pub async fn recover_from_crash(&self) -> Result<(), String> {
+        // While takeover is enabled, the provider DB is the credential SSOT and
+        // the backup is only rollback material. Refresh it before restoring so
+        // an older crash backup cannot overwrite a credential rotated in Nexus.
+        for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
+            let app = app_type.as_str();
+            let enabled = self
+                .db
+                .get_proxy_config_for_app(app)
+                .await
+                .map(|config| config.enabled)
+                .unwrap_or(false);
+            let has_backup = self
+                .db
+                .get_live_backup(app)
+                .await
+                .map(|backup| backup.is_some())
+                .unwrap_or(false);
+            if !enabled || !has_backup {
+                continue;
+            }
+
+            let provider = crate::settings::get_effective_current_provider(&self.db, &app_type)
+                .ok()
+                .flatten()
+                .and_then(|id| self.db.get_provider_by_id(&id, app).ok().flatten());
+            let Some(provider) = provider else {
+                continue;
+            };
+            if ProviderService::validate_provider_settings(&app_type, &provider).is_err() {
+                log::warn!("{app} 当前供应商配置无效，保留原始崩溃恢复备份");
+                continue;
+            }
+            if Self::live_has_proxy_placeholder_for_app(&app_type, &provider.settings_config) {
+                log::warn!("{app} 当前供应商含代理占位符，保留原始崩溃恢复备份");
+                continue;
+            }
+            if self
+                .update_live_backup_from_provider(app, &provider)
+                .await
+                .is_err()
+            {
+                log::warn!("刷新 {app} 崩溃恢复备份失败，将使用原始备份");
+            }
+        }
+
         // 1. 恢复 Live 配置
         self.restore_live_configs().await?;
 
@@ -4466,6 +4511,279 @@ model = "gpt-5.1-codex"
             !env.contains_key("ANTHROPIC_AUTH_TOKEN"),
             "should not add ANTHROPIC_AUTH_TOKEN when absent"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn crash_recovery_refreshes_enabled_provider_backup_before_restore() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "P1".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://current.example",
+                    "ANTHROPIC_AUTH_TOKEN": "current-provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+        db.set_current_provider("claude", "p1")
+            .expect("set current provider");
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER
+                }
+            }))
+            .expect("seed taken-over live config");
+        db.save_live_backup(
+            "claude",
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://stale.example",
+                    "ANTHROPIC_AUTH_TOKEN": "stale-restored-token"
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("seed stale crash backup");
+
+        let mut proxy_config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("get Claude proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Claude takeover enabled");
+
+        service.recover_from_crash().await.expect("recover crash");
+
+        let restored = service
+            .read_claude_live()
+            .expect("read restored Live config");
+        assert_eq!(
+            restored
+                .get("env")
+                .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+                .and_then(|token| token.as_str()),
+            Some("current-provider-token"),
+            "crash recovery must restore the enabled provider SSOT, not a stale backup token"
+        );
+        assert!(
+            db.get_live_backup("claude")
+                .await
+                .expect("read removed backup")
+                .is_none(),
+            "crash recovery should still remove the consumed backup"
+        );
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("restore Claude takeover");
+
+        let updated = db
+            .get_provider_by_id("p1", "claude")
+            .expect("get provider")
+            .expect("provider exists");
+        assert_eq!(
+            updated
+                .settings_config
+                .get("env")
+                .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+                .and_then(|token| token.as_str()),
+            Some("current-provider-token"),
+            "startup takeover restore must not roll the provider credential back"
+        );
+
+        service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("disable Claude takeover");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn crash_recovery_preserves_backup_for_invalid_provider() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "broken".to_string(),
+            "Broken".to_string(),
+            Value::Null,
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save malformed provider");
+        db.set_current_provider("claude", "broken")
+            .expect("set current provider");
+        service
+            .write_claude_live(&json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
+                    "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER
+                }
+            }))
+            .expect("seed taken-over live config");
+        db.save_live_backup(
+            "claude",
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://backup.example",
+                    "ANTHROPIC_AUTH_TOKEN": "valid-backup-token"
+                }
+            })
+            .to_string(),
+        )
+        .await
+        .expect("seed valid crash backup");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("get Claude proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Claude takeover enabled");
+
+        service.recover_from_crash().await.expect("recover crash");
+
+        let restored = service.read_claude_live().expect("read restored Live");
+        assert_eq!(
+            restored
+                .get("env")
+                .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
+                .and_then(|token| token.as_str()),
+            Some("valid-backup-token"),
+            "an invalid provider must not replace the only valid crash backup"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_crash_recovery_keeps_current_provider_auth_and_url() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        let current_config = r#"model_provider = "nexus"
+model = "glm-5.2"
+
+[model_providers.nexus]
+base_url = "https://current.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "current-provider-token"
+"#;
+        let provider = Provider::with_id(
+            "nexus".to_string(),
+            "Nexus".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "current-provider-token" },
+                "config": current_config
+            }),
+            None,
+        );
+        db.save_provider("codex", &provider).expect("save provider");
+        db.set_current_provider("codex", "nexus")
+            .expect("set current provider");
+        service
+            .write_codex_live(&json!({
+                "auth": { "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER },
+                "config": r#"model_provider = "nexus"
+[model_providers.nexus]
+base_url = "http://127.0.0.1:15721/v1"
+wire_api = "responses"
+experimental_bearer_token = "PROXY_MANAGED"
+"#
+            }))
+            .expect("seed taken-over Codex live config");
+        db.save_live_backup(
+            "codex",
+            &json!({
+                "auth": { "OPENAI_API_KEY": "stale-backup-token" },
+                "config": r#"model_provider = "nexus"
+[model_providers.nexus]
+base_url = "https://stale.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "stale-backup-token"
+"#
+            })
+            .to_string(),
+        )
+        .await
+        .expect("seed stale Codex backup");
+        let mut proxy_config = db
+            .get_proxy_config_for_app("codex")
+            .await
+            .expect("get Codex proxy config");
+        proxy_config.enabled = true;
+        db.update_proxy_config_for_app(proxy_config)
+            .await
+            .expect("mark Codex takeover enabled");
+
+        service.recover_from_crash().await.expect("recover crash");
+
+        let restored = service.read_codex_live().expect("read restored Codex Live");
+        assert_eq!(
+            restored
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(|token| token.as_str()),
+            Some("current-provider-token")
+        );
+        assert!(
+            restored
+                .get("config")
+                .and_then(|config| config.as_str())
+                .is_some_and(|config| config.contains("https://current.example/v1")),
+            "Codex crash recovery must restore the current provider URL"
+        );
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("restore Codex takeover");
+        let updated = db
+            .get_provider_by_id("nexus", "codex")
+            .expect("get provider")
+            .expect("provider exists");
+        assert_eq!(
+            updated
+                .settings_config
+                .get("auth")
+                .and_then(|auth| auth.get("OPENAI_API_KEY"))
+                .and_then(|token| token.as_str()),
+            Some("current-provider-token")
+        );
+        assert!(
+            updated
+                .settings_config
+                .get("config")
+                .and_then(|config| config.as_str())
+                .is_some_and(|config| config.contains("https://current.example/v1")),
+            "startup takeover restore must not roll back the Codex provider URL"
+        );
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
     }
 
     #[tokio::test]
