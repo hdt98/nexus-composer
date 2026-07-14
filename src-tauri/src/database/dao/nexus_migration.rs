@@ -512,28 +512,31 @@ impl Database {
 
         let mut migrated = 0;
         for (id, app_type, name, settings_json, website_url, meta_json) in rows {
-            if !LEGACY_NAMES.contains(&name.as_str()) {
-                continue;
-            }
             let (Ok(mut settings), Ok(mut meta)) = (
                 serde_json::from_str::<Value>(&settings_json),
                 serde_json::from_str::<Value>(&meta_json),
             ) else {
                 continue;
             };
-            if meta
+            let preset_version = meta
                 .get("managedNexusPresetVersion")
-                .and_then(Value::as_u64)
+                .and_then(Value::as_u64);
+            if preset_version
                 .is_some_and(|version| version >= u64::from(NEXUS_MANAGED_PRESET_VERSION))
             {
                 continue;
             }
-            let original_settings = settings.clone();
-            let original_meta = meta.clone();
             let provider_type = meta
                 .get("providerType")
                 .and_then(Value::as_str)
                 .map(str::to_string);
+            let is_version_one_managed =
+                preset_version == Some(1) && provider_type.as_deref() == Some("nexus");
+            if !is_version_one_managed && !LEGACY_NAMES.contains(&name.as_str()) {
+                continue;
+            }
+            let original_settings = settings.clone();
+            let original_meta = meta.clone();
             let recognized = match app_type.as_str() {
                 "claude" => migrate_claude_settings(&mut settings, provider_type.as_deref()),
                 "claude-desktop" => {
@@ -544,12 +547,7 @@ impl Database {
                 _ => false,
             };
             if !recognized {
-                let is_version_one = meta
-                    .get("managedNexusPresetVersion")
-                    .and_then(Value::as_u64)
-                    == Some(1);
-                if is_version_one
-                    && provider_type.as_deref() == Some("nexus")
+                if is_version_one_managed
                     && is_customized_v1_target(&app_type, &id, &settings, &meta)
                 {
                     remove_managed_nexus_catalog(&mut settings);
@@ -964,6 +962,81 @@ mod tests {
                 .meta
                 .and_then(|meta| meta.managed_nexus_preset_version),
             Some(NEXUS_MANAGED_PRESET_VERSION)
+        );
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 0);
+    }
+
+    #[test]
+    fn handles_renamed_version_one_managed_and_custom_rows() {
+        let db = Database::memory().unwrap();
+        for (id, name, endpoint, model) in [
+            (
+                "renamed-managed",
+                "My Nexus",
+                NEXUS_ENDPOINT,
+                NEXUS_CLAUDE_MODEL,
+            ),
+            (
+                "renamed-custom",
+                "My Custom GLM",
+                "https://custom.example/v1",
+                "custom-model",
+            ),
+        ] {
+            save_provider(
+                &db,
+                "claude",
+                id,
+                name,
+                endpoint,
+                Some("nexus"),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": endpoint,
+                        "ANTHROPIC_AUTH_TOKEN": "keep-key",
+                        "ANTHROPIC_MODEL": model
+                    },
+                    "modelCatalog": {"models": [
+                        {"model": NEXUS_MODEL},
+                        {"model": "custom-model", "keep": true}
+                    ]}
+                }),
+            );
+            let mut provider = db.get_provider_by_id(id, "claude").unwrap().unwrap();
+            let meta = provider.meta.as_mut().unwrap();
+            meta.managed_nexus_preset_version = Some(1);
+            meta.local_proxy_request_overrides = Some(LocalProxyRequestOverrides {
+                headers: HashMap::new(),
+                body: Some(json!({
+                    "chat_template_kwargs": {"enable_thinking": true}
+                })),
+            });
+            db.save_provider("claude", &provider).unwrap();
+        }
+
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 2);
+        let managed = db
+            .get_provider_by_id("renamed-managed", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(managed.name, NEXUS_NAME);
+        assert_eq!(
+            managed.meta.unwrap().managed_nexus_preset_version,
+            Some(NEXUS_MANAGED_PRESET_VERSION)
+        );
+
+        let customized = db
+            .get_provider_by_id("renamed-custom", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(customized.name, "My Custom GLM");
+        let meta = customized.meta.unwrap();
+        assert_eq!(meta.provider_type, None);
+        assert_eq!(meta.managed_nexus_preset_version, None);
+        assert!(meta.local_proxy_request_overrides.is_none());
+        assert_eq!(
+            customized.settings_config.pointer("/modelCatalog/models"),
+            Some(&json!([{"model": "custom-model", "keep": true}]))
         );
         assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 0);
     }
