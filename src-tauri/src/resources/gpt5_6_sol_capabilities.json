@@ -1,0 +1,10 @@
+{
+  "supported_reasoning_levels": [
+    {
+      "effort": "ultra",
+      "description": "Maximum reasoning with automatic task delegation"
+    }
+  ],
+  "multi_agent_version": "v2",
+  "tool_mode": "code_mode_only"
+}

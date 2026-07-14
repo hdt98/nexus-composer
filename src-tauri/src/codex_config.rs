@@ -418,11 +418,38 @@ fn extract_codex_top_level_u64(config_text: &str, field: &str) -> Option<u64> {
         .filter(|value| *value > 0)
 }
 
+fn load_codex_sol_capabilities() -> Value {
+    serde_json::from_str(include_str!("resources/gpt5_6_sol_capabilities.json"))
+        .expect("bundled gpt-5.6-sol capabilities must be valid JSON")
+}
+
+fn apply_codex_sol_capabilities(entry: &mut serde_json::Map<String, Value>, capabilities: &Value) {
+    let ultra = &capabilities["supported_reasoning_levels"][0];
+    let levels = entry
+        .entry("supported_reasoning_levels".to_string())
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .expect("catalog reasoning levels must be an array");
+    if let Some(existing) = levels
+        .iter_mut()
+        .find(|level| level.get("effort").and_then(Value::as_str) == Some("ultra"))
+    {
+        *existing = ultra.clone();
+    } else {
+        levels.push(ultra.clone());
+    }
+
+    for field in ["multi_agent_version", "tool_mode"] {
+        entry.insert(field.to_string(), capabilities[field].clone());
+    }
+}
+
 fn codex_catalog_model_entry(
     template: &Value,
     spec: &CodexCatalogModelSpec,
     priority: usize,
     profile: CodexCatalogToolProfile,
+    sol_capabilities: &Value,
 ) -> Value {
     let mut entry = template.clone();
     let Some(entry_obj) = entry.as_object_mut() else {
@@ -439,6 +466,17 @@ fn codex_catalog_model_entry(
     entry_obj.insert("service_tiers".to_string(), json!([]));
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
+    apply_codex_sol_capabilities(entry_obj, sol_capabilities);
+
+    if let Some(modalities) = &spec.input_modalities {
+        entry_obj.insert("input_modalities".to_string(), json!(modalities));
+        if !modalities
+            .iter()
+            .any(|modality| modality.eq_ignore_ascii_case("image"))
+        {
+            entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+        }
+    }
 
     if profile == CodexCatalogToolProfile::NativeResponses {
         // Native `/responses` gateways reject Codex's freeform `apply_patch`
@@ -472,9 +510,6 @@ fn codex_catalog_model_entry(
         if let Some(parallel) = spec.supports_parallel_tool_calls {
             entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
         }
-        if let Some(modalities) = &spec.input_modalities {
-            entry_obj.insert("input_modalities".to_string(), json!(modalities));
-        }
     }
 
     entry
@@ -488,8 +523,8 @@ struct CodexCatalogModelSpec {
     /// Per-row override for the native template's `supports_parallel_tool_calls`
     /// (e.g. MiniMax=true, MiMo=false). Only consulted for `NativeResponses`.
     supports_parallel_tool_calls: Option<bool>,
-    /// Per-row override for the native template's `input_modalities`
-    /// (e.g. `["text","image"]`). Only consulted for `NativeResponses`.
+    /// Per-row override for the template's `input_modalities`
+    /// (e.g. `["text","image"]`).
     input_modalities: Option<Vec<String>>,
     /// Per-row override for the native template's `base_instructions` (the
     /// model identity / system preamble). Carries each vendor's OFFICIAL value
@@ -847,10 +882,13 @@ fn codex_model_catalog_from_specs(
     template: &Value,
     profile: CodexCatalogToolProfile,
 ) -> Value {
+    let sol_capabilities = load_codex_sol_capabilities();
     let entries: Vec<Value> = specs
         .iter()
         .enumerate()
-        .map(|(index, spec)| codex_catalog_model_entry(template, spec, index, profile))
+        .map(|(index, spec)| {
+            codex_catalog_model_entry(template, spec, index, profile, &sol_capabilities)
+        })
         .collect();
 
     json!({ "models": entries })
@@ -1079,9 +1117,9 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             obj.insert("contextWindow".to_string(), json!(context_window));
         }
 
-        // Preserve native-profile per-row overrides so a DB-SSOT-missing
-        // fallback round-trip doesn't silently drop them (they are ignored by
-        // the ProxyChat profile, so carrying them is harmless).
+        // Preserve per-row overrides so a DB-SSOT-missing fallback round-trip
+        // does not silently drop them. Profile-specific application happens
+        // when the catalog entry is generated.
         if let Some(parallel) = entry
             .get("supports_parallel_tool_calls")
             .and_then(|v| v.as_bool())
@@ -2405,13 +2443,15 @@ base_url = "https://production.api/v1"
             }
         });
 
-        let catalog = codex_model_catalog_from_settings(
-            &settings,
-            "",
+        let specs = codex_catalog_model_specs(&settings, "");
+        let mut template = load_codex_native_responses_template();
+        template["apply_patch_tool_type"] = json!("freeform");
+        template["tools"] = json!([{"type": "custom", "name": "apply_patch"}]);
+        let catalog = codex_model_catalog_from_specs(
+            &specs,
+            &template,
             CodexCatalogToolProfile::NativeResponses,
-        )
-        .expect("native catalog generation should not error")
-        .expect("non-empty modelCatalog must yield a catalog");
+        );
 
         let entry = &catalog["models"][0];
         assert_eq!(
@@ -2426,6 +2466,10 @@ base_url = "https://production.api/v1"
         assert!(
             entry.get("apply_patch_tool_type").is_none(),
             "native entries must NOT declare a freeform apply_patch tool"
+        );
+        assert!(
+            entry.get("tools").is_none(),
+            "native entries must remove inherited custom tool payloads"
         );
         // `base_instructions` is REQUIRED by Codex's catalog parser, so it must
         // be present — and the per-row official override must win over the
@@ -2453,6 +2497,11 @@ base_url = "https://production.api/v1"
             entry.get("context_window").and_then(|v| v.as_u64()),
             Some(1_000_000)
         );
+        assert_eq!(entry["multi_agent_version"], "v2");
+        assert_eq!(entry["tool_mode"], "code_mode_only");
+        assert!(entry["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
     }
 
     #[test]
@@ -2513,6 +2562,31 @@ base_url = "https://production.api/v1"
             Some("freeform"),
             "ProxyChat must preserve apply_patch_tool_type (no native stripping)"
         );
+        assert_eq!(catalog["models"][0]["multi_agent_version"], "v2");
+        assert_eq!(catalog["models"][0]["tool_mode"], "code_mode_only");
+    }
+
+    #[test]
+    fn both_profiles_honor_explicit_input_modalities() {
+        let settings = json!({"modelCatalog": {"models": [
+            {"model": "text-only", "inputModalities": ["text"]},
+            {"model": "multimodal", "inputModalities": ["text", "image"]}
+        ]}});
+        let specs = codex_catalog_model_specs(&settings, "");
+        let mut template = load_codex_native_responses_template();
+        template["supports_image_detail_original"] = json!(true);
+
+        for profile in [
+            CodexCatalogToolProfile::ProxyChat,
+            CodexCatalogToolProfile::NativeResponses,
+        ] {
+            let catalog = codex_model_catalog_from_specs(&specs, &template, profile);
+            let models = catalog["models"].as_array().expect("catalog models");
+            assert_eq!(models[0]["input_modalities"], json!(["text"]));
+            assert_eq!(models[0]["supports_image_detail_original"], false);
+            assert_eq!(models[1]["input_modalities"], json!(["text", "image"]));
+            assert_eq!(models[1]["supports_image_detail_original"], true);
+        }
     }
 
     #[test]
@@ -2857,6 +2931,21 @@ web_search = "disabled"
             template.get("slug").and_then(|v| v.as_str()),
             Some("gpt-5.5"),
             "static template slug must be gpt-5.5"
+        );
+    }
+
+    #[test]
+    fn sol_capability_snapshot_is_source_exact() {
+        assert_eq!(
+            load_codex_sol_capabilities(),
+            json!({
+                "supported_reasoning_levels": [{
+                    "effort": "ultra",
+                    "description": "Maximum reasoning with automatic task delegation"
+                }],
+                "multi_agent_version": "v2",
+                "tool_mode": "code_mode_only"
+            })
         );
     }
 

@@ -107,9 +107,7 @@ function modelCatalog(
         model: string;
         displayName?: string;
         contextWindow?: number;
-        // Native Responses (direct) overrides for the generated
-        // model-catalogs.json; omit to inherit the native template defaults
-        // (supports_parallel_tool_calls=false, input_modalities=["text"]).
+        // Overrides for generated model-catalogs.json entries.
         supportsParallelToolCalls?: boolean;
         inputModalities?: string[];
         // Vendor's OFFICIAL base_instructions; omit to inherit the neutral
@@ -163,6 +161,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
         model: NEXUS_MODEL,
         displayName: "GLM-5.2",
         contextWindow: NEXUS_CONTEXT_WINDOW,
+        inputModalities: ["text"],
       },
     ]),
     category: "third_party",
