@@ -20,9 +20,9 @@ describe("Nexus Composer language system", () => {
     const config = readFileSync("src/i18n/index.ts", "utf-8");
     expect(config).toContain('import en from "./locales/en.json"');
     expect(config).toContain('import vi from "./locales/vi.json"');
-    expect(config).not.toContain('import ja from');
-    expect(config).not.toContain('import zh from');
-    expect(config).not.toContain('import zhTW from');
+    expect(config).not.toContain("import ja from");
+    expect(config).not.toContain("import zh from");
+    expect(config).not.toContain("import zhTW from");
   });
 
   it("i18n config has only en and vi in resources", () => {
@@ -69,5 +69,21 @@ describe("Nexus Composer language system", () => {
     expect(content).not.toContain('"zh"');
     expect(content).not.toContain('"zh-TW"');
     expect(content).not.toContain('"ja"');
+  });
+
+  it("keeps rendered Nexus copy generic and removes dead endpoint copy", () => {
+    for (const language of ["en", "vi"]) {
+      const locale = JSON.parse(
+        readFileSync(`src/i18n/locales/${language}.json`, "utf-8"),
+      );
+      expect(locale.app.description).toBeUndefined();
+      expect(locale.nexus.home).toBeUndefined();
+      expect(
+        JSON.stringify({
+          firstRunNotice: locale.firstRunNotice,
+          nexus: locale.nexus,
+        }),
+      ).not.toMatch(/SGLang|127\.0\.0\.1:30000|SSH tunnel/i);
+    }
   });
 });
