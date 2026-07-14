@@ -61,10 +61,19 @@ import {
 } from "@/utils/providerConfigUtils";
 import { mergeProviderMeta } from "@/utils/providerMetaUtils";
 import {
+  extractCodexBaseUrl,
   extractCodexWireApi,
+  extractCodexModelName,
   setCodexWireApi,
   setCodexModelName as setCodexModelNameInConfig,
 } from "@/utils/providerConfigUtils";
+import {
+  isManagedNexusEndpoint,
+  NEXUS_CLAUDE_MODEL,
+  NEXUS_MODEL,
+  removeManagedNexusCatalog,
+  removeManagedNexusReasoningOverride,
+} from "@/config/nexus";
 import { isNonNegativeDecimalString } from "@/types/usage";
 import { getCodexCustomTemplate } from "@/config/codexTemplates";
 import CodexConfigEditor from "./CodexConfigEditor";
@@ -159,8 +168,10 @@ export const normalizeCodexCatalogModelsForSave = (
 
   for (const item of models) {
     const model = item.model.trim();
-    if (!model || seen.has(model)) continue;
-    seen.add(model);
+    const role = item.role?.trim();
+    const identity = `${model}\0${role ?? ""}`;
+    if (!model || seen.has(identity)) continue;
+    seen.add(identity);
 
     const displayName = item.displayName?.trim();
     const rawContextWindow = String(item.contextWindow ?? "").replace(
@@ -179,6 +190,7 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
+      ...(role ? { role } : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
       // Native Responses profile overrides (ignored by the chat/proxy profile).
@@ -662,7 +674,11 @@ function ProviderFormFull({
   const isSponsorPreset = (preset: any): boolean => {
     if (preset.isOfficial || preset.category === "official") return false;
     if (preset.name === "Nexus GLM-5.2") return false;
-    return !!(preset.isPartner || preset.primePartner || preset.partnerPromotionKey);
+    return !!(
+      preset.isPartner ||
+      preset.primePartner ||
+      preset.partnerPromotionKey
+    );
   };
 
   const presetEntries = useMemo(() => {
@@ -672,24 +688,38 @@ function ProviderFormFull({
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "gemini") {
       return geminiProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `gemini-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `gemini-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "opencode") {
       return opencodeProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `opencode-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `opencode-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "openclaw") {
       return openclawProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `openclaw-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `openclaw-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "hermes") {
       return hermesProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `hermes-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `hermes-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     }
     return providerPresets
       .map<PresetEntry>((preset, index) => ({ id: `claude-${index}`, preset }))
-      .filter(({ preset }) => !(preset as any).hidden && !isSponsorPreset(preset));
+      .filter(
+        ({ preset }) => !(preset as any).hidden && !isSponsorPreset(preset),
+      );
   }, [appId]);
 
   const {
@@ -1519,6 +1549,80 @@ function ProviderFormFull({
 
     if (!isCodexOauthProvider && "codexFastMode" in nextMeta) {
       delete nextMeta.codexFastMode;
+    }
+
+    const editingManagedNexus =
+      selectedPresetId === null && initialData?.meta?.providerType === "nexus";
+    if (editingManagedNexus) {
+      const parsedSettings = JSON.parse(payload.settingsConfig) as Record<
+        string,
+        unknown
+      >;
+      if (appId === "codex") {
+        const sourceCatalog = initialData?.settingsConfig?.modelCatalog as
+          | Record<string, unknown>
+          | undefined;
+        const savedCatalog = parsedSettings.modelCatalog as
+          | Record<string, unknown>
+          | undefined;
+        if (sourceCatalog && savedCatalog) {
+          for (const [key, value] of Object.entries(sourceCatalog)) {
+            if (key !== "models" && !(key in savedCatalog)) {
+              savedCatalog[key] = value;
+            }
+          }
+        }
+        const sourceModels = sourceCatalog?.models as unknown[] | undefined;
+        const savedModels = savedCatalog?.models as unknown[] | undefined;
+        if (sourceModels && savedModels) {
+          for (const source of sourceModels) {
+            if (!source || typeof source !== "object" || !("role" in source)) {
+              continue;
+            }
+            const entry = source as Record<string, unknown>;
+            const index = savedModels.findIndex(
+              (saved) =>
+                !!saved &&
+                typeof saved === "object" &&
+                (saved as Record<string, unknown>).model === entry.model &&
+                (saved as Record<string, unknown>).role === entry.role,
+            );
+            if (index >= 0) savedModels[index] = source;
+          }
+        }
+      }
+      const keepsManagedSignature =
+        appId === "codex"
+          ? isManagedNexusEndpoint(
+              extractCodexBaseUrl(String(parsedSettings.config ?? "")),
+            ) &&
+            extractCodexModelName(String(parsedSettings.config ?? "")) ===
+              NEXUS_MODEL &&
+            nextMeta.apiFormat === "openai_chat"
+          : (() => {
+              const env = parsedSettings.env as
+                | Record<string, unknown>
+                | undefined;
+              return (
+                isManagedNexusEndpoint(env?.ANTHROPIC_BASE_URL) &&
+                [
+                  "ANTHROPIC_MODEL",
+                  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                  "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                  "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                  "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                  "ANTHROPIC_CUSTOM_MODEL_OPTION",
+                ].every((field) => env?.[field] === NEXUS_CLAUDE_MODEL) &&
+                nextMeta.apiFormat === "openai_chat"
+              );
+            })();
+      if (!keepsManagedSignature) {
+        delete nextMeta.providerType;
+        delete nextMeta.managedNexusPresetVersion;
+        removeManagedNexusReasoningOverride(nextMeta);
+        removeManagedNexusCatalog(parsedSettings);
+        payload.settingsConfig = JSON.stringify(parsedSettings);
+      }
     }
 
     payload.meta = nextMeta;

@@ -90,6 +90,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
                   : undefined;
             return {
               model: typeof item?.model === "string" ? item.model : "",
+              ...(typeof item?.role === "string" ? { role: item.role } : {}),
               displayName:
                 typeof item?.displayName === "string"
                   ? item.displayName

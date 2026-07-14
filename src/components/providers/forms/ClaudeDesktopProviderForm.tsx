@@ -68,6 +68,12 @@ import {
   type ClaudeDesktopDefaultRoute,
 } from "@/lib/api/providers";
 import { resolveManagedAccountId } from "@/lib/authBinding";
+import {
+  isManagedNexusEndpoint,
+  NEXUS_MODEL,
+  removeManagedNexusCatalog,
+  removeManagedNexusReasoningOverride,
+} from "@/config/nexus";
 
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
   presetId?: string;
@@ -706,6 +712,22 @@ export function ClaudeDesktopProviderForm({
           : undefined;
     meta.codexFastMode =
       activeProviderType === "codex_oauth" ? codexFastMode : undefined;
+
+    if (initialData?.meta?.providerType === "nexus" && !activePreset) {
+      const finalEnv = settingsConfig.env as Record<string, unknown>;
+      const keepsManagedSignature =
+        isManagedNexusEndpoint(finalEnv.ANTHROPIC_BASE_URL) &&
+        mode === "proxy" &&
+        apiFormat === "openai_chat" &&
+        Object.values(routeMap).length > 0 &&
+        Object.values(routeMap).every((route) => route.model === NEXUS_MODEL);
+      if (!keepsManagedSignature) {
+        delete meta.providerType;
+        delete meta.managedNexusPresetVersion;
+        removeManagedNexusReasoningOverride(meta);
+        removeManagedNexusCatalog(settingsConfig);
+      }
+    }
 
     delete meta.endpointAutoSelect;
     delete meta.isFullUrl;

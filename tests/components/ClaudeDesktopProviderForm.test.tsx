@@ -4,7 +4,12 @@ import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
 import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
-import { NEXUS_TEXT_MODEL_CATALOG } from "@/config/nexus";
+import {
+  NEXUS_ENDPOINT,
+  NEXUS_MANAGED_PRESET_VERSION,
+  NEXUS_MODEL,
+  NEXUS_TEXT_MODEL_CATALOG,
+} from "@/config/nexus";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 vi.mock("@/lib/api/providers", () => ({
@@ -31,6 +36,48 @@ function renderForm(
   return { ...view, onSubmit };
 }
 
+const managedDesktopData: ComponentProps<
+  typeof ClaudeDesktopProviderForm
+>["initialData"] = {
+  name: "Nexus GLM-5.2",
+  category: "third_party",
+  settingsConfig: {
+    env: {
+      ANTHROPIC_BASE_URL: NEXUS_ENDPOINT,
+      ANTHROPIC_AUTH_TOKEN: "old-key",
+    },
+    modelCatalog: {
+      customMetadata: "keep-me",
+      models: [
+        ...NEXUS_TEXT_MODEL_CATALOG.models,
+        { model: `${NEXUS_MODEL}[1m]`, inputModalities: ["text"] },
+        { model: "glm-5.2[1m]", inputModalities: ["text"] },
+        { model: NEXUS_MODEL, role: "custom", keep: true },
+        { model: "custom-model", inputModalities: ["text", "image"] },
+      ],
+    },
+  },
+  meta: {
+    claudeDesktopMode: "proxy",
+    apiFormat: "openai_chat",
+    providerType: "nexus",
+    managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+    localProxyRequestOverrides: {
+      headers: { "x-custom": "keep-me" },
+      body: {
+        temperature: 0.2,
+        chat_template_kwargs: { enable_thinking: true, custom: "keep-me" },
+      },
+    },
+    claudeDesktopModelRoutes: {
+      "claude-sonnet-5": { model: NEXUS_MODEL, supports1m: true },
+      "claude-opus-4-8": { model: NEXUS_MODEL, supports1m: true },
+      "claude-fable-5": { model: NEXUS_MODEL, supports1m: true },
+      "claude-haiku-4-5": { model: NEXUS_MODEL, supports1m: true },
+    },
+  },
+};
+
 describe("ClaudeDesktopProviderForm", () => {
   it("persists the managed Nexus catalog and request override", async () => {
     const onSubmit = vi.fn();
@@ -54,7 +101,7 @@ describe("ClaudeDesktopProviderForm", () => {
     );
     expect(submitted.meta).toMatchObject({
       providerType: "nexus",
-      managedNexusPresetVersion: 1,
+      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: {
         body: { chat_template_kwargs: { enable_thinking: true } },
       },
@@ -82,6 +129,51 @@ describe("ClaudeDesktopProviderForm", () => {
     expect(
       JSON.parse(onSubmit.mock.calls[0][0].settingsConfig),
     ).not.toHaveProperty("modelCatalog");
+  });
+
+  it("keeps managed Nexus metadata when only the Desktop credential changes", async () => {
+    const { onSubmit } = renderForm(managedDesktopData);
+
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "new-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta).toMatchObject({
+      providerType: "nexus",
+      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+      localProxyRequestOverrides:
+        managedDesktopData?.meta?.localProxyRequestOverrides,
+    });
+  });
+
+  it("detaches managed metadata and only its catalog on Desktop route edit", async () => {
+    const { onSubmit } = renderForm(managedDesktopData);
+
+    fireEvent.change(screen.getAllByPlaceholderText("deepseek-v4-pro")[0], {
+      target: { value: "custom-model" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(submitted.meta).not.toHaveProperty("providerType");
+    expect(submitted.meta).not.toHaveProperty("managedNexusPresetVersion");
+    expect(submitted.meta.localProxyRequestOverrides).toEqual({
+      headers: { "x-custom": "keep-me" },
+      body: {
+        temperature: 0.2,
+        chat_template_kwargs: { custom: "keep-me" },
+      },
+    });
+    expect(JSON.parse(submitted.settingsConfig).modelCatalog.models).toEqual([
+      { model: NEXUS_MODEL, role: "custom", keep: true },
+      { model: "custom-model", inputModalities: ["text", "image"] },
+    ]);
+    expect(
+      JSON.parse(submitted.settingsConfig).modelCatalog.customMetadata,
+    ).toBe("keep-me");
   });
 
   it("编辑模型映射的菜单显示名时保持输入框焦点", () => {
