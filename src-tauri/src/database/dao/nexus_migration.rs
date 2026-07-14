@@ -11,7 +11,7 @@ const NEXUS_MODEL: &str = "GLM-5.2-FP8";
 const NEXUS_CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
 const NEXUS_CONTEXT_WINDOW: i64 = 1_048_576;
 const NEXUS_AUTO_COMPACT_TOKENS: i64 = 252_000;
-const NEXUS_MANAGED_PRESET_VERSION: u32 = 1;
+const NEXUS_MANAGED_PRESET_VERSION: u32 = 2;
 const LEGACY_MODEL: &str = "glm-5.2";
 const LEGACY_CLAUDE_MODEL: &str = "glm-5.2[1m]";
 const LEGACY_CLAUDE_DESKTOP_ID: &str = "nexus-glm-5-2-hosted";
@@ -35,12 +35,153 @@ fn is_managed_signature(
         return false;
     };
     match provider_type {
-        None => LEGACY_ENDPOINTS.contains(&endpoint) && legacy_models.contains(&model),
+        None => {
+            (endpoint == NEXUS_ENDPOINT || LEGACY_ENDPOINTS.contains(&endpoint))
+                && (current_models.contains(&model) || legacy_models.contains(&model))
+        }
         Some("nexus") => {
             (endpoint == NEXUS_ENDPOINT || LEGACY_ENDPOINTS.contains(&endpoint))
                 && (current_models.contains(&model) || legacy_models.contains(&model))
         }
         _ => false,
+    }
+}
+
+fn is_custom_signature(
+    endpoint: Option<&str>,
+    model: Option<&str>,
+    current_models: &[&str],
+    legacy_models: &[&str],
+) -> bool {
+    endpoint.is_some()
+        && model.is_some()
+        && !is_managed_signature(
+            endpoint,
+            model,
+            Some("nexus"),
+            current_models,
+            legacy_models,
+        )
+}
+
+fn is_customized_v1_target(app_type: &str, id: &str, settings: &Value, meta: &Value) -> bool {
+    match app_type {
+        "claude" => is_custom_signature(
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            settings
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+            &[NEXUS_MODEL, NEXUS_CLAUDE_MODEL],
+            &[LEGACY_MODEL, LEGACY_CLAUDE_MODEL],
+        ),
+        "codex" => {
+            let Some(config) = settings.get("config").and_then(Value::as_str) else {
+                return false;
+            };
+            let Ok(document) = config.parse::<DocumentMut>() else {
+                return false;
+            };
+            let endpoint = crate::codex_config::extract_codex_base_url(config);
+            is_custom_signature(
+                endpoint.as_deref(),
+                document.get("model").and_then(|item| item.as_str()),
+                &[NEXUS_MODEL],
+                &[LEGACY_MODEL],
+            )
+        }
+        "claude-desktop" => {
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str)
+                .is_some()
+                && meta
+                    .get("claudeDesktopModelRoutes")
+                    .and_then(Value::as_object)
+                    .is_some_and(|routes| {
+                        !routes.is_empty()
+                            && routes
+                                .values()
+                                .all(|route| route.get("model").and_then(Value::as_str).is_some())
+                    })
+                && !is_managed_claude_desktop(id, settings, meta, Some("nexus"))
+        }
+        _ => false,
+    }
+}
+
+fn remove_managed_nexus_catalog(settings: &mut Value) {
+    let Some(settings) = settings.as_object_mut() else {
+        return;
+    };
+    let remove_catalog = {
+        let Some(catalog) = settings
+            .get_mut("modelCatalog")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+            return;
+        };
+        models.retain(|entry| {
+            entry.get("role").is_some()
+                || !entry
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .is_some_and(|model| {
+                        [
+                            NEXUS_MODEL,
+                            NEXUS_CLAUDE_MODEL,
+                            LEGACY_MODEL,
+                            LEGACY_CLAUDE_MODEL,
+                        ]
+                        .contains(&model)
+                    })
+        });
+        models.is_empty() && catalog.len() == 1
+    };
+    if remove_catalog {
+        settings.remove("modelCatalog");
+    }
+}
+
+fn remove_managed_reasoning_override(meta: &mut Map<String, Value>) {
+    let remove_overrides = {
+        let Some(overrides) = meta
+            .get_mut("localProxyRequestOverrides")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        let remove_body =
+            if let Some(body) = overrides.get_mut("body").and_then(Value::as_object_mut) {
+                let remove_template = if let Some(template) = body
+                    .get_mut("chat_template_kwargs")
+                    .and_then(Value::as_object_mut)
+                {
+                    if template.get("enable_thinking") == Some(&json!(true)) {
+                        template.remove("enable_thinking");
+                    }
+                    template.is_empty()
+                } else {
+                    false
+                };
+                if remove_template {
+                    body.remove("chat_template_kwargs");
+                }
+                body.is_empty()
+            } else {
+                false
+            };
+        if remove_body {
+            overrides.remove("body");
+        }
+        overrides.is_empty()
+    };
+    if remove_overrides {
+        meta.remove("localProxyRequestOverrides");
     }
 }
 
@@ -61,10 +202,10 @@ fn ensure_text_only_models(settings: &mut Value, required: &[&str]) -> bool {
         return false;
     };
     for required_model in required {
-        if let Some(entry) = models
-            .iter_mut()
-            .find(|entry| entry.get("model").and_then(Value::as_str) == Some(*required_model))
-        {
+        if let Some(entry) = models.iter_mut().find(|entry| {
+            entry.get("role").is_none()
+                && entry.get("model").and_then(Value::as_str) == Some(*required_model)
+        }) {
             let Some(entry) = entry.as_object_mut() else {
                 return false;
             };
@@ -83,18 +224,52 @@ fn upsert_codex_model(settings: &mut Value) -> bool {
     let Some(models) = catalog_models_mut(settings) else {
         return false;
     };
-    let index = models
-        .iter()
-        .position(|entry| {
-            entry
+    let is_nexus = |entry: &Value| {
+        entry.get("role").is_none()
+            && entry
                 .get("model")
                 .and_then(Value::as_str)
                 .is_some_and(|model| [LEGACY_MODEL, NEXUS_MODEL].contains(&model))
+    };
+    let mut merged = models
+        .iter()
+        .find(|entry| {
+            entry.get("role").is_none()
+                && entry.get("model").and_then(Value::as_str) == Some(NEXUS_MODEL)
         })
-        .unwrap_or_else(|| {
-            models.push(json!({}));
-            models.len() - 1
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    for entry in models.iter().filter(|entry| is_nexus(entry)) {
+        let Some(entry) = entry.as_object() else {
+            return false;
+        };
+        for (key, value) in entry {
+            merged.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
+    let index = if models.iter().any(is_nexus) {
+        let mut kept = false;
+        models.retain(|entry| {
+            if !is_nexus(entry) {
+                true
+            } else if kept {
+                false
+            } else {
+                kept = true;
+                true
+            }
         });
+        let index = models
+            .iter()
+            .position(is_nexus)
+            .expect("retained Nexus catalog entry");
+        models[index] = Value::Object(merged);
+        index
+    } else {
+        models.push(Value::Object(merged));
+        models.len() - 1
+    };
     let Some(entry) = models[index].as_object_mut() else {
         return false;
     };
@@ -369,6 +544,28 @@ impl Database {
                 _ => false,
             };
             if !recognized {
+                let is_version_one = meta
+                    .get("managedNexusPresetVersion")
+                    .and_then(Value::as_u64)
+                    == Some(1);
+                if is_version_one
+                    && provider_type.as_deref() == Some("nexus")
+                    && is_customized_v1_target(&app_type, &id, &settings, &meta)
+                {
+                    remove_managed_nexus_catalog(&mut settings);
+                    let Some(meta_object) = meta.as_object_mut() else {
+                        continue;
+                    };
+                    meta_object.remove("providerType");
+                    meta_object.remove("managedNexusPresetVersion");
+                    remove_managed_reasoning_override(meta_object);
+                    tx.execute(
+                        "UPDATE providers SET settings_config = ?1, meta = ?2
+                         WHERE id = ?3 AND app_type = ?4",
+                        params![settings.to_string(), meta.to_string(), id, app_type],
+                    )?;
+                    migrated += 1;
+                }
                 continue;
             }
 
@@ -568,7 +765,10 @@ mod tests {
             Some(&json!(["text"]))
         );
         let meta = claude.meta.as_ref().unwrap();
-        assert_eq!(meta.managed_nexus_preset_version, Some(1));
+        assert_eq!(
+            meta.managed_nexus_preset_version,
+            Some(NEXUS_MANAGED_PRESET_VERSION)
+        );
         let body = meta
             .local_proxy_request_overrides
             .as_ref()
@@ -617,6 +817,253 @@ mod tests {
             Some(&json!(true))
         );
 
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 0);
+    }
+
+    #[test]
+    fn codex_catalog_coalesces_current_and_legacy_entries_in_either_order() {
+        for models in [
+            json!([
+                {"model": LEGACY_MODEL, "legacyOnly": true, "shared": "legacy"},
+                {"model": "custom-model", "keep": true},
+                {"model": NEXUS_MODEL, "role": "custom", "keep": true},
+                {"model": NEXUS_MODEL, "currentOnly": true, "shared": "current"}
+            ]),
+            json!([
+                {"model": NEXUS_MODEL, "currentOnly": true, "shared": "current"},
+                {"model": NEXUS_MODEL, "role": "custom", "keep": true},
+                {"model": "custom-model", "keep": true},
+                {"model": LEGACY_MODEL, "legacyOnly": true, "shared": "legacy"}
+            ]),
+        ] {
+            let mut settings = json!({"modelCatalog": {"models": models}});
+            assert!(upsert_codex_model(&mut settings));
+            let models = settings
+                .pointer("/modelCatalog/models")
+                .and_then(Value::as_array)
+                .unwrap();
+            assert_eq!(
+                models
+                    .iter()
+                    .filter(|entry| {
+                        entry.get("role").is_none()
+                            && entry.get("model") == Some(&json!(NEXUS_MODEL))
+                    })
+                    .count(),
+                1
+            );
+            assert!(!models
+                .iter()
+                .any(|entry| entry.get("model") == Some(&json!(LEGACY_MODEL))));
+            assert!(models.contains(&json!({"model": "custom-model", "keep": true})));
+            assert!(models.contains(&json!({"model": NEXUS_MODEL, "role": "custom", "keep": true})));
+            let nexus = models
+                .iter()
+                .find(|entry| entry.get("model") == Some(&json!(NEXUS_MODEL)))
+                .unwrap();
+            assert_eq!(nexus.get("legacyOnly"), Some(&json!(true)));
+            assert_eq!(nexus.get("currentOnly"), Some(&json!(true)));
+            assert_eq!(nexus.get("shared"), Some(&json!("current")));
+            assert_eq!(nexus.get("inputModalities"), Some(&json!(["text"])));
+        }
+    }
+
+    #[test]
+    fn migrates_known_partial_cutover_pairs_without_marker() {
+        let db = Database::memory().unwrap();
+        let pairs = [
+            (NEXUS_ENDPOINT, NEXUS_MODEL, NEXUS_CLAUDE_MODEL),
+            (NEXUS_ENDPOINT, LEGACY_MODEL, LEGACY_CLAUDE_MODEL),
+            (LEGACY_ENDPOINTS[0], NEXUS_MODEL, NEXUS_CLAUDE_MODEL),
+        ];
+        let mut providers = Vec::new();
+        for (index, (endpoint, codex_model, claude_model)) in pairs.into_iter().enumerate() {
+            let claude_id = format!("claude-partial-{index}");
+            save_provider(
+                &db,
+                "claude",
+                &claude_id,
+                NEXUS_NAME,
+                endpoint,
+                None,
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": endpoint,
+                        "ANTHROPIC_AUTH_TOKEN": "keep-claude-key",
+                        "ANTHROPIC_MODEL": claude_model
+                    }
+                }),
+            );
+            providers.push(("claude", claude_id));
+
+            let codex_id = format!("codex-partial-{index}");
+            save_provider(
+                &db,
+                "codex",
+                &codex_id,
+                NEXUS_NAME,
+                endpoint,
+                None,
+                json!({
+                    "auth": {"OPENAI_API_KEY": "keep-codex-key"},
+                    "config": format!(
+                        "model_provider = \"custom\"\nmodel = \"{}\"\n[model_providers.custom]\nbase_url = \"{}\"\nwire_api = \"responses\"\n",
+                        codex_model, endpoint
+                    )
+                }),
+            );
+            providers.push(("codex", codex_id));
+        }
+
+        assert_eq!(
+            db.migrate_legacy_nexus_providers().unwrap(),
+            providers.len()
+        );
+        for (app, id) in providers {
+            let provider = db.get_provider_by_id(&id, app).unwrap().unwrap();
+            assert_eq!(
+                provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_nexus_preset_version),
+                Some(NEXUS_MANAGED_PRESET_VERSION)
+            );
+        }
+    }
+
+    #[test]
+    fn upgrades_version_one_managed_row_once() {
+        let db = Database::memory().unwrap();
+        save_provider(
+            &db,
+            "claude",
+            "claude-v1",
+            NEXUS_NAME,
+            NEXUS_ENDPOINT,
+            Some("nexus"),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": NEXUS_ENDPOINT,
+                    "ANTHROPIC_AUTH_TOKEN": "keep-key",
+                    "ANTHROPIC_MODEL": NEXUS_CLAUDE_MODEL
+                }
+            }),
+        );
+        let mut provider = db
+            .get_provider_by_id("claude-v1", "claude")
+            .unwrap()
+            .unwrap();
+        provider.meta.as_mut().unwrap().managed_nexus_preset_version = Some(1);
+        db.save_provider("claude", &provider).unwrap();
+
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 1);
+        assert_eq!(
+            db.get_provider_by_id("claude-v1", "claude")
+                .unwrap()
+                .unwrap()
+                .meta
+                .and_then(|meta| meta.managed_nexus_preset_version),
+            Some(NEXUS_MANAGED_PRESET_VERSION)
+        );
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 0);
+    }
+
+    #[test]
+    fn version_one_custom_target_drops_only_managed_state() {
+        let db = Database::memory().unwrap();
+        save_provider(
+            &db,
+            "claude",
+            "claude-custom-v1",
+            NEXUS_NAME,
+            "https://custom.example/v1",
+            Some("nexus"),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://custom.example/v1",
+                    "ANTHROPIC_AUTH_TOKEN": "keep-key",
+                    "ANTHROPIC_MODEL": "custom-model"
+                },
+                "modelCatalog": {"models": [
+                    {"model": NEXUS_MODEL},
+                    {"model": NEXUS_CLAUDE_MODEL},
+                    {"model": LEGACY_MODEL},
+                    {"model": LEGACY_CLAUDE_MODEL},
+                    {"model": NEXUS_MODEL, "role": "custom", "keep": true},
+                    {"model": "custom-model", "keep": true}
+                ]},
+                "keepTop": true
+            }),
+        );
+        let mut provider = db
+            .get_provider_by_id("claude-custom-v1", "claude")
+            .unwrap()
+            .unwrap();
+        let meta = provider.meta.as_mut().unwrap();
+        meta.managed_nexus_preset_version = Some(1);
+        meta.local_proxy_request_overrides = Some(LocalProxyRequestOverrides {
+            headers: HashMap::from([("keep-header".to_string(), "yes".to_string())]),
+            body: Some(json!({
+                "keep": true,
+                "chat_template_kwargs": {
+                    "enable_thinking": true,
+                    "keep_template": true
+                }
+            })),
+        });
+        db.save_provider("claude", &provider).unwrap();
+
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 1);
+        let cleaned = db
+            .get_provider_by_id("claude-custom-v1", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cleaned.settings_config.pointer("/env/ANTHROPIC_BASE_URL"),
+            Some(&json!("https://custom.example/v1"))
+        );
+        assert_eq!(
+            cleaned.settings_config.pointer("/env/ANTHROPIC_MODEL"),
+            Some(&json!("custom-model"))
+        );
+        assert_eq!(
+            cleaned.settings_config.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+            Some(&json!("keep-key"))
+        );
+        assert_eq!(cleaned.settings_config.get("keepTop"), Some(&json!(true)));
+        assert_eq!(
+            cleaned.settings_config.pointer("/modelCatalog/models"),
+            Some(&json!([
+                {"model": NEXUS_MODEL, "role": "custom", "keep": true},
+                {"model": "custom-model", "keep": true}
+            ]))
+        );
+        let meta = cleaned.meta.unwrap();
+        assert_eq!(meta.provider_type, None);
+        assert_eq!(meta.managed_nexus_preset_version, None);
+        let overrides = meta.local_proxy_request_overrides.unwrap();
+        assert_eq!(
+            overrides.headers.get("keep-header"),
+            Some(&"yes".to_string())
+        );
+        assert_eq!(
+            overrides.body.as_ref().unwrap().get("keep"),
+            Some(&json!(true))
+        );
+        assert_eq!(
+            overrides
+                .body
+                .as_ref()
+                .unwrap()
+                .pointer("/chat_template_kwargs/keep_template"),
+            Some(&json!(true))
+        );
+        assert!(overrides
+            .body
+            .as_ref()
+            .unwrap()
+            .pointer("/chat_template_kwargs/enable_thinking")
+            .is_none());
         assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 0);
     }
 
