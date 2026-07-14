@@ -19,7 +19,10 @@ use super::{
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
         get_adapter, get_claude_api_format,
-        reasoning_boundary::{adapt_chat_completion, adapt_chat_sse_stream, ReasoningPolicy},
+        reasoning_boundary::{
+            adapt_chat_completion, adapt_chat_passthrough_sse_stream, adapt_chat_sse_stream,
+            ReasoningPolicy,
+        },
         streaming::create_anthropic_sse_stream,
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
@@ -51,6 +54,49 @@ use std::sync::{
 
 fn adapts_reasoning_boundaries(ctx: &RequestContext) -> bool {
     ReasoningPolicy::from_provider(&ctx.provider).adapts_boundaries()
+}
+
+async fn adapt_chat_passthrough_response(
+    response: super::hyper_client::ProxyResponse,
+    adapt: bool,
+    tag: &str,
+    body_timeout: std::time::Duration,
+) -> Result<super::hyper_client::ProxyResponse, ProxyError> {
+    if !response.status().is_success() || !adapt {
+        return Ok(response);
+    }
+    let status = response.status();
+    let mut headers = response.headers().clone();
+    if response.is_sse() {
+        if let Some(encoding) = get_content_encoding(&headers) {
+            return Err(ProxyError::TransformError(format!(
+                "Cannot adapt an encoded upstream event stream ({encoding})"
+            )));
+        }
+        strip_entity_headers_for_rebuilt_body(&mut headers);
+        return Ok(super::hyper_client::ProxyResponse::streamed(
+            status,
+            headers,
+            adapt_chat_passthrough_sse_stream(response.bytes_stream()),
+        ));
+    }
+
+    let (mut headers, status, body) = read_decoded_body(response, tag, body_timeout).await?;
+    let Ok(mut json) = serde_json::from_slice::<Value>(&body) else {
+        return Ok(super::hyper_client::ProxyResponse::buffered(
+            status, headers, body,
+        ));
+    };
+    adapt_chat_completion(&mut json).map_err(|error| {
+        ProxyError::TransformError(format!("Nexus rejected upstream output: {error}"))
+    })?;
+    let body = serde_json::to_vec(&json)
+        .map(Bytes::from)
+        .map_err(|error| ProxyError::TransformError(error.to_string()))?;
+    strip_entity_headers_for_rebuilt_body(&mut headers);
+    Ok(super::hyper_client::ProxyResponse::buffered(
+        status, headers, body,
+    ))
 }
 
 // ============================================================================
@@ -702,7 +748,19 @@ pub async fn handle_chat_completions(
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
-    let response = result.response;
+    let body_timeout =
+        if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+            std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+        } else {
+            std::time::Duration::ZERO
+        };
+    let response = adapt_chat_passthrough_response(
+        result.response,
+        adapts_reasoning_boundaries(&ctx),
+        ctx.tag,
+        body_timeout,
+    )
+    .await?;
 
     process_response(
         response,
@@ -2060,9 +2118,10 @@ async fn log_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_use_claude_transform_streaming,
-        track_upstream_usage_presence, transform, upstream_body_parse_error,
+        adapt_chat_passthrough_response, body_looks_like_sse, body_snippet,
+        chat_sse_to_response_value, codex_proxy_error_json, responses_sse_to_response_value,
+        should_use_claude_transform_streaming, track_upstream_usage_presence, transform,
+        upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
     use bytes::Bytes;
@@ -2071,6 +2130,48 @@ mod tests {
         atomic::{AtomicBool, Ordering},
         Arc,
     };
+
+    #[tokio::test]
+    async fn generic_chat_adapter_preserves_sse_error_and_rebuilds_headers() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        headers.insert("content-length", "999".parse().unwrap());
+        headers.insert("transfer-encoding", "chunked".parse().unwrap());
+        let error = "event: error\ndata: {\"error\":{\"message\":\"quota\"}}\n\n";
+        let response = crate::proxy::hyper_client::ProxyResponse::streamed(
+            axum::http::StatusCode::OK,
+            headers,
+            futures::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(error))]),
+        );
+
+        let adapted =
+            adapt_chat_passthrough_response(response, true, "test", std::time::Duration::ZERO)
+                .await
+                .unwrap();
+        assert!(adapted.headers().get("content-length").is_none());
+        assert!(adapted.headers().get("transfer-encoding").is_none());
+        assert_eq!(adapted.bytes().await.unwrap(), error);
+    }
+
+    #[tokio::test]
+    async fn generic_chat_adapter_rejects_unexpected_encoded_sse() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("content-type", "text/event-stream".parse().unwrap());
+        headers.insert("content-encoding", "gzip".parse().unwrap());
+        let response = crate::proxy::hyper_client::ProxyResponse::streamed(
+            axum::http::StatusCode::OK,
+            headers,
+            futures::stream::empty::<Result<bytes::Bytes, std::io::Error>>(),
+        );
+
+        let result =
+            adapt_chat_passthrough_response(response, true, "test", std::time::Duration::ZERO)
+                .await;
+        let Err(error) = result else {
+            panic!("encoded SSE should be rejected");
+        };
+        assert!(matches!(error, ProxyError::TransformError(message) if message.contains("gzip")));
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {

@@ -6,10 +6,9 @@ use crate::{
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const TRUNCATED: &str = "upstream output ended at a partial reasoning delimiter";
-const MALFORMED: &str = "upstream output contains malformed reasoning framing";
 const LATE_OUTPUT: &str = "upstream output contains data after finish_reason";
 const TAGS: [(&str, bool); 4] = [
     ("</thinking>", false),
@@ -75,6 +74,7 @@ pub(crate) struct ReasoningFraming {
     opener_decided: bool,
     explicit_open: bool,
     reasoning_emitted: bool,
+    sent_output: bool,
     had_output: bool,
     tool_started: bool,
     finished: bool,
@@ -125,7 +125,8 @@ impl ReasoningFraming {
             return Err(LATE_OUTPUT);
         }
         if !self.content.is_empty() && has_reasoning {
-            return Err(MALFORMED);
+            self.reasoning.push_str(&self.content);
+            self.content.clear();
         }
         self.reasoning
             .push_str(reasoning.as_deref().unwrap_or_default());
@@ -170,6 +171,10 @@ impl ReasoningFraming {
             }
         };
         self.tool_started |= has_tool;
+        self.sent_output |= has_tool
+            || output
+                .as_ref()
+                .is_some_and(|(reasoning, content)| !reasoning.is_empty() || !content.is_empty());
         *reasoning = None;
         *content = None;
         if let Some((reasoning_out, content_out)) = output {
@@ -186,18 +191,6 @@ impl ReasoningFraming {
             && !self.explicit_open)
             .then_some(())
             .ok_or(TRUNCATED)
-    }
-
-    pub(crate) fn finish_fields(
-        &mut self,
-    ) -> Result<(Option<String>, Option<String>), &'static str> {
-        if self.finished {
-            self.validate_done()?;
-            return Ok((None, None));
-        }
-        let (mut reasoning, mut content) = (None, None);
-        self.adapt_fields(&mut reasoning, &mut content, false, true)?;
-        Ok((reasoning, content))
     }
 
     fn prepare_opener(&mut self) -> bool {
@@ -438,25 +431,71 @@ fn indented_line(bytes: &[u8], start: usize, limit: usize) -> bool {
     spaces >= 4 || (start + spaces < limit && bytes[start + spaces] == b'\t')
 }
 
-pub(crate) fn adapt_chat_chunk(
-    chunk: &mut Value,
-    framing: &mut ReasoningFraming,
-) -> Result<(), &'static str> {
+#[cfg(test)]
+fn adapt_chat_chunk(chunk: &mut Value, framing: &mut ReasoningFraming) -> Result<(), &'static str> {
     let Some(choice) = chunk.pointer_mut("/choices/0") else {
         return Ok(());
     };
-    let finish = choice["finish_reason"].as_str().is_some();
-    if finish && !choice["delta"].is_object() {
-        choice["delta"] = Value::Object(Default::default());
-    }
-    let Some(delta) = choice.get_mut("delta") else {
+    adapt_choice(choice, framing, false)
+}
+
+type ChoiceFramings = BTreeMap<u64, ReasoningFraming>;
+
+fn adapt_chat_choices(
+    chunk: &mut Value,
+    framings: &mut ChoiceFramings,
+    flatten_messages: bool,
+) -> Result<(), &'static str> {
+    let Some(choices) = chunk.get_mut("choices").and_then(Value::as_array_mut) else {
         return Ok(());
     };
-    let has_tool = delta["tool_calls"]
+    for (position, choice) in choices.iter_mut().enumerate() {
+        if !choice.is_object() {
+            continue;
+        }
+        let index = choice["index"].as_u64().unwrap_or(position as u64);
+        adapt_choice(choice, framings.entry(index).or_default(), flatten_messages)?;
+    }
+    Ok(())
+}
+
+fn adapt_choice(
+    choice: &mut Value,
+    framing: &mut ReasoningFraming,
+    flatten_message: bool,
+) -> Result<(), &'static str> {
+    let finish = choice["finish_reason"].as_str().is_some();
+    let delta_nonempty = choice["delta"]
+        .as_object()
+        .is_some_and(|delta| !delta.is_empty());
+    let use_message = choice["message"].is_object() && !delta_nonempty;
+    let field = if use_message { "message" } else { "delta" };
+    if finish && !choice[field].is_object() {
+        choice[field] = Value::Object(Default::default());
+    }
+    let Some(payload) = choice.get_mut(field) else {
+        return Ok(());
+    };
+    let has_tool = payload["tool_calls"]
         .as_array()
         .is_some_and(|calls| !calls.is_empty())
-        || delta["function_call"].is_object();
-    adapt_value_fields(delta, framing, has_tool, finish, true)
+        || payload["function_call"].is_object();
+    if !use_message {
+        return adapt_value_fields(payload, framing, has_tool, finish, true);
+    }
+
+    if flatten_message && (framing.sent_output || framing.finished || framing.tool_started) {
+        return Err(LATE_OUTPUT);
+    }
+    let mut snapshot = ReasoningFraming::default();
+    adapt_value_fields(payload, &mut snapshot, has_tool, finish, false)?;
+    if flatten_message {
+        let delta = payload.take();
+        choice.as_object_mut().unwrap().remove("message");
+        choice["delta"] = delta;
+    }
+    *framing = snapshot;
+    Ok(())
 }
 
 fn adapt_value_fields(
@@ -469,6 +508,9 @@ fn adapt_value_fields(
     let mut reasoning = extract_reasoning_field_text(value);
     let mut content = value["content"].as_str().map(str::to_string);
     let had_content = content.is_some();
+    let has_opaque_content = value
+        .get("content")
+        .is_some_and(|content| !content.is_string() && value_is_meaningful(content));
     if !streaming
         && !finish
         && (reasoning.as_deref().is_some_and(|text| !text.is_empty())
@@ -477,11 +519,13 @@ fn adapt_value_fields(
         return Err(TRUNCATED);
     }
     framing.adapt_fields(&mut reasoning, &mut content, has_tool, finish)?;
+    framing.had_output |= has_opaque_content;
+    framing.sent_output |= has_opaque_content;
     if let Some(object) = value.as_object_mut() {
         for field in ["reasoning_content", "reasoning", "reasoning_details"] {
             object.remove(field);
         }
-        if streaming {
+        if streaming && had_content {
             object.remove("content");
         }
     }
@@ -502,10 +546,23 @@ fn adapt_value_fields(
 pub fn adapt_chat_sse_stream<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    adapt_chat_sse_stream_with_errors(stream, false)
+}
+
+pub fn adapt_chat_passthrough_sse_stream<E: std::error::Error + Send + 'static>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    adapt_chat_sse_stream_with_errors(stream, true)
+}
+
+fn adapt_chat_sse_stream_with_errors<E: std::error::Error + Send + 'static>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    passthrough: bool,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder = Vec::new();
-        let mut framing = ReasoningFraming::default();
+        let mut framings = ChoiceFramings::new();
         tokio::pin!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -521,14 +578,15 @@ pub fn adapt_chat_sse_stream<E: std::error::Error + Send + 'static>(
                 let event = block
                     .lines()
                     .find_map(|line| strip_sse_field(line, "event"))
-                    .map(str::trim);
+                    .map(str::trim)
+                    .map(str::to_string);
                 let data = block
                     .lines()
                     .filter_map(|line| strip_sse_field(line, "data"))
                     .collect::<Vec<_>>()
                     .join("\n");
                 if data.trim() == "[DONE]" {
-                    match terminal_chunk(&mut framing) {
+                    match terminal_chunk(&mut framings) {
                         Ok(Some(chunk)) => yield Ok(chunk),
                         Ok(None) => {}
                         Err(error) => {
@@ -540,7 +598,11 @@ pub fn adapt_chat_sse_stream<E: std::error::Error + Send + 'static>(
                     return;
                 }
 
-                if event.is_some_and(|event| event.eq_ignore_ascii_case("error")) {
+                if event.as_deref().is_some_and(|event| event.eq_ignore_ascii_case("error")) {
+                    if passthrough {
+                        yield Ok(Bytes::from(format!("{block}\n\n")));
+                        return;
+                    }
                     let error = serde_json::from_str(&data)
                         .unwrap_or_else(|_| Value::String(data.clone()));
                     yield Err(std::io::Error::other(upstream_error_message(&error)));
@@ -551,17 +613,21 @@ pub fn adapt_chat_sse_stream<E: std::error::Error + Send + 'static>(
                     continue;
                 };
                 if chunk.get("error").is_some_and(value_is_meaningful) {
+                    if passthrough {
+                        yield Ok(Bytes::from(format!("{block}\n\n")));
+                        return;
+                    }
                     yield Err(std::io::Error::other(upstream_error_message(&chunk)));
                     return;
                 }
                 if let Some(object) = chunk.as_object_mut() {
                     object.remove("error");
                 }
-                if let Err(error) = adapt_chat_chunk(&mut chunk, &mut framing) {
+                if let Err(error) = adapt_chat_choices(&mut chunk, &mut framings, !passthrough) {
                     yield Err(std::io::Error::new(std::io::ErrorKind::InvalidData, error));
                     return;
                 }
-                yield Ok(chat_sse(event, chunk));
+                yield Ok(chat_sse(event.as_deref(), chunk));
             }
         }
 
@@ -569,35 +635,45 @@ pub fn adapt_chat_sse_stream<E: std::error::Error + Send + 'static>(
             yield Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, TRUNCATED));
             return;
         }
-        if !framing.finished || framing.validate_done().is_err() {
+        if framings.is_empty()
+            || framings
+                .values()
+                .any(|framing| !framing.finished || framing.validate_done().is_err())
+        {
             yield Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, TRUNCATED));
         }
     }
 }
 
-fn terminal_chunk(framing: &mut ReasoningFraming) -> Result<Option<Bytes>, &'static str> {
-    if !framing.finished && !framing.had_output {
+fn terminal_chunk(framings: &mut ChoiceFramings) -> Result<Option<Bytes>, &'static str> {
+    if framings.is_empty() {
         return Err(TRUNCATED);
     }
-    let already_finished = framing.finished;
-    let (reasoning, content) = framing.finish_fields()?;
-    if already_finished {
-        return Ok(None);
-    }
-    let mut delta = serde_json::Map::new();
-    if let Some(reasoning) = reasoning {
-        delta.insert("reasoning_content".into(), reasoning.into());
-    }
-    if let Some(content) = content {
-        delta.insert("content".into(), content.into());
-    }
-    Ok(Some(chat_sse(
-        None,
-        serde_json::json!({"choices": [{
+    let mut choices = Vec::new();
+    for (index, framing) in framings {
+        if framing.finished {
+            framing.validate_done()?;
+            continue;
+        }
+        if !framing.had_output {
+            return Err(TRUNCATED);
+        }
+        let (mut reasoning, mut content) = (None, None);
+        framing.adapt_fields(&mut reasoning, &mut content, false, true)?;
+        let mut delta = serde_json::Map::new();
+        if let Some(reasoning) = reasoning {
+            delta.insert("reasoning_content".into(), reasoning.into());
+        }
+        if let Some(content) = content {
+            delta.insert("content".into(), content.into());
+        }
+        choices.push(serde_json::json!({
+            "index": index,
             "delta": delta,
             "finish_reason": if framing.tool_started { "tool_calls" } else { "stop" }
-        }]}),
-    )))
+        }));
+    }
+    Ok((!choices.is_empty()).then(|| chat_sse(None, serde_json::json!({"choices": choices}))))
 }
 
 fn value_is_meaningful(value: &Value) -> bool {
@@ -624,22 +700,26 @@ fn upstream_error_message(chunk: &Value) -> String {
 
 fn chat_sse(event: Option<&str>, chunk: Value) -> Bytes {
     let event = event.map_or_else(String::new, |event| format!("event: {event}\n"));
-    Bytes::from(format!(
-        "{event}data: {}\n\n",
-        serde_json::to_string(&chunk).unwrap_or_default()
-    ))
+    Bytes::from(format!("{event}data: {chunk}\n\n"))
 }
 
 pub fn adapt_chat_completion(body: &mut Value) -> Result<(), &'static str> {
-    let finish = body
-        .pointer("/choices/0/finish_reason")
-        .and_then(Value::as_str)
-        .is_some();
-    let Some(message) = body.pointer_mut("/choices/0/message") else {
+    let Some(choices) = body.get_mut("choices").and_then(Value::as_array_mut) else {
         return Ok(());
     };
-    let mut framing = ReasoningFraming::default();
-    adapt_value_fields(message, &mut framing, false, finish, false)
+    for choice in choices {
+        let finish = choice["finish_reason"].as_str().is_some();
+        let Some(message) = choice.get_mut("message") else {
+            continue;
+        };
+        let has_tool = message["tool_calls"]
+            .as_array()
+            .is_some_and(|calls| !calls.is_empty())
+            || message["function_call"].is_object();
+        let mut framing = ReasoningFraming::default();
+        adapt_value_fields(message, &mut framing, has_tool, finish, false)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -756,26 +836,29 @@ fn split_reasoning_with_state(
         if let Some((tag, opening)) = TAGS.iter().find(|(tag, _)| rest.starts_with(tag)) {
             append(phase, &text[cursor..i], &mut out);
             if *opening {
-                if explicit_open
-                    || phase == Phase::Content
-                    || (phase == Phase::Prefix && !out[1].trim().is_empty())
-                    || (phase == Phase::Reasoning
-                        && (reasoning_emitted || !out[0].trim().is_empty()))
-                {
-                    return Err(MALFORMED);
+                match phase {
+                    Phase::Reasoning => explicit_open = true,
+                    Phase::Prefix if out[1].trim().is_empty() => {
+                        out[1].clear();
+                        phase = Phase::Reasoning;
+                        explicit_open = true;
+                    }
+                    Phase::Prefix => {
+                        let prefix = std::mem::take(&mut out[1]);
+                        out[2].push_str(&prefix);
+                        phase = Phase::Content;
+                        explicit_open = false;
+                    }
+                    Phase::Content => explicit_open = false,
                 }
-                out[1].clear();
-                phase = Phase::Reasoning;
-                explicit_open = true;
             } else {
-                if phase == Phase::Content {
-                    return Err(MALFORMED);
-                }
                 if phase == Phase::Prefix {
                     let prefix = std::mem::take(&mut out[1]);
                     out[0].push_str(&prefix);
                 }
-                phase = Phase::Content;
+                if phase != Phase::Content {
+                    phase = Phase::Content;
+                }
                 explicit_open = false;
             }
             i += tag.len();
@@ -795,9 +878,6 @@ fn split_reasoning_with_state(
         i += text[i..].chars().next().unwrap().len_utf8();
     }
     append(phase, &text[cursor..], &mut out);
-    if explicit_open {
-        return Err(TRUNCATED);
-    }
     let prefix = std::mem::take(&mut out[1]);
     out[2].push_str(&prefix);
     Ok((out[0].to_string(), out[2].to_string()))
@@ -873,7 +953,7 @@ mod tests {
             .filter_map(|block| block.strip_prefix("data: "))
         {
             if data.trim() == "[DONE]" {
-                let (reasoning, content) = framing.finish_fields().unwrap();
+                let (reasoning, content) = fields(&mut framing, None, None, false, true).unwrap();
                 text.0.push_str(reasoning.as_deref().unwrap_or_default());
                 text.1.push_str(content.as_deref().unwrap_or_default());
                 continue;
@@ -896,6 +976,20 @@ mod tests {
             .collect::<Vec<_>>();
         let stream = stream::iter(chunks);
         let bytes = adapt_chat_sse_stream(stream)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(String::from_utf8(bytes.concat()).unwrap())
+    }
+
+    async fn adapted_passthrough_stream(chunks: Vec<&str>) -> Result<String, std::io::Error> {
+        let chunks = chunks
+            .into_iter()
+            .map(|chunk| Ok::<_, std::io::Error>(Bytes::copy_from_slice(chunk.as_bytes())))
+            .collect::<Vec<_>>();
+        let stream = stream::iter(chunks);
+        let bytes = adapt_chat_passthrough_sse_stream(stream)
             .collect::<Vec<_>>()
             .await
             .into_iter()
@@ -976,6 +1070,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_passthrough_preserves_structured_error_and_stops() {
+        for error in [
+            "event: error\ndata: {\"message\":\"quota\"}\n\n",
+            "data: {\"error\":{\"message\":\"quota\",\"type\":\"rate_limit\"}}\n\n",
+        ] {
+            let output = adapted_passthrough_stream(vec![error, DONE]).await.unwrap();
+            assert_eq!(output, error);
+        }
+    }
+
+    #[tokio::test]
+    async fn adapts_every_choice_and_message_snapshot() {
+        let output = adapted_stream(vec![
+            concat!(
+                "data: {\"choices\":[",
+                "{\"index\":0,\"delta\":{\"reasoning_content\":\"<think>r0\",\"content\":\"</think>a0\"},\"finish_reason\":\"stop\"},",
+                "{\"index\":1,\"delta\":{\"reasoning_content\":\"<thinking>r1\",\"content\":\"</thinking>a1\"},\"finish_reason\":\"stop\"}",
+                "]}\n\n"
+            ),
+            DONE,
+        ])
+        .await
+        .unwrap();
+        let event = &json_events(&output)[0];
+        for (index, reasoning, content) in [(0, "r0", "a0"), (1, "r1", "a1")] {
+            let choice = &event["choices"][index];
+            assert_eq!(choice["delta"]["reasoning_content"], reasoning);
+            assert_eq!(choice["delta"]["content"], content);
+        }
+
+        let output = adapted_stream(vec![
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"message\":{\"role\":\"assistant\",\"reasoning_content\":\"<think>plan\",\"content\":\"</think>answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            DONE,
+        ])
+        .await
+        .unwrap();
+        let choice = &json_events(&output)[0]["choices"][0];
+        assert_eq!(choice["delta"]["reasoning_content"], "plan");
+        assert_eq!(choice["delta"]["content"], "answer");
+        assert!(!output.contains("<think>"));
+        assert!(!output.contains("</think>"));
+
+        let passthrough = adapted_passthrough_stream(vec![
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"message\":{\"role\":\"assistant\",\"reasoning_content\":\"<think>plan\",\"content\":\"</think>answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            DONE,
+        ])
+        .await
+        .unwrap();
+        let choice = &json_events(&passthrough)[0]["choices"][0];
+        assert_eq!(choice["message"]["reasoning_content"], "plan");
+        assert_eq!(choice["message"]["content"], "answer");
+
+        let (codex, claude) = protocol_outputs(
+            b"data: {\"choices\":[{\"index\":0,\"delta\":{},\"message\":{\"role\":\"assistant\",\"reasoning_content\":\"<think>plan\",\"content\":\"</think>answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        )
+        .await;
+        assert!(codex.contains("plan"));
+        assert!(codex.contains("answer"));
+        assert!(codex.contains("event: response.completed"));
+        assert!(!codex.contains("event: response.failed"));
+        assert!(claude.contains("plan"));
+        assert!(claude.contains("answer"));
+        assert!(claude.contains("event: message_stop"));
+        assert!(!claude.contains("event: error"));
+
+        let output = adapted_stream(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":\"draft\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"message\":{\"role\":\"assistant\",\"content\":\"final answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            DONE,
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            json_events(&output)[1]["choices"][0]["delta"]["content"],
+            "final answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn transformed_snapshot_rejects_prior_emitted_output() {
+        let error = adapted_stream(vec![
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"message\":{\"role\":\"assistant\",\"reasoning_content\":\"plan revised\",\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            DONE,
+        ])
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(error.to_string(), LATE_OUTPUT);
+    }
+
+    #[tokio::test]
+    async fn preserves_opaque_content_shape() {
+        let output = adapted_stream(vec![
+            "data: {\"choices\":[{\"delta\":{\"content\":[{\"type\":\"text\",\"text\":\"answer\"}]},\"finish_reason\":\"stop\"}]}\n\n",
+            DONE,
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            json_events(&output)[0]["choices"][0]["delta"]["content"],
+            serde_json::json!([{"type": "text", "text": "answer"}])
+        );
+    }
+
+    #[test]
+    fn nonstream_adapts_every_choice() {
+        let mut body = serde_json::json!({"choices": [
+            {"message": {"reasoning_content": "r0", "content": "</think>a0"}, "finish_reason": "stop"},
+            {"message": {"reasoning_content": "r1", "content": "</thinking>a1"}, "finish_reason": "stop"}
+        ]});
+        adapt_chat_completion(&mut body).unwrap();
+        assert_eq!(body["choices"][0]["message"]["reasoning_content"], "r0");
+        assert_eq!(body["choices"][0]["message"]["content"], "a0");
+        assert_eq!(body["choices"][1]["message"]["reasoning_content"], "r1");
+        assert_eq!(body["choices"][1]["message"]["content"], "a1");
+    }
+
+    #[tokio::test]
     async fn empty_error_placeholders_do_not_truncate_stream() {
         for placeholder in ["null", "{}", "{\"message\":\"\"}", "false", "0"] {
             let chunk = format!(
@@ -1029,14 +1242,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incomplete_delimiter_fails_at_done() {
-        let error = adapted_stream(vec![
+    async fn complete_opener_is_implicitly_closed_at_done() {
+        let output = adapted_stream(vec![
             "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"<think>plan\"}}]}\n\n",
             DONE,
         ])
         .await
-        .unwrap_err();
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        .unwrap();
+        assert!(output.contains("\"reasoning_content\":\"plan\""));
+        assert!(!output.contains("<think>"));
+        assert!(output.contains("data: [DONE]"));
     }
 
     #[tokio::test]
@@ -1145,14 +1360,33 @@ mod tests {
         assert!(claude.contains("event: message_stop"));
         assert!(!claude.contains("event: error"));
 
+        let (codex, claude) = protocol_outputs(concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"continued \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"analysis\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"</think>answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        ).as_bytes()).await;
+        for output in [&codex, &claude] {
+            assert!(output.contains("plan "));
+            assert!(output.contains("continued "));
+            assert!(output.contains("analysis"));
+            assert!(output.contains("answer"));
+            assert!(!output.contains("</think>"));
+        }
+        assert!(codex.contains("event: response.completed"));
+        assert!(claude.contains("event: message_stop"));
+
         let (codex, claude) = protocol_outputs(
             b"data: {\"choices\":[{\"delta\":{\"content\":\"<think>unfinished\"}}]}\n\ndata: [DONE]\n\n",
         )
         .await;
-        assert!(codex.contains("event: response.failed"));
-        assert!(!codex.contains("event: response.completed"));
-        assert!(claude.contains("event: error"));
-        assert!(!claude.contains("event: message_stop"));
+        assert!(codex.contains("unfinished"));
+        assert!(codex.contains("event: response.completed"));
+        assert!(!codex.contains("<think>"));
+        assert!(claude.contains("unfinished"));
+        assert!(claude.contains("event: message_stop"));
+        assert!(!claude.contains("<think>"));
     }
 
     #[test]
@@ -1227,25 +1461,28 @@ mod tests {
     }
 
     #[test]
-    fn accepts_one_transition_and_rejects_malformed_framing() {
+    fn normalizes_redundant_sentinels_and_rejects_partial_tags() {
         assert_eq!(
             split_reasoning("", "<thinking>mismatched</think>answer"),
             Ok(("mismatched".into(), "answer".into()))
         );
         assert_eq!(
             split_reasoning("", "answer<think>late</think>"),
-            Err(MALFORMED)
+            Ok(("".into(), "answerlate".into()))
         );
-        for (reasoning, content, error) in [
-            ("", "<think>missing close", TRUNCATED),
-            ("", "<think>nested<think>x</think>", MALFORMED),
-            ("", "a</think>b</think>c", MALFORMED),
-            ("", "a</think></thinking>b", MALFORMED),
-            ("plan<thi", "nk>answer", MALFORMED),
-            ("", "answer</thi", TRUNCATED),
+        for (reasoning, content, expected) in [
+            ("", "<think>missing close", ("missing close", "")),
+            ("", "<think>nested<think>x</think>", ("nestedx", "")),
+            ("", "a</think>b</think>c", ("a", "bc")),
+            ("", "a</think></thinking>b", ("a", "b")),
+            ("plan<thi", "nk>answer", ("plananswer", "")),
         ] {
-            assert_eq!(split_reasoning(reasoning, content), Err(error));
+            assert_eq!(
+                split_reasoning(reasoning, content),
+                Ok((expected.0.into(), expected.1.into()))
+            );
         }
+        assert_eq!(split_reasoning("", "answer</thi"), Err(TRUNCATED));
     }
 
     #[test]
@@ -1376,7 +1613,7 @@ mod tests {
         );
         assert_eq!(
             fields(&mut framing, None, None, false, true),
-            Err(TRUNCATED)
+            Ok((None, None))
         );
 
         let mut framing = ReasoningFraming::default();
@@ -1386,7 +1623,7 @@ mod tests {
         );
         assert_eq!(
             fields(&mut framing, Some("<think>x</think>"), None, false, true),
-            Err(MALFORMED)
+            Ok((Some("x".into()), None))
         );
     }
 
@@ -1562,7 +1799,10 @@ mod tests {
         let (reasoning, _) =
             fields(&mut framing, Some("plan</think>answer"), None, false, false).unwrap();
         assert_eq!(reasoning.as_deref(), Some("plan"));
-        assert_eq!(framing.finish_fields(), Ok((None, Some("answer".into()))));
+        assert_eq!(
+            fields(&mut framing, None, None, false, true),
+            Ok((None, Some("answer".into())))
+        );
 
         let mut framing = ReasoningFraming::default();
         fields(&mut framing, None, Some("answer"), false, false).unwrap();
@@ -1603,12 +1843,26 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reasoning_after_content_or_tool_start() {
+    fn preserves_interleaved_reasoning_and_rejects_output_after_tools() {
         let mut framing = ReasoningFraming::default();
         fields(&mut framing, None, Some("answer"), false, false).unwrap();
+        let (reasoning, content) =
+            fields(&mut framing, Some("late reasoning"), None, false, true).unwrap();
         assert_eq!(
-            fields(&mut framing, Some("late reasoning"), None, false, false),
-            Err(MALFORMED)
+            (reasoning.as_deref(), content.as_deref()),
+            (Some("answerlate reasoning"), None)
+        );
+
+        let interleaved = concat!(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"plan \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"continued \"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"analysis\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"</think>answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        assert_eq!(
+            adapted_text(interleaved),
+            ("plan continued analysis".into(), "answer".into())
         );
 
         let mut framing = ReasoningFraming::default();
