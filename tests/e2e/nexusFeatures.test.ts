@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
+import { NEXUS_CAPABILITIES } from "@/config/nexusCapabilities";
 
 describe("Nexus Composer preset arrays", () => {
   it("Claude presets contain exactly Nexus GLM-5.2 and Claude Official", () => {
@@ -66,6 +67,13 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
     expect(nexus.apiFormat).toBe("openai_chat");
   });
 
+  it("stores internal capabilities without a bundled credential", () => {
+    const nexus = providerPresets.find((p) => p.name === "Nexus")!;
+    const settings = nexus.settingsConfig as any;
+    expect(settings.nexusCapabilities).toEqual(NEXUS_CAPABILITIES);
+    expect(settings.env.ANTHROPIC_AUTH_TOKEN).toBe("");
+  });
+
   it("has the nexus icon", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.icon).toBe("nexus");
@@ -87,6 +95,12 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
   it("uses openai_chat format for proxy conversion", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus")!;
     expect(nexus.apiFormat).toBe("openai_chat");
+  });
+
+  it("declares internal capabilities without a bundled credential", () => {
+    const nexus = codexProviderPresets.find((p) => p.name === "Nexus")!;
+    expect(nexus.nexusCapabilities).toEqual(NEXUS_CAPABILITIES);
+    expect(nexus.auth.OPENAI_API_KEY).toBe("");
   });
 
   it("has model catalog with correct context window", () => {

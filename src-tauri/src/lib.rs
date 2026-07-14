@@ -484,6 +484,10 @@ pub fn run() {
                 }
             }
 
+            if let Err(e) = db.backfill_legacy_nexus_capabilities() {
+                log::warn!("Failed to backfill Nexus provider capabilities: {e}");
+            }
+
             let app_state = AppState::new(db);
 
             // 设置 AppHandle 用于代理故障转移时的 UI 更新

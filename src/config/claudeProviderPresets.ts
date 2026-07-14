@@ -2,6 +2,7 @@
  * 预设供应商配置模板
  */
 import { ProviderCategory } from "../types";
+import { NEXUS_CAPABILITIES } from "./nexusCapabilities";
 
 export interface TemplateValueConfig {
   label: string;
@@ -82,9 +83,10 @@ export const providerPresets: ProviderPreset[] = [
     nameKey: "providerForm.presets.nexus",
     websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
     settingsConfig: {
+      nexusCapabilities: NEXUS_CAPABILITIES,
       env: {
         ANTHROPIC_BASE_URL: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
-        ANTHROPIC_AUTH_TOKEN: "onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc",
+        ANTHROPIC_AUTH_TOKEN: "",
         ANTHROPIC_MODEL: "glm-5.2",
         ANTHROPIC_DEFAULT_HAIKU_MODEL: "glm-5.2",
         ANTHROPIC_DEFAULT_SONNET_MODEL: "glm-5.2",

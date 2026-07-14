@@ -29,6 +29,7 @@ pub(crate) fn sanitize_claude_settings_for_live(settings: &Value) -> Value {
         obj.remove("apiFormat");
         obj.remove("openrouter_compat_mode");
         obj.remove("openrouterCompatMode");
+        obj.remove("nexusCapabilities");
     }
     v
 }
@@ -306,6 +307,13 @@ fn remove_toml_table_like(target: &mut dyn TableLike, source: &dyn TableLike) {
     }
 }
 
+fn sanitize_claude_common_config(mut source: Value) -> Value {
+    if let Some(obj) = source.as_object_mut() {
+        obj.remove("nexusCapabilities");
+    }
+    source
+}
+
 fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet: &str) -> bool {
     let trimmed = snippet.trim();
     if trimmed.is_empty() {
@@ -314,7 +322,11 @@ fn settings_contain_common_config(app_type: &AppType, settings: &Value, snippet:
 
     match app_type {
         AppType::Claude => match serde_json::from_str::<Value>(trimmed) {
-            Ok(source) if source.is_object() => json_is_subset(settings, &source),
+            Ok(source) if source.is_object() => {
+                let source = sanitize_claude_common_config(source);
+                source.as_object().is_some_and(|obj| !obj.is_empty())
+                    && json_is_subset(settings, &source)
+            }
             _ => false,
         },
         AppType::Codex => {
@@ -380,8 +392,10 @@ pub(crate) fn remove_common_config_from_settings(
 
     match app_type {
         AppType::Claude => {
-            let source = serde_json::from_str::<Value>(trimmed)
-                .map_err(|e| AppError::Message(format!("Invalid Claude common config: {e}")))?;
+            let source = sanitize_claude_common_config(
+                serde_json::from_str::<Value>(trimmed)
+                    .map_err(|e| AppError::Message(format!("Invalid Claude common config: {e}")))?,
+            );
             let mut result = settings.clone();
             json_deep_remove(&mut result, &source);
             Ok(result)
@@ -435,8 +449,10 @@ fn apply_common_config_to_settings(
 
     match app_type {
         AppType::Claude => {
-            let source = serde_json::from_str::<Value>(trimmed)
-                .map_err(|e| AppError::Message(format!("Invalid Claude common config: {e}")))?;
+            let source = sanitize_claude_common_config(
+                serde_json::from_str::<Value>(trimmed)
+                    .map_err(|e| AppError::Message(format!("Invalid Claude common config: {e}")))?,
+            );
             let mut result = settings.clone();
             json_deep_merge(&mut result, &source);
             Ok(result)
@@ -575,11 +591,18 @@ fn restore_live_settings_for_provider_backfill(
     provider: &Provider,
     live_settings: Value,
 ) -> Value {
-    if !matches!(app_type, AppType::Codex) {
-        return live_settings;
+    let mut settings = live_settings;
+    if let Some(obj) = settings.as_object_mut() {
+        obj.remove("nexusCapabilities");
+        if let Some(stored) = provider.settings_config.get("nexusCapabilities") {
+            obj.insert("nexusCapabilities".to_string(), stored.clone());
+        }
     }
 
-    let mut settings = live_settings;
+    if !matches!(app_type, AppType::Codex) {
+        return settings;
+    }
+
     let restore_provider_token =
         crate::codex_config::should_restore_codex_provider_token_for_backfill(
             provider.category.as_deref(),
@@ -1607,6 +1630,128 @@ pub fn remove_openclaw_provider_from_live(provider_id: &str) -> Result<(), AppEr
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn claude_live_settings_exclude_internal_capabilities() {
+        let stored = json!({
+            "nexusCapabilities": { "reasoningBoundary": "think_close" },
+            "env": { "ANTHROPIC_MODEL": "glm-5.2" }
+        });
+
+        let live = sanitize_claude_settings_for_live(&stored);
+
+        assert!(live.get("nexusCapabilities").is_none());
+        assert_eq!(live["env"], stored["env"]);
+        assert!(stored.get("nexusCapabilities").is_some());
+    }
+
+    #[test]
+    fn switch_backfill_restores_stored_capabilities_for_claude_and_codex() {
+        for (app_type, stored, live) in [
+            (
+                AppType::Claude,
+                json!({
+                    "nexusCapabilities": { "reasoningBoundary": "think_close" },
+                    "env": {}
+                }),
+                json!({ "env": {} }),
+            ),
+            (
+                AppType::Codex,
+                json!({
+                    "nexusCapabilities": { "reasoningBoundary": "think_close" },
+                    "auth": {},
+                    "config": ""
+                }),
+                json!({ "auth": {}, "config": "" }),
+            ),
+        ] {
+            let provider =
+                Provider::with_id("nexus".to_string(), "Nexus".to_string(), stored, None);
+
+            let result = restore_live_settings_for_provider_backfill(&app_type, &provider, live);
+
+            assert_eq!(
+                result.pointer("/nexusCapabilities/reasoningBoundary"),
+                Some(&json!("think_close")),
+                "{} switch-backfill must keep internal capabilities",
+                app_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn switch_backfill_drops_live_only_capabilities_for_claude_and_codex() {
+        for app_type in [AppType::Claude, AppType::Codex] {
+            let provider = Provider::with_id(
+                "other".to_string(),
+                "Other".to_string(),
+                json!({ "auth": {}, "config": "", "env": {} }),
+                None,
+            );
+            let live = json!({
+                "auth": {},
+                "config": "",
+                "env": {},
+                "nexusCapabilities": { "reasoningBoundary": "think_close" }
+            });
+
+            let result = restore_live_settings_for_provider_backfill(&app_type, &provider, live);
+
+            assert!(
+                result.get("nexusCapabilities").is_none(),
+                "{} switch-backfill must discard live-only capabilities",
+                app_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn claude_common_config_removal_preserves_internal_capabilities() {
+        let settings = json!({
+            "nexusCapabilities": { "reasoningBoundary": "think_close" },
+            "theme": "dark"
+        });
+        let snippet = r#"{
+  "nexusCapabilities": { "reasoningBoundary": "think_close" },
+  "theme": "dark"
+}"#;
+
+        let stripped =
+            remove_common_config_from_settings(&AppType::Claude, &settings, snippet).unwrap();
+
+        assert_eq!(
+            stripped.get("nexusCapabilities"),
+            settings.get("nexusCapabilities")
+        );
+        assert!(stripped.get("theme").is_none());
+    }
+
+    #[test]
+    fn claude_common_config_apply_and_subset_ignore_internal_capabilities() {
+        let settings = json!({ "theme": "dark" });
+        let internal_only = r#"{ "nexusCapabilities": { "reasoningBoundary": "think_close" } }"#;
+        let snippet = r#"{
+  "nexusCapabilities": { "reasoningBoundary": "think_close" },
+  "theme": "dark"
+}"#;
+
+        assert!(!settings_contain_common_config(
+            &AppType::Claude,
+            &settings,
+            internal_only
+        ));
+        assert!(settings_contain_common_config(
+            &AppType::Claude,
+            &settings,
+            snippet
+        ));
+        let applied =
+            apply_common_config_to_settings(&AppType::Claude, &json!({}), snippet).unwrap();
+
+        assert!(applied.get("nexusCapabilities").is_none());
+        assert_eq!(applied.get("theme"), Some(&json!("dark")));
+    }
 
     #[test]
     fn claude_common_config_apply_and_remove_roundtrip_for_non_overlapping_fields() {

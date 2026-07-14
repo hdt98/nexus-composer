@@ -32,6 +32,7 @@ import {
   codexProviderPresets,
   type CodexProviderPreset,
 } from "@/config/codexProviderPresets";
+import type { NexusCapabilities } from "@/config/nexusCapabilities";
 import {
   geminiProviderPresets,
   type GeminiProviderPreset,
@@ -1269,6 +1270,9 @@ function ProviderFormFull({
     if (appId === "codex") {
       try {
         const authJson = JSON.parse(codexAuth);
+        const formSettings = JSON.parse(values.settingsConfig) as {
+          nexusCapabilities?: NexusCapabilities;
+        };
         let normalizedCodexConfig =
           category !== "official" && (codexConfig ?? "").trim()
             ? setCodexWireApi(codexConfig ?? "", "responses")
@@ -1294,9 +1298,13 @@ function ProviderFormFull({
           auth: unknown;
           config: string;
           modelCatalog?: { models: CodexCatalogModel[] };
+          nexusCapabilities?: NexusCapabilities;
         };
         if (normalizedCatalogModels.length > 0) {
           configObj.modelCatalog = { models: normalizedCatalogModels };
+        }
+        if (formSettings.nexusCapabilities) {
+          configObj.nexusCapabilities = formSettings.nexusCapabilities;
         }
         settingsConfig = JSON.stringify(configObj);
       } catch (err) {
@@ -1671,7 +1679,17 @@ function ProviderFormFull({
       form.reset({
         name: preset.nameKey ? t(preset.nameKey) : preset.name,
         websiteUrl: preset.websiteUrl ?? "",
-        settingsConfig: JSON.stringify({ auth, config }, null, 2),
+        settingsConfig: JSON.stringify(
+          {
+            auth,
+            config,
+            ...(preset.nexusCapabilities
+              ? { nexusCapabilities: preset.nexusCapabilities }
+              : {}),
+          },
+          null,
+          2,
+        ),
         icon: preset.icon ?? "",
         iconColor: preset.iconColor ?? "",
       });

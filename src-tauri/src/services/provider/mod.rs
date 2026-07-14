@@ -731,6 +731,21 @@ mod tests {
     }
 
     #[test]
+    fn extract_claude_common_config_excludes_internal_nexus_capabilities() {
+        let settings = json!({
+            "nexusCapabilities": { "reasoningBoundary": "think_close" },
+            "theme": "dark"
+        });
+
+        let snippet = ProviderService::extract_claude_common_config(&settings)
+            .expect("extract should succeed");
+        let value: Value = serde_json::from_str(&snippet).expect("snippet is valid JSON");
+
+        assert!(value.get("nexusCapabilities").is_none());
+        assert_eq!(value.get("theme"), Some(&json!("dark")));
+    }
+
+    #[test]
     fn validate_provider_settings_rejects_negative_cost_multiplier() {
         let mut provider = Provider::with_id(
             "claude".into(),
@@ -2649,6 +2664,7 @@ impl ProviderService {
 
         const TOP_LEVEL_EXCLUDES: &[&str] = &[
             "apiBaseUrl",
+            "nexusCapabilities",
             // Legacy model fields
             "primaryModel",
             "smallFastModel",

@@ -8,6 +8,10 @@ import type {
   CodexChatReasoning,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
+import {
+  NEXUS_CAPABILITIES,
+  type NexusCapabilities,
+} from "./nexusCapabilities";
 
 export interface CodexProviderPreset {
   name: string;
@@ -36,6 +40,7 @@ export interface CodexProviderPreset {
   modelCatalog?: CodexCatalogModel[];
   // Codex Responses -> Chat Completions reasoning capability defaults
   codexChatReasoning?: CodexChatReasoning;
+  nexusCapabilities?: NexusCapabilities;
 }
 
 /**
@@ -109,7 +114,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     name: "Nexus",
     nameKey: "providerForm.presets.nexus",
     websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
-    auth: generateThirdPartyAuth("onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc"),
+    auth: generateThirdPartyAuth(""),
     config: generateThirdPartyConfig(
       "nexus_glm",
       "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
@@ -117,6 +122,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     ),
     endpointCandidates: ["https://glm-test-glm52-tp4.onenexus-do.cloud/v1"],
     apiFormat: "openai_chat",
+    nexusCapabilities: NEXUS_CAPABILITIES,
     modelCatalog: modelCatalog([
       {
         model: "glm-5.2",

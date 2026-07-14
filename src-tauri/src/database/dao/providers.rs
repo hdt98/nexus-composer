@@ -3,7 +3,79 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+
+// Exact PR1 preset signature for the one-time compatibility backfill. Durable
+// Nexus endpoint/model configuration remains owned by the frontend presets.
+const LEGACY_NEXUS_NAMES: [&str; 2] = ["Nexus", "Nexus GLM-5.2"];
+const LEGACY_NEXUS_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
+const LEGACY_NEXUS_MODEL: &str = "glm-5.2";
+
+fn is_exact_legacy_nexus(app_type: &str, provider: &Provider) -> bool {
+    if !LEGACY_NEXUS_NAMES.contains(&provider.name.as_str())
+        || provider.website_url.as_deref() != Some(LEGACY_NEXUS_ENDPOINT)
+        || provider.category.as_deref() != Some("third_party")
+        || provider.icon.as_deref() != Some("nexus")
+        || provider.icon_color.as_deref() != Some("#6366F1")
+        || provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.api_format.as_deref())
+            != Some("openai_chat")
+    {
+        return false;
+    }
+
+    match app_type {
+        "claude" => {
+            let Some(env) = provider.settings_config.get("env") else {
+                return false;
+            };
+            env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str) == Some(LEGACY_NEXUS_ENDPOINT)
+                && [
+                    "ANTHROPIC_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                ]
+                .iter()
+                .all(|field| env.get(field).and_then(Value::as_str) == Some(LEGACY_NEXUS_MODEL))
+        }
+        "codex" => provider
+            .settings_config
+            .get("config")
+            .and_then(Value::as_str)
+            .and_then(|config| config.parse::<toml::Value>().ok())
+            .is_some_and(|config| {
+                let Some(custom) = config
+                    .get("model_providers")
+                    .and_then(|providers| providers.get("custom"))
+                else {
+                    return false;
+                };
+                config.get("model_provider").and_then(toml::Value::as_str) == Some("custom")
+                    && config.get("model").and_then(toml::Value::as_str) == Some(LEGACY_NEXUS_MODEL)
+                    && config
+                        .get("model_reasoning_effort")
+                        .and_then(toml::Value::as_str)
+                        == Some("high")
+                    && config
+                        .get("disable_response_storage")
+                        .and_then(toml::Value::as_bool)
+                        == Some(true)
+                    && custom.get("name").and_then(toml::Value::as_str) == Some("nexus_glm")
+                    && custom.get("base_url").and_then(toml::Value::as_str)
+                        == Some(LEGACY_NEXUS_ENDPOINT)
+                    && custom.get("wire_api").and_then(toml::Value::as_str) == Some("responses")
+                    && custom
+                        .get("requires_openai_auth")
+                        .and_then(toml::Value::as_bool)
+                        == Some(true)
+            }),
+        _ => false,
+    }
+}
 
 type OmoProviderRow = (
     String,
@@ -17,6 +89,33 @@ type OmoProviderRow = (
 );
 
 impl Database {
+    pub(crate) fn backfill_legacy_nexus_capabilities(&self) -> Result<usize, AppError> {
+        let mut updated = 0;
+        for app_type in ["claude", "codex"] {
+            for mut provider in self.get_all_providers(app_type)?.into_values() {
+                if !is_exact_legacy_nexus(app_type, &provider)
+                    || provider.settings_config.get("nexusCapabilities").is_some()
+                {
+                    continue;
+                }
+                let Some(settings) = provider.settings_config.as_object_mut() else {
+                    continue;
+                };
+                settings.insert(
+                    "nexusCapabilities".to_string(),
+                    json!({ "reasoningBoundary": "think_close" }),
+                );
+                self.update_provider_settings_config(
+                    app_type,
+                    &provider.id,
+                    &provider.settings_config,
+                )?;
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
     pub fn get_all_providers(
         &self,
         app_type: &str,
@@ -782,5 +881,137 @@ mod ensure_official_seed_tests {
         let result =
             db.ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::Claude);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
+    }
+}
+
+#[cfg(test)]
+mod nexus_capability_tests {
+    use super::*;
+
+    fn managed_nexus(app_type: &str, id: &str) -> Provider {
+        let settings = match app_type {
+            "claude" => json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": LEGACY_NEXUS_ENDPOINT,
+                    "ANTHROPIC_MODEL": LEGACY_NEXUS_MODEL,
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": LEGACY_NEXUS_MODEL,
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": LEGACY_NEXUS_MODEL,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": LEGACY_NEXUS_MODEL
+                },
+                "keep": true
+            }),
+            "codex" => json!({
+                "auth": {},
+                "config": format!(
+                    "model_provider = \"custom\"\nmodel = \"{LEGACY_NEXUS_MODEL}\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\n\n[model_providers.custom]\nname = \"nexus_glm\"\nbase_url = \"{LEGACY_NEXUS_ENDPOINT}\"\nwire_api = \"responses\"\nrequires_openai_auth = true"
+                ),
+                "keep": true
+            }),
+            _ => unreachable!(),
+        };
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            "Nexus GLM-5.2".to_string(),
+            settings,
+            Some(LEGACY_NEXUS_ENDPOINT.to_string()),
+        );
+        provider.category = Some("third_party".to_string());
+        provider.icon = Some("nexus".to_string());
+        provider.icon_color = Some("#6366F1".to_string());
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        provider
+    }
+
+    #[test]
+    fn backfills_exact_managed_records_once() {
+        let db = Database::memory().expect("memory db");
+        for (app_type, id) in [("claude", "nexus-claude"), ("codex", "nexus-codex")] {
+            db.save_provider(app_type, &managed_nexus(app_type, id))
+                .expect("save managed provider");
+        }
+
+        assert_eq!(
+            db.backfill_legacy_nexus_capabilities().expect("backfill"),
+            2
+        );
+        for (app_type, id) in [("claude", "nexus-claude"), ("codex", "nexus-codex")] {
+            let provider = db
+                .get_provider_by_id(id, app_type)
+                .expect("read provider")
+                .expect("provider exists");
+            assert_eq!(
+                provider
+                    .settings_config
+                    .pointer("/nexusCapabilities/reasoningBoundary"),
+                Some(&json!("think_close"))
+            );
+            assert_eq!(provider.settings_config.get("keep"), Some(&json!(true)));
+        }
+        assert_eq!(db.backfill_legacy_nexus_capabilities().expect("rerun"), 0);
+    }
+
+    #[test]
+    fn backfill_ignores_similar_custom_records() {
+        let db = Database::memory().expect("memory db");
+        let mut other_url = managed_nexus("claude", "other-url");
+        other_url.website_url = Some("https://custom.example/v1".to_string());
+        let mut other_model = managed_nexus("claude", "other-model");
+        other_model.settings_config["env"]["ANTHROPIC_MODEL"] = json!("other-model");
+        let mut other_icon = managed_nexus("claude", "other-icon");
+        other_icon.icon = Some("custom".to_string());
+        let mut other_format = managed_nexus("claude", "other-format");
+        other_format.meta.as_mut().unwrap().api_format = Some("anthropic".to_string());
+        let mut existing = managed_nexus("claude", "existing");
+        existing.settings_config["nexusCapabilities"] = json!({ "reasoningBoundary": "custom" });
+        for provider in [
+            &other_url,
+            &other_model,
+            &other_icon,
+            &other_format,
+            &existing,
+        ] {
+            db.save_provider("claude", provider)
+                .expect("save custom provider");
+        }
+        let mut other_codex_wire = managed_nexus("codex", "other-codex-wire");
+        other_codex_wire.settings_config["config"] = json!(other_codex_wire.settings_config
+            ["config"]
+            .as_str()
+            .unwrap()
+            .replace("wire_api = \"responses\"", "wire_api = \"chat\""));
+        db.save_provider("codex", &other_codex_wire)
+            .expect("save near-match Codex provider");
+
+        assert_eq!(
+            db.backfill_legacy_nexus_capabilities().expect("backfill"),
+            0
+        );
+        for id in ["other-url", "other-model", "other-icon", "other-format"] {
+            assert!(db
+                .get_provider_by_id(id, "claude")
+                .expect("read provider")
+                .expect("provider exists")
+                .settings_config
+                .get("nexusCapabilities")
+                .is_none());
+        }
+        assert_eq!(
+            db.get_provider_by_id("existing", "claude")
+                .expect("read existing capability")
+                .expect("provider exists")
+                .settings_config
+                .pointer("/nexusCapabilities/reasoningBoundary"),
+            Some(&json!("custom"))
+        );
+        assert!(db
+            .get_provider_by_id("other-codex-wire", "codex")
+            .expect("read Codex near-match")
+            .expect("provider exists")
+            .settings_config
+            .get("nexusCapabilities")
+            .is_none());
     }
 }
