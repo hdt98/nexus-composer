@@ -600,6 +600,12 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            match app_state.db.migrate_legacy_nexus_providers() {
+                Ok(count) if count > 0 => log::info!("✓ Normalized {count} Nexus provider(s)"),
+                Ok(_) => {}
+                Err(e) => log::warn!("✗ Failed to normalize Nexus providers: {e}"),
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {

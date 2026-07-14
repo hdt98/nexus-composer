@@ -4,6 +4,7 @@
 
 pub mod failover;
 pub mod mcp;
+mod nexus_migration;
 pub mod prompts;
 pub mod providers;
 pub mod providers_seed;
