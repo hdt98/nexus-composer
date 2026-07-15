@@ -615,18 +615,7 @@ fn append_responses_input_as_chat_messages(
         &mut pending_reasoning,
         &mut last_assistant_index,
     );
-    if policy == ReasoningHistoryPolicy::Preserve {
-        if let Some(reasoning) = pending_reasoning
-            .take()
-            .filter(|reasoning| !reasoning.trim().is_empty())
-        {
-            messages.push(json!({
-                "role": "assistant",
-                "content": null,
-                "reasoning_content": reasoning
-            }));
-        }
-    }
+    flush_preserved_reasoning(messages, &mut pending_reasoning, policy);
     match policy {
         ReasoningHistoryPolicy::Drop => messages.iter_mut().for_each(|message| {
             if let Some(message) = message.as_object_mut() {
@@ -745,9 +734,8 @@ fn append_responses_item_as_chat_message(
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
                 return Ok(());
-            } else if pending_reasoning.is_some() {
-                pending_reasoning.take();
             }
+            flush_preserved_reasoning(messages, pending_reasoning, policy);
             update_last_assistant_index(messages, &message, last_assistant_index);
             messages.push(message);
         }
@@ -759,8 +747,12 @@ fn append_responses_item_as_chat_message(
                 last_assistant_index,
             );
             if item.get("role").is_some() || item.get("content").is_some() {
-                let message =
-                    responses_message_item_to_chat_message(item, pending_reasoning, policy);
+                let message = responses_message_item_to_chat_message(
+                    item,
+                    messages,
+                    pending_reasoning,
+                    policy,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
             }
@@ -773,8 +765,12 @@ fn append_responses_item_as_chat_message(
                 last_assistant_index,
             );
             if item.get("role").is_some() || item.get("content").is_some() {
-                let message =
-                    responses_message_item_to_chat_message(item, pending_reasoning, policy);
+                let message = responses_message_item_to_chat_message(
+                    item,
+                    messages,
+                    pending_reasoning,
+                    policy,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
             }
@@ -806,6 +802,7 @@ fn flush_pending_tool_calls(
 
 fn responses_message_item_to_chat_message(
     item: &Value,
+    messages: &mut Vec<Value>,
     pending_reasoning: &mut Option<String>,
     policy: ReasoningHistoryPolicy,
 ) -> Value {
@@ -827,11 +824,28 @@ fn responses_message_item_to_chat_message(
             reasoning_history_fragment(responses_message_reasoning_text(item), policy),
         );
         attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
-    } else if pending_reasoning.is_some() {
-        pending_reasoning.take();
+    } else {
+        flush_preserved_reasoning(messages, pending_reasoning, policy);
     }
 
     message
+}
+
+fn flush_preserved_reasoning(
+    messages: &mut Vec<Value>,
+    pending_reasoning: &mut Option<String>,
+    policy: ReasoningHistoryPolicy,
+) {
+    let Some(reasoning) = pending_reasoning.take() else {
+        return;
+    };
+    if policy == ReasoningHistoryPolicy::Preserve {
+        messages.push(json!({
+            "role": "assistant",
+            "content": null,
+            "reasoning_content": reasoning
+        }));
+    }
 }
 
 fn reasoning_history_fragment(
@@ -1910,6 +1924,40 @@ mod tests {
         let preserved =
             responses_to_chat_completions_with_reasoning_history(input, None, true).unwrap();
         assert_eq!(preserved["messages"][0]["reasoning_content"], " A \n\n B ");
+    }
+
+    #[test]
+    fn preserve_keeps_reasoning_before_goal_continuation() {
+        for continuation in [
+            json!({"type": "message", "role": "user", "content": "Continue the goal."}),
+            json!({"type": "input_text", "text": "Continue the goal."}),
+        ] {
+            let result = responses_to_chat_completions_with_reasoning_history(
+                json!({
+                    "model": "glm-5.2",
+                    "input": [
+                        {"type": "message", "role": "user", "content": "Solve the problem."},
+                        {
+                            "type": "reasoning",
+                            "summary": [{"type": "summary_text", "text": "Prior checkpoint."}]
+                        },
+                        continuation
+                    ]
+                }),
+                None,
+                true,
+            )
+            .unwrap();
+
+            assert_eq!(
+                result["messages"],
+                json!([
+                    {"role": "user", "content": "Solve the problem."},
+                    {"role": "assistant", "content": null, "reasoning_content": "Prior checkpoint."},
+                    {"role": "user", "content": "Continue the goal."}
+                ])
+            );
+        }
     }
 
     #[test]
