@@ -661,7 +661,9 @@ impl Database {
                 }
                 Ownership::Upgrade => {
                     if !upgrade(&app, &mut settings, &mut meta) {
-                        continue;
+                        return Err(AppError::Message(format!(
+                            "Cannot canonicalize {app} provider '{id}' as a managed Nexus preset"
+                        )));
                     }
                     tx.execute(
                         "UPDATE providers SET name=?1, settings_config=?2, website_url=?3, meta=?4
@@ -1124,6 +1126,58 @@ mod tests {
             assert!(error.contains(column), "{error}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn malformed_upgrade_is_error_and_preserves_original_row() {
+        let db = Database::memory().unwrap();
+        save(
+            &db,
+            "claude",
+            "broken-upgrade",
+            "Nexus",
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
+                    "ANTHROPIC_AUTH_TOKEN": "synthetic-leak",
+                    "ANTHROPIC_MODEL": LEGACY_MODEL,
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL": LEGACY_MODEL,
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": LEGACY_MODEL,
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL": LEGACY_MODEL
+                },
+                "modelCatalog": "malformed"
+            }),
+            json!({}),
+        );
+        let before = db
+            .get_provider_by_id("broken-upgrade", "claude")
+            .unwrap()
+            .unwrap();
+
+        let error = db
+            .migrate_legacy_nexus_providers_if(None, None, None, |value| value == "synthetic-leak")
+            .unwrap_err()
+            .to_string();
+
+        assert!(
+            error.contains("claude provider 'broken-upgrade'"),
+            "{error}"
+        );
+        let after = db
+            .get_provider_by_id("broken-upgrade", "claude")
+            .unwrap()
+            .unwrap();
+        assert_eq!(&after.name, &before.name);
+        assert_eq!(&after.settings_config, &before.settings_config);
+        assert_eq!(&after.website_url, &before.website_url);
+        assert_eq!(
+            serde_json::to_value(&after.meta).unwrap(),
+            serde_json::to_value(&before.meta).unwrap()
+        );
+        assert_eq!(
+            after.settings_config.pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+            Some(&json!("synthetic-leak"))
+        );
     }
 
     #[test]
