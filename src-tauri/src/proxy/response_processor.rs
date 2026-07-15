@@ -832,9 +832,8 @@ mod tests {
     use crate::app_config::AppType;
     use crate::database::Database;
     use crate::error::AppError;
-    use crate::provider::ProviderMeta;
+    use crate::provider::{LocalProxyRequestOverrides, ProviderMeta};
     use crate::proxy::failover_switch::FailoverSwitchManager;
-    use crate::proxy::handler_config::CLAUDE_PARSER_CONFIG;
     use crate::proxy::provider_router::ProviderRouter;
     use crate::proxy::providers::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
@@ -1011,42 +1010,116 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial]
-    async fn count_tokens_response_succeeds_without_creating_usage() -> Result<(), AppError> {
+    async fn count_tokens_forwards_canonical_correlation_without_usage() -> Result<(), AppError> {
+        struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+        impl<T> Drop for AbortOnDrop<T> {
+            fn drop(&mut self) {
+                self.0.abort();
+            }
+        }
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (headers_tx, mut headers_rx) = tokio::sync::mpsc::unbounded_channel();
+        let upstream = axum::Router::new().route(
+            "/v1/messages/count_tokens",
+            axum::routing::post(move |headers: HeaderMap| {
+                let headers_tx = headers_tx.clone();
+                async move {
+                    headers_tx
+                        .send(headers)
+                        .expect("count_tokens header receiver should remain open");
+                    axum::Json(serde_json::json!({"input_tokens": 17}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .map_err(|e| AppError::Message(e.to_string()))?;
+        let upstream_addr = listener
+            .local_addr()
+            .map_err(|e| AppError::Message(e.to_string()))?;
+        let _upstream_task = AbortOnDrop(tokio::spawn(async move {
+            axum::serve(listener, upstream).await
+        }));
+
         let db = Arc::new(Database::memory()?);
         let provider_id = crate::settings::get_current_provider(&AppType::Claude)
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| "count-provider".to_string());
-        insert_provider(&db, &provider_id, "claude", ProviderMeta::default())?;
+        insert_provider(
+            &db,
+            &provider_id,
+            "claude",
+            ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                provider_type: Some("nexus".to_string()),
+                local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
+                    headers: HashMap::from([
+                        ("X-Test".to_string(), "override-applied".to_string()),
+                        ("X-Request-Id".to_string(), "forged-request".to_string()),
+                        (
+                            "X-Claude-Code-Session-Id".to_string(),
+                            "forged-session".to_string(),
+                        ),
+                    ]),
+                    body: None,
+                }),
+                ..Default::default()
+            },
+        )?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE providers SET settings_config = ?1 WHERE id = ?2 AND app_type = 'claude'",
+                rusqlite::params![
+                    serde_json::json!({"env": {
+                        "ANTHROPIC_BASE_URL": format!("http://{upstream_addr}/v1"),
+                        "ANTHROPIC_AUTH_TOKEN": "test-token"
+                    }})
+                    .to_string(),
+                    provider_id
+                ],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
         db.set_current_provider("claude", &provider_id)?;
         let state = build_state(db.clone());
-        let ctx = RequestContext::new(
-            &state,
-            &serde_json::json!({"model": "GLM-5.2-FP8[1m]"}),
-            &HeaderMap::new(),
-            AppType::Claude,
-            "Test",
-            "claude",
-        )
-        .await
-        .map_err(|e| AppError::Message(e.to_string()))?;
-        let body = Bytes::from_static(br#"{"input_tokens":17}"#);
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/messages/count_tokens")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .header("x-request-id", "request-joined")
+            .header("x-claude-code-session-id", "session-joined")
+            .body(axum::body::Body::from(
+                serde_json::json!({
+                    "model": "GLM-5.2-FP8[1m]",
+                    "messages": [{"role": "user", "content": "count this"}]
+                })
+                .to_string(),
+            ))
+            .map_err(|e| AppError::Message(e.to_string()))?;
 
-        let response = process_response_with_usage(
-            ProxyResponse::buffered(http::StatusCode::OK, HeaderMap::new(), body.clone()),
-            &ctx,
-            &state,
-            &CLAUDE_PARSER_CONFIG,
-            None,
-            false,
-        )
-        .await
-        .map_err(|e| AppError::Message(e.to_string()))?;
-
-        let downstream = axum::body::to_bytes(response.into_body(), 1024)
+        let response =
+            crate::proxy::handlers::handle_messages(axum::extract::State(state), request)
+                .await
+                .map_err(|e| AppError::Message(e.to_string()))?;
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let upstream_headers = headers_rx
+            .recv()
+            .await
+            .ok_or_else(|| AppError::Message("missing upstream headers".to_string()))?;
+        assert_eq!(upstream_headers["x-test"], "override-applied");
+        assert_eq!(upstream_headers["x-request-id"], "request-joined");
+        assert_eq!(
+            upstream_headers["x-claude-code-session-id"],
+            "session-joined"
+        );
+        let response_body = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .map_err(|e| AppError::Message(e.to_string()))?;
-        assert_eq!(downstream, body);
+        assert_eq!(response_body, Bytes::from_static(br#"{"input_tokens":17}"#));
         assert_eq!(request_log_count(&db)?, 0);
+
         Ok(())
     }
 
