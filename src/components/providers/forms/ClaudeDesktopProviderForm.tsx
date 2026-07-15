@@ -43,6 +43,7 @@ import { ApiKeySection } from "./shared/ApiKeySection";
 import { EndpointField } from "./shared/EndpointField";
 import { ModelDropdown } from "./shared/ModelDropdown";
 import { ProviderPresetSelector } from "./ProviderPresetSelector";
+import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
 import { useApiKeyLink } from "./hooks/useApiKeyLink";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import type {
@@ -68,6 +69,10 @@ import {
   type ClaudeDesktopDefaultRoute,
 } from "@/lib/api/providers";
 import { resolveManagedAccountId } from "@/lib/authBinding";
+import {
+  buildLocalProxyRequestOverrides,
+  formatRequestOverrideObject,
+} from "@/lib/requestOverrides";
 
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
   presetId?: string;
@@ -292,8 +297,22 @@ export function ClaudeDesktopProviderForm({
     isPartner?: boolean;
     partnerPromotionKey?: string;
     providerType?: string;
+    managedNexusPresetVersion?: number;
     requiresOAuth?: boolean;
+    modelCatalog?: ClaudeDesktopProviderPreset["modelCatalog"];
+    localProxyRequestOverrides?: ClaudeDesktopProviderPreset["localProxyRequestOverrides"];
   } | null>(null);
+  const [localProxyHeadersOverride, setLocalProxyHeadersOverride] = useState(
+    () =>
+      formatRequestOverrideObject(
+        initialData?.meta?.localProxyRequestOverrides?.headers,
+      ),
+  );
+  const [localProxyBodyOverride, setLocalProxyBodyOverride] = useState(() =>
+    formatRequestOverrideObject(
+      initialData?.meta?.localProxyRequestOverrides?.body,
+    ),
+  );
   const [routes, setRoutes] = useState<RouteRow[]>(() => {
     const rows = initialRouteRows(initialData?.meta?.claudeDesktopModelRoutes);
     // proxy 模式归一化成固定三档；但初始无任何 route 时保持空数组，交给 seed
@@ -411,6 +430,12 @@ export function ClaudeDesktopProviderForm({
     setApiKey("");
     setApiKeyField(preset.apiKeyField ?? "ANTHROPIC_AUTH_TOKEN");
     setApiFormat(preset.apiFormat ?? "anthropic");
+    setLocalProxyHeadersOverride(
+      formatRequestOverrideObject(preset.localProxyRequestOverrides?.headers),
+    );
+    setLocalProxyBodyOverride(
+      formatRequestOverrideObject(preset.localProxyRequestOverrides?.body),
+    );
 
     didSeedDefaultRoutes.current = true;
     setMode(preset.mode);
@@ -442,6 +467,8 @@ export function ClaudeDesktopProviderForm({
       setApiKey("");
       setApiKeyField("ANTHROPIC_AUTH_TOKEN");
       setApiFormat("anthropic");
+      setLocalProxyHeadersOverride("");
+      setLocalProxyBodyOverride("");
       didSeedDefaultRoutes.current = false;
       setMode("direct");
       setRoutes([]);
@@ -457,7 +484,10 @@ export function ClaudeDesktopProviderForm({
       isPartner: entry.preset.isPartner,
       partnerPromotionKey: entry.preset.partnerPromotionKey,
       providerType: entry.preset.providerType,
+      managedNexusPresetVersion: entry.preset.managedNexusPresetVersion,
       requiresOAuth: entry.preset.requiresOAuth,
+      modelCatalog: entry.preset.modelCatalog,
+      localProxyRequestOverrides: entry.preset.localProxyRequestOverrides,
     });
     applyDesktopPreset(entry.preset);
   };
@@ -536,6 +566,14 @@ export function ClaudeDesktopProviderForm({
   };
 
   const handleSubmit = async (values: ProviderFormData) => {
+    const overridesResult = buildLocalProxyRequestOverrides(
+      localProxyHeadersOverride,
+      localProxyBodyOverride,
+    );
+    if (overridesResult.error) {
+      toast.error(overridesResult.error);
+      return;
+    }
     if (!values.name.trim()) {
       toast.error(
         t("providerForm.fillSupplierName", {
@@ -550,12 +588,16 @@ export function ClaudeDesktopProviderForm({
       // 与启动 seed 的 OFFICIAL_SEEDS 占位语义一致。
       const settingsConfig = clonePlainRecord(initialData?.settingsConfig);
       settingsConfig.env = {};
+      delete settingsConfig.modelCatalog;
       const meta: ProviderMeta = { ...(initialData?.meta ?? {}) };
       delete meta.claudeDesktopMode;
       delete meta.claudeDesktopModelRoutes;
       delete meta.apiFormat;
       delete meta.endpointAutoSelect;
       delete meta.isFullUrl;
+      delete meta.providerType;
+      delete meta.managedNexusPresetVersion;
+      delete meta.localProxyRequestOverrides;
       await onSubmit({
         ...values,
         name: values.name.trim(),
@@ -636,6 +678,9 @@ export function ClaudeDesktopProviderForm({
     }
 
     const settingsConfig = clonePlainRecord(initialData?.settingsConfig);
+    if (activePreset?.modelCatalog) {
+      settingsConfig.modelCatalog = activePreset.modelCatalog;
+    }
     const env = clonePlainRecord(settingsConfig.env);
     delete env.ANTHROPIC_AUTH_TOKEN;
     delete env.ANTHROPIC_API_KEY;
@@ -670,6 +715,10 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    meta.managedNexusPresetVersion = activePreset
+      ? activePreset.managedNexusPresetVersion
+      : initialData?.meta?.managedNexusPresetVersion;
+    meta.localProxyRequestOverrides = overridesResult.overrides;
     meta.authBinding =
       activeProviderType === "github_copilot"
         ? {
@@ -1024,6 +1073,15 @@ export function ClaudeDesktopProviderForm({
                   })}
                 </div>
               </div>
+            )}
+
+            {needsModelMapping && (
+              <LocalProxyRequestOverridesField
+                headersJson={localProxyHeadersOverride}
+                bodyJson={localProxyBodyOverride}
+                onHeadersJsonChange={setLocalProxyHeadersOverride}
+                onBodyJsonChange={setLocalProxyBodyOverride}
+              />
             )}
 
             {!needsModelMapping && (

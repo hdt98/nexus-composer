@@ -6,8 +6,17 @@ import type {
   CodexApiFormat,
   CodexCatalogModel,
   CodexChatReasoning,
+  LocalProxyRequestOverrides,
 } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
+import {
+  NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CONTEXT_WINDOW,
+  NEXUS_ENDPOINT,
+  NEXUS_MANAGED_PRESET_VERSION,
+  NEXUS_MODEL,
+  NEXUS_REQUEST_OVERRIDES,
+} from "./nexus";
 
 export interface CodexProviderPreset {
   name: string;
@@ -36,6 +45,9 @@ export interface CodexProviderPreset {
   modelCatalog?: CodexCatalogModel[];
   // Codex Responses -> Chat Completions reasoning capability defaults
   codexChatReasoning?: CodexChatReasoning;
+  localProxyRequestOverrides?: LocalProxyRequestOverrides;
+  providerType?: "nexus";
+  managedNexusPresetVersion?: number;
 }
 
 /**
@@ -54,19 +66,29 @@ export function generateThirdPartyConfig(
   providerName: string,
   baseUrl: string,
   modelName = "gpt-5.5",
+  options?: {
+    contextWindow: number;
+    autoCompactTokenLimit: number;
+    streamIdleTimeoutMs: number;
+  },
 ): string {
   const tomlString = (value: string) => JSON.stringify(value);
+  const managed = options
+    ? `model_context_window = ${options.contextWindow}\nmodel_auto_compact_token_limit = ${options.autoCompactTokenLimit}\n`
+    : `model_reasoning_effort = "high"\n`;
+  const timeout = options
+    ? `\nstream_idle_timeout_ms = ${options.streamIdleTimeoutMs}`
+    : "";
 
   return `model_provider = "custom"
 model = ${tomlString(modelName)}
-model_reasoning_effort = "high"
-disable_response_storage = true
+${managed}disable_response_storage = true
 
 [model_providers.custom]
 name = ${tomlString(providerName)}
 base_url = ${tomlString(baseUrl)}
 wire_api = "responses"
-requires_openai_auth = true`;
+requires_openai_auth = true${timeout}`;
 }
 
 function modelCatalog(
@@ -102,26 +124,33 @@ function modelCatalog(
 }
 
 export const codexProviderPresets: CodexProviderPreset[] = [
-  // Nexus Composer MVP1 default: routes Codex Responses -> OpenAI Chat Completions
-  // via Nexus Composer's existing local proxy conversion layer to the SGLang endpoint.
-  // SGLang is an externally managed service; do not mutate its lifecycle.
+  // Nexus routes Codex Responses through the built-in Chat adapter.
   {
-    name: "Nexus",
+    name: "Nexus GLM-5.2",
     nameKey: "providerForm.presets.nexus",
-    websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
-    auth: generateThirdPartyAuth("onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc"),
+    websiteUrl: NEXUS_ENDPOINT,
+    auth: generateThirdPartyAuth(""),
     config: generateThirdPartyConfig(
-      "nexus_glm",
-      "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
-      "glm-5.2",
+      "Nexus GLM-5.2",
+      NEXUS_ENDPOINT,
+      NEXUS_MODEL,
+      {
+        contextWindow: NEXUS_CONTEXT_WINDOW,
+        autoCompactTokenLimit: NEXUS_AUTO_COMPACT_TOKENS,
+        streamIdleTimeoutMs: 3_000_000,
+      },
     ),
-    endpointCandidates: ["https://glm-test-glm52-tp4.onenexus-do.cloud/v1"],
+    endpointCandidates: [NEXUS_ENDPOINT],
     apiFormat: "openai_chat",
+    providerType: "nexus",
+    managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+    localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     modelCatalog: modelCatalog([
       {
-        model: "glm-5.2",
+        model: NEXUS_MODEL,
         displayName: "GLM-5.2",
-        contextWindow: 1048576,
+        contextWindow: NEXUS_CONTEXT_WINDOW,
+        inputModalities: ["text"],
       },
     ]),
     category: "third_party",

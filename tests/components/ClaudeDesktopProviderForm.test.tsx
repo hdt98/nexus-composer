@@ -3,6 +3,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
+import { NEXUS_REQUEST_OVERRIDES } from "@/config/nexus";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 vi.mock("@/lib/api/providers", () => ({
@@ -30,6 +31,95 @@ function renderForm(
 }
 
 describe("ClaudeDesktopProviderForm", () => {
+  it("persists the Nexus preset metadata", async () => {
+    const onSubmit = vi.fn();
+    renderForm(undefined, onSubmit);
+
+    fireEvent.click(screen.getByRole("button", { name: /Nexus GLM-5\.2/i }));
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta).toMatchObject({
+      providerType: "nexus",
+      managedNexusPresetVersion: 1,
+      localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
+    });
+    expect(JSON.parse(onSubmit.mock.calls[0][0].settingsConfig)).toHaveProperty(
+      "modelCatalog.models.0.inputModalities",
+      ["text"],
+    );
+  });
+
+  it("edits request overrides on an existing proxy provider", async () => {
+    const onSubmit = vi.fn();
+    renderForm(
+      {
+        name: "Nexus GLM-5.2",
+        settingsConfig: {
+          env: {
+            ANTHROPIC_BASE_URL: "https://example.com/v1",
+            ANTHROPIC_AUTH_TOKEN: "test-key",
+          },
+        },
+        meta: {
+          claudeDesktopMode: "proxy",
+          apiFormat: "openai_chat",
+          providerType: "nexus",
+          managedNexusPresetVersion: 1,
+          localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
+          claudeDesktopModelRoutes: {
+            "claude-sonnet-5": { model: "GLM-5.2-FP8" },
+          },
+        },
+      },
+      onSubmit,
+    );
+
+    const bodyOverride = screen
+      .getAllByRole("textbox")
+      .find((element) =>
+        element.getAttribute("placeholder")?.includes("temperature"),
+      );
+    expect(bodyOverride).toBeDefined();
+    fireEvent.change(bodyOverride!, {
+      target: {
+        value: JSON.stringify({
+          ...NEXUS_REQUEST_OVERRIDES.body,
+          max_tokens: 131072,
+        }),
+      },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides).toEqual({
+      body: expect.objectContaining({ max_tokens: 131072 }),
+    });
+  });
+
+  it("detaches managed metadata when Official replaces Nexus", async () => {
+    const onSubmit = vi.fn();
+    renderForm(undefined, onSubmit);
+
+    fireEvent.click(screen.getByRole("button", { name: /Nexus GLM-5\.2/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Claude Desktop Official/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty("providerType");
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
+      "managedNexusPresetVersion",
+    );
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
+      "localProxyRequestOverrides",
+    );
+  });
+
   it("编辑模型映射的菜单显示名时保持输入框焦点", () => {
     renderForm({
       name: "Proxy Provider",
