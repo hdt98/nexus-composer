@@ -720,9 +720,9 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
                 {
                     apply_tray_policy(app, true);
                 }
-            } else if crate::lightweight::is_lightweight_mode() {
+            } else {
                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app) {
-                    log::error!("退出轻量模式重建窗口失败: {e}");
+                    log::error!("Failed to restore the main window: {e}");
                 }
             }
         }

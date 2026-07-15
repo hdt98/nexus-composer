@@ -233,9 +233,11 @@ pub fn run() {
                 log::debug!("  arg[{i}]: {}", redact_url_for_log(arg));
             }
 
-            if crate::lightweight::is_lightweight_mode() {
+            if crate::lightweight::is_lightweight_mode()
+                || app.get_webview_window("main").is_none()
+            {
                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app) {
-                    log::error!("退出轻量模式重建窗口失败: {e}");
+                    log::error!("Failed to restore the main window: {e}");
                 }
             }
 
@@ -917,9 +919,11 @@ pub fn run() {
                     let urls = event.urls();
                     log::info!("Received {} URL(s)", urls.len());
 
-                    if crate::lightweight::is_lightweight_mode() {
+                    if crate::lightweight::is_lightweight_mode()
+                        || app_handle.get_webview_window("main").is_none()
+                    {
                         if let Err(e) = crate::lightweight::exit_lightweight_mode(&app_handle) {
-                            log::error!("退出轻量模式重建窗口失败: {e}");
+                            log::error!("Failed to restore the main window: {e}");
                         }
                     }
 
@@ -1607,9 +1611,9 @@ pub fn run() {
                         let _ = window.show();
                         let _ = window.set_focus();
                         tray::apply_tray_policy(app_handle, true);
-                    } else if crate::lightweight::is_lightweight_mode() {
+                    } else {
                         if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle) {
-                            log::error!("退出轻量模式重建窗口失败: {e}");
+                            log::error!("Failed to restore the main window: {e}");
                         }
                     }
                 }
@@ -1620,10 +1624,12 @@ pub fn run() {
                         log::info!("RunEvent::Opened with URL: {url_str}");
 
                         if url_str.starts_with("nexus://") {
-                            if crate::lightweight::is_lightweight_mode() {
+                            if crate::lightweight::is_lightweight_mode()
+                                || app_handle.get_webview_window("main").is_none()
+                            {
                                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle)
                                 {
-                                    log::error!("退出轻量模式重建窗口失败: {e}");
+                                    log::error!("Failed to restore the main window: {e}");
                                 }
                             }
 
