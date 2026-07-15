@@ -414,6 +414,21 @@ fn insert_session_log_entry(
     request_id: &str,
     msg: &ParsedAssistantUsage,
 ) -> Result<bool, AppError> {
+    let takeover_active = {
+        let conn = lock_conn!(db.conn);
+        conn.query_row(
+            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude' AND enabled = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    };
+    // Resolve through provider DAOs before taking the insertion guard: those DAOs
+    // acquire `Database.conn` themselves, and the mutex is not re-entrant.
+    let pricing_model = resolve_pricing_model_for_session(db, takeover_active, &msg.model);
+    let conn = lock_conn!(db.conn);
+
     let created_at = msg
         .timestamp
         .as_ref()
@@ -438,19 +453,9 @@ fn insert_session_log_entry(
         cache_creation_tokens: msg.cache_creation_tokens,
         created_at,
     };
-    {
-        let conn = lock_conn!(db.conn);
-        if should_skip_session_insert(&conn, request_id, &dedup_key)? {
-            return Ok(false);
-        }
+    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
+        return Ok(false);
     }
-
-    // When proxy takeover is active, Claude Code reports its native model name
-    // (e.g. "claude-fable-5") in session logs, but the actual upstream model is
-    // configured in the provider's settings (e.g. "glm-5.2"). Use the provider's
-    // model for pricing so costs are calculated at the correct rate.
-    let pricing_model = resolve_pricing_model_for_session(db, &msg.model);
-    let conn = lock_conn!(db.conn);
 
     // 计算费用
     let usage = TokenUsage {
@@ -523,6 +528,7 @@ fn insert_session_log_entry(
             ],
         )
         .map_err(|e| AppError::Database(format!("插入会话日志失败: {e}")))?;
+    drop(conn);
 
     // 仅在确实写入新行时通知前端，避免 INSERT OR IGNORE 跳过时产生空刷新
     if inserted_rows > 0 {
@@ -539,24 +545,11 @@ fn insert_session_log_entry(
 /// model name (e.g. "claude-fable-5"), but the actual model serving requests is
 /// configured in the provider's `ANTHROPIC_MODEL` env var (e.g. "glm-5.2").
 /// We look up the current provider and use its configured model for pricing.
-fn resolve_pricing_model_for_session(db: &Database, client_model: &str) -> String {
-    // Keep this lock scoped to the query. Provider lookup below acquires the
-    // same non-reentrant database mutex through the DAO.
-    let takeover_active = match db.conn.lock() {
-        Ok(conn) => {
-            conn.query_row(
-                "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude' AND enabled = 1",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-                > 0
-        }
-        Err(error) => {
-            log::warn!("Failed to resolve session pricing model: {error}");
-            return client_model.to_string();
-        }
-    };
+fn resolve_pricing_model_for_session(
+    db: &Database,
+    takeover_active: bool,
+    client_model: &str,
+) -> String {
     if !takeover_active {
         return client_model.to_string();
     }
