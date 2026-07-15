@@ -20,7 +20,7 @@ function renderForm(
   const view = render(
     <QueryClientProvider client={queryClient}>
       <ClaudeDesktopProviderForm
-        submitLabel="保存"
+        submitLabel="Save"
         onSubmit={onSubmit}
         onCancel={vi.fn()}
         initialData={initialData}
@@ -39,12 +39,12 @@ describe("ClaudeDesktopProviderForm", () => {
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "test-key" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0][0].meta).toMatchObject({
       providerType: "nexus",
-      managedNexusPresetVersion: 1,
+      managedNexusPresetVersion: 6,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     });
     expect(JSON.parse(onSubmit.mock.calls[0][0].settingsConfig)).toHaveProperty(
@@ -68,7 +68,7 @@ describe("ClaudeDesktopProviderForm", () => {
           claudeDesktopMode: "proxy",
           apiFormat: "openai_chat",
           providerType: "nexus",
-          managedNexusPresetVersion: 1,
+          managedNexusPresetVersion: 6,
           localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
           claudeDesktopModelRoutes: {
             "claude-sonnet-5": { model: "GLM-5.2-FP8" },
@@ -92,7 +92,7 @@ describe("ClaudeDesktopProviderForm", () => {
         }),
       },
     });
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides).toEqual({
@@ -108,7 +108,7 @@ describe("ClaudeDesktopProviderForm", () => {
     fireEvent.click(
       screen.getByRole("button", { name: /Claude Desktop Official/i }),
     );
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty("providerType");
@@ -256,7 +256,7 @@ describe("ClaudeDesktopProviderForm", () => {
       onSubmit,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     const submitted = onSubmit.mock.calls[0][0];
@@ -302,7 +302,7 @@ describe("ClaudeDesktopProviderForm", () => {
       onSubmit,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     const routes = onSubmit.mock.calls[0][0].meta.claudeDesktopModelRoutes;
@@ -344,7 +344,7 @@ describe("ClaudeDesktopProviderForm", () => {
       onSubmit,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     const submitted = onSubmit.mock.calls[0][0];

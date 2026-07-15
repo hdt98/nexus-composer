@@ -50,7 +50,7 @@ describe("ProviderForm Nexus presets", () => {
       await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
       expect(onSubmit.mock.calls[0][0].meta).toMatchObject({
         providerType: "nexus",
-        managedNexusPresetVersion: 1,
+        managedNexusPresetVersion: 6,
         localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
       });
     },

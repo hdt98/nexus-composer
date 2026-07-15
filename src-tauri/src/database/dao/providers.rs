@@ -1,9 +1,12 @@
+use crate::app_config::AppType;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
+use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
+use toml_edit::{value, DocumentMut};
 
 type OmoProviderRow = (
     String,
@@ -15,6 +18,208 @@ type OmoProviderRow = (
     Option<String>,
     String,
 );
+
+const NEXUS_ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
+const NEXUS_MODEL: &str = "GLM-5.2-FP8";
+const NEXUS_VERSION: u64 = 6;
+const NEXUS_CONTEXT: i64 = 1_048_576;
+const NEXUS_COMPACT: i64 = 252_000;
+const NEXUS_MAX_TOKENS: u64 = 65_536;
+const NEXUS_LEGACY_NAMES: [&str; 4] = [
+    "Nexus",
+    "Nexus Local",
+    "Nexus GLM-5.2 Hosted",
+    "Nexus GLM-5.2",
+];
+const NEXUS_ENDPOINTS: [&str; 4] = [
+    "http://127.0.0.1:30000/v1",
+    "http://127.0.0.1:30001/v1",
+    "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+    NEXUS_ENDPOINT,
+];
+fn is_known_nexus_endpoint(value: &str) -> bool {
+    let value = value.trim_end_matches('/');
+    NEXUS_ENDPOINTS
+        .iter()
+        .any(|candidate| candidate.trim_end_matches('/') == value)
+}
+
+fn is_known_nexus_model(value: &str) -> bool {
+    matches!(
+        value.trim_end_matches("[1m]"),
+        "GLM-5.2-FP8" | "glm-5.2" | "GLM-5.2-SGLang"
+    )
+}
+
+fn known_nexus_pair(endpoint: Option<&str>, model: Option<&str>) -> bool {
+    endpoint.is_some_and(is_known_nexus_endpoint) && model.is_some_and(is_known_nexus_model)
+}
+
+fn object_mut<'a>(
+    value: &'a mut Value,
+    label: &str,
+) -> Result<&'a mut Map<String, Value>, AppError> {
+    value
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message(format!("Nexus {label} must be an object")))
+}
+
+fn child_object_mut<'a>(
+    parent: &'a mut Map<String, Value>,
+    key: &str,
+) -> Result<&'a mut Map<String, Value>, AppError> {
+    object_mut(parent.entry(key).or_insert_with(|| json!({})), key)
+}
+
+fn has_nexus_signature(app: &AppType, settings: &Value, meta: &Value) -> bool {
+    match app {
+        AppType::Codex => {
+            let Some(config) = settings.get("config").and_then(Value::as_str) else {
+                return false;
+            };
+            let Ok(document) = config.parse::<DocumentMut>() else {
+                return false;
+            };
+            known_nexus_pair(
+                crate::codex_config::extract_codex_base_url(config).as_deref(),
+                document.get("model").and_then(|model| model.as_str()),
+            )
+        }
+        AppType::Claude => known_nexus_pair(
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            settings
+                .pointer("/env/ANTHROPIC_MODEL")
+                .and_then(Value::as_str),
+        ),
+        AppType::ClaudeDesktop => {
+            let routes = meta
+                .get("claudeDesktopModelRoutes")
+                .and_then(Value::as_object);
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str)
+                .is_some_and(is_known_nexus_endpoint)
+                && routes.is_some_and(|routes| {
+                    !routes.is_empty()
+                        && routes.values().all(|route| {
+                            route
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_known_nexus_model)
+                        })
+                })
+        }
+        _ => false,
+    }
+}
+
+fn replace_nexus_catalog(settings: &mut Value, app: &AppType) -> Result<(), AppError> {
+    let catalog = child_object_mut(object_mut(settings, "settings")?, "modelCatalog")?;
+    let models = match app {
+        AppType::Codex => {
+            json!([{"model":NEXUS_MODEL,"displayName":"GLM-5.2","contextWindow":NEXUS_CONTEXT,"inputModalities":["text"]}])
+        }
+        _ => json!([
+            {"model":NEXUS_MODEL,"inputModalities":["text"]},
+            {"model":"glm-5.2","inputModalities":["text"]}
+        ]),
+    };
+    catalog.insert("models".into(), models);
+    Ok(())
+}
+
+fn merge_nexus_overrides(meta: &mut Value) -> Result<(), AppError> {
+    let meta = object_mut(meta, "metadata")?;
+    let overrides = child_object_mut(meta, "localProxyRequestOverrides")?;
+    let body = child_object_mut(overrides, "request override body")?;
+    body.entry("max_tokens")
+        .or_insert_with(|| json!(NEXUS_MAX_TOKENS));
+    let template = child_object_mut(body, "chat_template_kwargs")?;
+    template.insert("enable_thinking".into(), json!(true));
+    template.insert("clear_thinking".into(), json!(false));
+    meta.insert("providerType".into(), json!("nexus"));
+    meta.insert("apiFormat".into(), json!("openai_chat"));
+    meta.insert("managedNexusPresetVersion".into(), json!(NEXUS_VERSION));
+    meta.remove("codexChatReasoning");
+    Ok(())
+}
+
+fn upgrade_nexus_provider(
+    app: &AppType,
+    settings: &mut Value,
+    meta: &mut Value,
+) -> Result<(), AppError> {
+    match app {
+        AppType::Codex => {
+            let config = settings
+                .get("config")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AppError::Message("Nexus Codex config is missing".into()))?;
+            let mut document = config.parse::<DocumentMut>().map_err(|error| {
+                AppError::Message(format!("Invalid Nexus Codex config: {error}"))
+            })?;
+            let active = document
+                .get("model_provider")
+                .and_then(|item| item.as_str())
+                .ok_or_else(|| AppError::Message("Nexus Codex model_provider is missing".into()))?
+                .to_string();
+            document["model"] = value(NEXUS_MODEL);
+            document["model_context_window"] = value(NEXUS_CONTEXT);
+            document["model_auto_compact_token_limit"] = value(NEXUS_COMPACT);
+            document.as_table_mut().remove("model_reasoning_effort");
+            document["model_providers"][&active]["base_url"] = value(NEXUS_ENDPOINT);
+            document["model_providers"][&active]["wire_api"] = value("responses");
+            document["model_providers"][&active]["requires_openai_auth"] = value(true);
+            document["model_providers"][&active]["stream_idle_timeout_ms"] = value(3_000_000);
+            settings["config"] = json!(document.to_string());
+        }
+        AppType::Claude => {
+            let env = object_mut(&mut settings["env"], "Claude env")?;
+            env.insert("ANTHROPIC_BASE_URL".into(), json!(NEXUS_ENDPOINT));
+            for key in [
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                "ANTHROPIC_DEFAULT_FABLE_MODEL",
+                "ANTHROPIC_CUSTOM_MODEL_OPTION",
+            ] {
+                env.insert(key.into(), json!(format!("{NEXUS_MODEL}[1m]")));
+            }
+            for (key, value) in [
+                ("API_TIMEOUT_MS", "3000000"),
+                ("CLAUDE_CODE_AUTO_COMPACT_WINDOW", "252000"),
+                ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1"),
+                ("CLAUDE_CODE_ATTRIBUTION_HEADER", "0"),
+            ] {
+                env.insert(key.into(), json!(value));
+            }
+        }
+        AppType::ClaudeDesktop => {
+            settings
+                .pointer_mut("/env/ANTHROPIC_BASE_URL")
+                .ok_or_else(|| {
+                    AppError::Message("Nexus Claude Desktop base URL is missing".into())
+                })?
+                .clone_from(&json!(NEXUS_ENDPOINT));
+            let routes = object_mut(
+                &mut meta["claudeDesktopModelRoutes"],
+                "Claude Desktop routes",
+            )?;
+            for route in routes.values_mut() {
+                let route = object_mut(route, "Claude Desktop route")?;
+                route.insert("model".into(), json!(NEXUS_MODEL));
+                route.insert("supports1m".into(), json!(true));
+            }
+            meta["claudeDesktopMode"] = json!("proxy");
+        }
+        _ => return Ok(()),
+    }
+    replace_nexus_catalog(settings, app)?;
+    merge_nexus_overrides(meta)
+}
 
 impl Database {
     pub fn get_all_providers(
@@ -573,6 +778,86 @@ impl Database {
         Ok(false)
     }
 
+    pub(crate) fn migrate_managed_nexus_for_app(
+        &self,
+        app: &AppType,
+        current_id: Option<&str>,
+    ) -> Result<bool, AppError> {
+        if !matches!(
+            app,
+            AppType::Claude | AppType::ClaudeDesktop | AppType::Codex
+        ) {
+            return Ok(false);
+        }
+        let app_name = app.as_str();
+        let mut conn = lock_conn!(self.conn);
+        let transaction = conn.transaction()?;
+        let rows = {
+            let mut statement = transaction
+                .prepare("SELECT id,name,settings_config,meta FROM providers WHERE app_type=?1")?;
+            let rows = statement
+                .query_map([app_name], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut sync_current = false;
+        for (id, name, raw_settings, raw_meta) in rows {
+            let legacy_name = NEXUS_LEGACY_NAMES.contains(&name.as_str());
+            let mut meta: Value = match serde_json::from_str(&raw_meta) {
+                Ok(meta) => meta,
+                Err(_) if !legacy_name => continue,
+                Err(error) => {
+                    return Err(AppError::Message(format!(
+                        "Invalid {app_name} Nexus provider '{id}' metadata: {error}"
+                    )))
+                }
+            };
+            let provider_type = meta.get("providerType").and_then(Value::as_str);
+            if provider_type != Some("nexus") && !(provider_type.is_none() && legacy_name) {
+                continue;
+            }
+            let version = meta
+                .get("managedNexusPresetVersion")
+                .and_then(Value::as_u64);
+            if version.is_some_and(|version| version > NEXUS_VERSION) {
+                continue;
+            }
+            let mut settings: Value = serde_json::from_str(&raw_settings).map_err(|error| {
+                AppError::Message(format!(
+                    "Invalid {app_name} Nexus provider '{id}' settings: {error}"
+                ))
+            })?;
+            if !has_nexus_signature(app, &settings, &meta) {
+                continue;
+            }
+            if version == Some(NEXUS_VERSION) {
+                sync_current |= current_id == Some(id.as_str());
+                continue;
+            }
+            upgrade_nexus_provider(app, &mut settings, &mut meta).map_err(|error| {
+                AppError::Message(format!(
+                    "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
+                ))
+            })?;
+            transaction.execute(
+                "UPDATE providers SET settings_config=?1,meta=?2 WHERE id=?3 AND app_type=?4",
+                params![settings.to_string(), meta.to_string(), id, app_name],
+            )?;
+            if current_id == Some(id.as_str()) {
+                sync_current = true;
+            }
+        }
+        transaction.commit()?;
+        Ok(sync_current)
+    }
+
     /// 计算指定 app 下一个可用的 sort_index（追加到末尾）。
     fn next_sort_index_for_app(&self, app_type: &str) -> Result<usize, AppError> {
         let conn = lock_conn!(self.conn);
@@ -709,8 +994,27 @@ impl Database {
 
 #[cfg(test)]
 mod ensure_official_seed_tests {
+    use super::NEXUS_MODEL;
     use crate::app_config::AppType;
     use crate::database::{Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
+    use crate::provider::Provider;
+    use serde_json::json;
+
+    fn save_nexus(
+        db: &Database,
+        app: &str,
+        id: &str,
+        settings: serde_json::Value,
+        meta: serde_json::Value,
+    ) {
+        let mut provider = Provider::with_id(id.into(), "Nexus GLM-5.2".into(), settings, None);
+        provider.meta = Some(serde_json::from_value(meta).unwrap());
+        db.save_provider(app, &provider).unwrap();
+    }
+
+    fn nexus(db: &Database, app: &str, id: &str) -> Provider {
+        db.get_provider_by_id(id, app).unwrap().unwrap()
+    }
 
     #[test]
     fn ensure_inserts_when_missing() {
@@ -782,5 +1086,115 @@ mod ensure_official_seed_tests {
         let result =
             db.ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::Claude);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
+    }
+
+    #[test]
+    fn managed_nexus_v5_upgrades_each_app_without_losing_user_fields() {
+        let db = Database::memory().unwrap();
+        let endpoint = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
+        let shared_meta = json!({
+            "providerType":"nexus", "managedNexusPresetVersion":5,
+            "apiFormat":"openai_chat", "customUserAgent":"keep-agent",
+            "localProxyRequestOverrides":{"headers":{"x-keep":"yes"},"body":{"temperature":0.2}}
+        });
+        let codex_settings = json!({
+            "auth":{"OPENAI_API_KEY":"rotated-user-key"},
+            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'")
+        });
+        save_nexus(&db, "codex", "codex", codex_settings, shared_meta.clone());
+        let claude_settings = json!({"env":{
+                "ANTHROPIC_BASE_URL":endpoint, "ANTHROPIC_AUTH_TOKEN":"rotated-user-key",
+                "ANTHROPIC_MODEL":"GLM-5.2-FP8[1m]"
+        }});
+        save_nexus(
+            &db,
+            "claude",
+            "claude",
+            claude_settings,
+            shared_meta.clone(),
+        );
+        let mut desktop_meta = shared_meta;
+        desktop_meta["claudeDesktopMode"] = json!("proxy");
+        desktop_meta["claudeDesktopModelRoutes"] = json!({
+            "claude-sonnet-5":{"model":"GLM-5.2-FP8","labelOverride":"keep"}
+        });
+        let desktop_settings = json!({"env":{"ANTHROPIC_BASE_URL":endpoint}});
+        save_nexus(
+            &db,
+            "claude-desktop",
+            "desktop",
+            desktop_settings,
+            desktop_meta,
+        );
+
+        for (app, id) in [
+            (AppType::Codex, "codex"),
+            (AppType::Claude, "claude"),
+            (AppType::ClaudeDesktop, "desktop"),
+        ] {
+            assert!(db.migrate_managed_nexus_for_app(&app, Some(id)).unwrap());
+        }
+        let codex = nexus(&db, "codex", "codex");
+        let codex_meta = codex.meta.unwrap();
+        assert_eq!(codex_meta.managed_nexus_preset_version, Some(6));
+        assert_eq!(codex_meta.custom_user_agent.as_deref(), Some("keep-agent"));
+        let overrides = codex_meta.local_proxy_request_overrides.unwrap();
+        assert_eq!(overrides.headers["x-keep"], "yes");
+        assert_eq!(overrides.body.unwrap()["temperature"], 0.2);
+        assert_eq!(
+            codex.settings_config["auth"]["OPENAI_API_KEY"],
+            "rotated-user-key"
+        );
+        let config = codex.settings_config["config"].as_str().unwrap();
+        assert!(config.contains("model_auto_compact_token_limit = 252000"));
+        assert!(!config.contains("model_reasoning_effort"));
+        let claude = nexus(&db, "claude", "claude");
+        assert_eq!(claude.meta.unwrap().managed_nexus_preset_version, Some(6));
+        assert_eq!(claude.settings_config["env"]["API_TIMEOUT_MS"], "3000000");
+        let desktop = nexus(&db, "claude-desktop", "desktop");
+        let route = &desktop.meta.unwrap().claude_desktop_model_routes["claude-sonnet-5"];
+        assert_eq!(
+            (route.model.as_str(), route.supports_1m),
+            (NEXUS_MODEL, Some(true))
+        );
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::Codex, Some("codex"))
+            .unwrap());
+    }
+
+    #[test]
+    fn migration_skips_unowned_rows_and_isolates_app_errors() {
+        let db = Database::memory().unwrap();
+        let meta =
+            json!({"providerType":"nexus","managedNexusPresetVersion":5,"apiFormat":"openai_chat"});
+        let custom = json!({"env":{"ANTHROPIC_BASE_URL":"https://custom.example/v1"}});
+        save_nexus(&db, "claude", "custom", custom, meta.clone());
+        let good = json!({"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:30001/v1","ANTHROPIC_MODEL":"glm-5.2[1m]"}});
+        save_nexus(&db, "claude", "good", good, meta);
+        save_nexus(
+            &db,
+            "codex",
+            "broken",
+            json!({}),
+            json!({"apiFormat":"openai_chat"}),
+        );
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("UPDATE providers SET settings_config='{bad' WHERE id='broken' AND app_type='codex'", []).unwrap();
+        }
+
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::Codex, None)
+            .is_err());
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::Claude, Some("good"))
+            .unwrap());
+        let version = |id| {
+            nexus(&db, "claude", id)
+                .meta
+                .unwrap()
+                .managed_nexus_preset_version
+        };
+        assert_eq!((version("custom"), version("good")), (Some(5), Some(6)));
     }
 }
