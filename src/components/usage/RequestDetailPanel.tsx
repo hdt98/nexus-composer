@@ -5,6 +5,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { copyText } from "@/lib/clipboard";
 import { useRequestDetail } from "@/lib/query/usage";
 import { getFreshInputTokens, isUnpricedUsage } from "@/types/usage";
 import { Button } from "@/components/ui/button";
@@ -21,7 +22,8 @@ export function RequestDetailPanel({
 }: RequestDetailPanelProps) {
   const { t, i18n } = useTranslation();
   const { data: request, isLoading } = useRequestDetail(requestId);
-  const dateLocale = i18n.language === "vi" ? "vi-VN" : "en-US";
+  const dateLocale =
+    i18n.language === "vi" ? "vi-VN" : "en-US";
 
   if (isLoading) {
     return (
@@ -90,7 +92,7 @@ export function RequestDetailPanel({
                         "Copy server request ID",
                       )}
                       onClick={() => {
-                        void navigator.clipboard.writeText(correlationId);
+                        void copyText(correlationId);
                       }}
                     >
                       <Copy className="h-3.5 w-3.5" />

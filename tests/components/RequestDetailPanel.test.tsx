@@ -4,6 +4,7 @@ import { RequestDetailPanel } from "@/components/usage/RequestDetailPanel";
 import type { RequestLog } from "@/types/usage";
 
 const useRequestDetailMock = vi.hoisted(() => vi.fn());
+const copyTextMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -14,6 +15,10 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("@/lib/query/usage", () => ({
   useRequestDetail: (requestId: string) => useRequestDetailMock(requestId),
+}));
+
+vi.mock("@/lib/clipboard", () => ({
+  copyText: copyTextMock,
 }));
 
 vi.mock("@/components/ui/dialog", () => ({
@@ -56,21 +61,17 @@ describe("RequestDetailPanel", () => {
 
   beforeEach(() => {
     useRequestDetailMock.mockReturnValue({ data: request, isLoading: false });
+    copyTextMock.mockReset();
+    copyTextMock.mockResolvedValue(undefined);
   });
 
   it("shows and copies the server correlation ID", () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", {
-      configurable: true,
-      value: { writeText },
-    });
-
     render(<RequestDetailPanel requestId="response-id" onClose={vi.fn()} />);
 
     expect(screen.getByText("server-request-id")).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "Copy server request ID" }),
     );
-    expect(writeText).toHaveBeenCalledWith("server-request-id");
+    expect(copyTextMock).toHaveBeenCalledWith("server-request-id");
   });
 });
