@@ -2391,12 +2391,12 @@ base_url = "https://production.api/v1"
     #[test]
     fn codex_model_catalog_uses_provider_models_and_context() {
         let template = json!({
-            "slug": "gpt-5.5",
-            "display_name": "GPT-5.5",
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6 Sol",
             "description": "Frontier model",
-            "base_instructions": "gpt-5.5 base instructions",
+            "base_instructions": "gpt-5.6-sol base instructions",
             "model_messages": {
-                "instructions_template": "gpt-5.5 instructions template",
+                "instructions_template": "gpt-5.6-sol instructions template",
                 "instructions_variables": {
                     "personality_default": "",
                     "personality_friendly": "",
@@ -2412,10 +2412,10 @@ base_url = "https://production.api/v1"
                 }
             ],
             "availability_nux": {
-                "message": "GPT-5.5 is now available."
+                "message": "GPT-5.6 Sol is now available."
             },
             "upgrade": {
-                "target": "gpt-5.5"
+                "target": "gpt-5.6-sol"
             },
             "context_window": 272000,
             "max_context_window": 272000
@@ -2468,12 +2468,12 @@ base_url = "https://production.api/v1"
             models[0]
                 .get("base_instructions")
                 .and_then(|value| value.as_str()),
-            Some("gpt-5.5 base instructions")
+            Some("gpt-5.6-sol base instructions")
         );
         assert_eq!(
             models[0].get("model_messages"),
             template.get("model_messages"),
-            "custom catalog entries should keep the gpt-5.5 agent template"
+            "custom catalog entries should keep the Sol agent template"
         );
         assert_eq!(
             models[0].get("additional_speed_tiers"),
@@ -2484,7 +2484,7 @@ base_url = "https://production.api/v1"
             models[0]
                 .get("availability_nux")
                 .is_some_and(|value| value.is_null()),
-            "generated third-party entries should not inherit GPT-5.5 launch messaging"
+            "generated third-party entries should not inherit Sol launch messaging"
         );
     }
 
