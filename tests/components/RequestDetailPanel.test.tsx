@@ -8,7 +8,13 @@ const copyTextMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
-    t: (key: string, fallback?: string) => fallback ?? key,
+    t: (key: string, fallback?: string) => {
+      if (key === "common.close") return "Close";
+      if (key === "usage.copyCorrelationId") {
+        return "Copy server request ID";
+      }
+      return fallback ?? key;
+    },
     i18n: { language: "en" },
   }),
 }));

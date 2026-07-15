@@ -100,6 +100,15 @@ describe("Nexus Composer language system", () => {
     });
   });
 
+  it("keeps Request Detail source free of untranslated Han fallbacks", () => {
+    const source = readFileSync(
+      "src/components/usage/RequestDetailPanel.tsx",
+      "utf-8",
+    );
+
+    expect(source).not.toMatch(/\p{Script=Han}/u);
+  });
+
   it("LanguageSettings component only has en and vi buttons", () => {
     const content = readFileSync(
       "src/components/settings/LanguageSettings.tsx",
