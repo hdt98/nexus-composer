@@ -726,7 +726,10 @@ fn append_responses_item_as_chat_message(
                 .unwrap_or("user");
             let message = json!({
                 "role": role,
-                "content": responses_content_to_chat_content(role, &Value::Array(vec![item.clone()]))
+                "content": responses_content_to_chat_content(
+                    &Value::Array(vec![item.clone()]),
+                    false,
+                )
             });
             if role == "assistant" {
                 let mut message = message;
@@ -810,7 +813,12 @@ fn responses_message_item_to_chat_message(
     let chat_role = responses_role_to_chat_role(role);
     let content = item
         .get("content")
-        .map(|value| responses_content_to_chat_content(chat_role, value))
+        .map(|value| {
+            responses_content_to_chat_content(
+                value,
+                item.get("type").and_then(Value::as_str) == Some("agent_message"),
+            )
+        })
         .unwrap_or(Value::Null);
 
     let mut message = json!({
@@ -1002,7 +1010,7 @@ fn responses_reasoning_item_text(item: &Value) -> Option<String> {
     extract_reasoning_summary_text(item)
 }
 
-fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
+fn responses_content_to_chat_content(content: &Value, allow_agent_payload: bool) -> Value {
     if content.is_null() || content.is_string() {
         return content.clone();
     }
@@ -1024,6 +1032,13 @@ fn responses_content_to_chat_content(_role: &str, content: &Value) -> Value {
                             "type": "text",
                             "text": text
                         }));
+                    }
+                }
+            }
+            "encrypted_content" if allow_agent_payload => {
+                if let Some(text) = part.get("encrypted_content").and_then(Value::as_str) {
+                    if !text.is_empty() {
+                        chat_parts.push(json!({ "type": "text", "text": text }));
                     }
                 }
             }
@@ -2526,6 +2541,42 @@ mod tests {
         assert_eq!(messages[1]["content"], "Keep the reply brief.");
         assert_eq!(messages[2]["role"], "user");
         assert_eq!(messages[2]["content"], "Fallback content.");
+    }
+
+    #[test]
+    fn responses_request_to_chat_forwards_only_agent_message_encrypted_content() {
+        let input = json!({
+            "model": "GLM-5.2-FP8",
+            "input": [
+                {"type": "reasoning", "encrypted_content": "opaque-reasoning", "summary": []},
+                {"type": "compaction", "encrypted_content": "opaque-compaction"},
+                {
+                    "type": "agent_message",
+                    "author": "/root",
+                    "recipient": "/root/worker",
+                    "content": [
+                        {"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"},
+                        {"type": "encrypted_content", "encrypted_content": "Solve P2"}
+                    ]
+                }
+            ]
+        });
+
+        let result =
+            responses_to_chat_completions_with_reasoning_history(input, None, true).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        let serialized = serde_json::to_string(&result).unwrap();
+
+        assert_eq!(
+            messages,
+            &[json!({
+                "role": "user",
+                "content": "Message Type: NEW_TASK\nPayload:\n\nSolve P2"
+            })]
+        );
+        for absent in ["opaque-reasoning", "opaque-compaction", "encrypted_content"] {
+            assert!(!serialized.contains(absent));
+        }
     }
 
     #[test]
