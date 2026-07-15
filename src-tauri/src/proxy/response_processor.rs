@@ -212,6 +212,7 @@ pub async fn handle_non_streaming(
     parser_config: &UsageParserConfig,
     // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
     _connection_guard: Option<ActiveConnectionGuard>,
+    record_usage: bool,
 ) -> Result<Response, ProxyError> {
     // 整包超时：仅在故障转移开启且配置值非零时生效
     let body_timeout =
@@ -231,7 +232,7 @@ pub async fn handle_non_streaming(
     );
 
     // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
-    if usage_logging_enabled(state) {
+    if record_usage && usage_logging_enabled(state) {
         if let Ok(json_value) = serde_json::from_slice::<Value>(&body_bytes) {
             // 解析使用量
             if let Some(usage) = (parser_config.response_parser)(&json_value) {
@@ -298,6 +299,8 @@ pub async fn handle_non_streaming(
                 false,
             );
         }
+    } else if !record_usage {
+        log::debug!("[{}] request excluded from usage logging", ctx.tag);
     } else {
         log::debug!("[{}] usage logging 已关闭，跳过非流式 usage 解析", ctx.tag);
     }
@@ -325,10 +328,25 @@ pub async fn process_response(
     parser_config: &UsageParserConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<Response, ProxyError> {
+    process_response_with_usage(response, ctx, state, parser_config, connection_guard, true).await
+}
+
+pub(crate) async fn process_response_with_usage(
+    response: ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    parser_config: &UsageParserConfig,
+    connection_guard: Option<ActiveConnectionGuard>,
+    record_usage: bool,
+) -> Result<Response, ProxyError> {
+    if !record_usage {
+        return handle_non_streaming(response, ctx, state, parser_config, connection_guard, false)
+            .await;
+    }
     if is_sse_response(&response) {
         Ok(handle_streaming(response, ctx, state, parser_config, connection_guard).await)
     } else {
-        handle_non_streaming(response, ctx, state, parser_config, connection_guard).await
+        handle_non_streaming(response, ctx, state, parser_config, connection_guard, true).await
     }
 }
 
@@ -812,10 +830,12 @@ fn format_headers(headers: &HeaderMap) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::AppType;
     use crate::database::Database;
     use crate::error::AppError;
     use crate::provider::ProviderMeta;
     use crate::proxy::failover_switch::FailoverSwitchManager;
+    use crate::proxy::handler_config::CLAUDE_PARSER_CONFIG;
     use crate::proxy::provider_router::ProviderRouter;
     use crate::proxy::providers::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
@@ -945,6 +965,55 @@ mod tests {
             app_handle: None,
             failover_manager: Arc::new(FailoverSwitchManager::new(db)),
         }
+    }
+
+    fn request_log_count(db: &Database) -> Result<i64, AppError> {
+        let conn = crate::database::lock_conn!(db.conn);
+        conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn count_tokens_response_succeeds_without_creating_usage() -> Result<(), AppError> {
+        let db = Arc::new(Database::memory()?);
+        let provider_id = crate::settings::get_current_provider(&AppType::Claude)
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| "count-provider".to_string());
+        insert_provider(&db, &provider_id, "claude", ProviderMeta::default())?;
+        db.set_current_provider("claude", &provider_id)?;
+        let state = build_state(db.clone());
+        let ctx = RequestContext::new(
+            &state,
+            &serde_json::json!({"model": "GLM-5.2-FP8[1m]"}),
+            &HeaderMap::new(),
+            AppType::Claude,
+            "Test",
+            "claude",
+        )
+        .await
+        .map_err(|e| AppError::Message(e.to_string()))?;
+        let body = Bytes::from_static(br#"{"input_tokens":17}"#);
+
+        let response = process_response_with_usage(
+            ProxyResponse::buffered(http::StatusCode::OK, HeaderMap::new(), body.clone()),
+            &ctx,
+            &state,
+            &CLAUDE_PARSER_CONFIG,
+            None,
+            false,
+        )
+        .await
+        .map_err(|e| AppError::Message(e.to_string()))?;
+
+        let downstream = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .map_err(|e| AppError::Message(e.to_string()))?;
+        assert_eq!(downstream, body);
+        assert_eq!(request_log_count(&db)?, 0);
+        Ok(())
     }
 
     fn seed_pricing(db: &Database) -> Result<(), AppError> {
