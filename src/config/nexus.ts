@@ -6,6 +6,7 @@ export const NEXUS_MODEL = "GLM-5.2-FP8";
 export const NEXUS_CLAUDE_MODEL = `${NEXUS_MODEL}[1m]`;
 export const NEXUS_CONTEXT_WINDOW = 1_048_576;
 export const NEXUS_AUTO_COMPACT_TOKENS = 252_000;
+export const NEXUS_MAX_OUTPUT_TOKENS = 65_536;
 export const NEXUS_MANAGED_PRESET_VERSION = 2;
 export const NEXUS_TEXT_MODEL_CATALOG = {
   models: [
@@ -14,7 +15,10 @@ export const NEXUS_TEXT_MODEL_CATALOG = {
   ],
 };
 export const NEXUS_REASONING_REQUEST_OVERRIDES = {
-  body: { chat_template_kwargs: { enable_thinking: true } },
+  body: {
+    max_tokens: NEXUS_MAX_OUTPUT_TOKENS,
+    chat_template_kwargs: { enable_thinking: true },
+  },
 } satisfies LocalProxyRequestOverrides;
 
 const MANAGED_NEXUS_MODELS = new Set([
@@ -65,8 +69,15 @@ export const removeManagedNexusReasoningOverride = (meta: {
   const body = overrideRecord.body;
   if (!body || typeof body !== "object" || Array.isArray(body)) return;
   const bodyRecord = body as Record<string, unknown>;
+  if (bodyRecord.max_tokens === NEXUS_MAX_OUTPUT_TOKENS) {
+    delete bodyRecord.max_tokens;
+  }
   const template = bodyRecord.chat_template_kwargs;
   if (!template || typeof template !== "object" || Array.isArray(template)) {
+    if (Object.keys(bodyRecord).length === 0) delete overrideRecord.body;
+    if (Object.keys(overrideRecord).length === 0) {
+      delete meta.localProxyRequestOverrides;
+    }
     return;
   }
   const templateRecord = template as Record<string, unknown>;

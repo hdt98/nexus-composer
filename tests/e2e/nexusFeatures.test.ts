@@ -10,6 +10,7 @@ import {
   NEXUS_CLAUDE_MODEL,
   NEXUS_CONTEXT_WINDOW,
   NEXUS_ENDPOINT,
+  NEXUS_MAX_OUTPUT_TOKENS,
   NEXUS_MODEL,
   NEXUS_REASONING_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -59,6 +60,9 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
     );
     expect(nexus().localProxyRequestOverrides).toEqual(
       NEXUS_REASONING_REQUEST_OVERRIDES,
+    );
+    expect(nexus().localProxyRequestOverrides?.body?.max_tokens).toBe(
+      NEXUS_MAX_OUTPUT_TOKENS,
     );
   });
 

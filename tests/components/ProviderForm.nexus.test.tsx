@@ -7,6 +7,7 @@ import {
   NEXUS_CLAUDE_MODEL,
   NEXUS_ENDPOINT,
   NEXUS_MANAGED_PRESET_VERSION,
+  NEXUS_MAX_OUTPUT_TOKENS,
   NEXUS_MODEL,
 } from "@/config/nexus";
 import { createTestQueryClient } from "../utils/testQueryClient";
@@ -48,6 +49,7 @@ const managedMeta = {
   localProxyRequestOverrides: {
     headers: { "x-custom": "keep-me" },
     body: {
+      max_tokens: NEXUS_MAX_OUTPUT_TOKENS,
       temperature: 0.2,
       chat_template_kwargs: { enable_thinking: true, custom: "keep-me" },
     },
@@ -108,7 +110,10 @@ describe("ProviderForm Nexus presets", () => {
       providerType: "nexus",
       managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: {
-        body: { chat_template_kwargs: { enable_thinking: true } },
+        body: {
+          max_tokens: NEXUS_MAX_OUTPUT_TOKENS,
+          chat_template_kwargs: { enable_thinking: true },
+        },
       },
     });
     expect(JSON.parse(payload.settingsConfig).config).not.toContain(
@@ -134,7 +139,10 @@ describe("ProviderForm Nexus presets", () => {
       providerType: "nexus",
       managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: {
-        body: { chat_template_kwargs: { enable_thinking: true } },
+        body: {
+          max_tokens: NEXUS_MAX_OUTPUT_TOKENS,
+          chat_template_kwargs: { enable_thinking: true },
+        },
       },
     });
   });

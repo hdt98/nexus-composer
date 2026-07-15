@@ -7,6 +7,7 @@ import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPres
 import {
   NEXUS_ENDPOINT,
   NEXUS_MANAGED_PRESET_VERSION,
+  NEXUS_MAX_OUTPUT_TOKENS,
   NEXUS_MODEL,
   NEXUS_TEXT_MODEL_CATALOG,
 } from "@/config/nexus";
@@ -65,6 +66,7 @@ const managedDesktopData: ComponentProps<
     localProxyRequestOverrides: {
       headers: { "x-custom": "keep-me" },
       body: {
+        max_tokens: NEXUS_MAX_OUTPUT_TOKENS,
         temperature: 0.2,
         chat_template_kwargs: { enable_thinking: true, custom: "keep-me" },
       },
@@ -103,7 +105,10 @@ describe("ClaudeDesktopProviderForm", () => {
       providerType: "nexus",
       managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: {
-        body: { chat_template_kwargs: { enable_thinking: true } },
+        body: {
+          max_tokens: NEXUS_MAX_OUTPUT_TOKENS,
+          chat_template_kwargs: { enable_thinking: true },
+        },
       },
     });
   });
