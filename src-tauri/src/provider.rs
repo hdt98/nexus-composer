@@ -487,6 +487,12 @@ pub struct ProviderMeta {
         skip_serializing_if = "Option::is_none"
     )]
     pub local_proxy_request_overrides: Option<LocalProxyRequestOverrides>,
+    /// Version of the managed Nexus preset already applied to this provider.
+    #[serde(
+        rename = "managedNexusPresetVersion",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub managed_nexus_preset_version: Option<u32>,
     /// 累加模式应用中，该 provider 是否已写入 live config。
     /// `None` 表示旧数据/未知状态，`Some(false)` 表示明确仅存在于数据库中。
     #[serde(rename = "liveConfigManaged", skip_serializing_if = "Option::is_none")]
@@ -992,6 +998,7 @@ mod tests {
                 headers: HashMap::from([("X-Test".to_string(), "yes".to_string())]),
                 body: Some(json!({ "temperature": 0.2 })),
             }),
+            managed_nexus_preset_version: Some(1),
             ..ProviderMeta::default()
         };
 
@@ -1004,12 +1011,14 @@ mod tests {
             value["localProxyRequestOverrides"]["body"]["temperature"],
             0.2
         );
+        assert_eq!(value["managedNexusPresetVersion"], 1);
 
         let decoded: ProviderMeta =
             serde_json::from_value(value).expect("deserialize ProviderMeta");
         let overrides = decoded.local_proxy_request_overrides.unwrap();
         assert_eq!(overrides.headers.get("X-Test"), Some(&"yes".to_string()));
         assert_eq!(overrides.body.unwrap()["temperature"], 0.2);
+        assert_eq!(decoded.managed_nexus_preset_version, Some(1));
     }
 
     #[test]

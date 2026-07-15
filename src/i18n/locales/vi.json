@@ -1,7 +1,6 @@
 {
   "app": {
-    "title": "Nexus Composer",
-    "description": "Kết nối Codex và Claude Code với endpoint GLM-5.2 SGLang"
+    "title": "Nexus Composer"
   },
   "common": {
     "add": "Thêm",
@@ -44,8 +43,8 @@
   },
   "firstRunNotice": {
     "title": "Chào mừng đến với Nexus Composer",
-    "bodyDefault": "Nexus Composer kết nối các trợ lý lập trình nội bộ (Codex và Claude Code) với một endpoint mô hình GLM-5.2 được phục vụ bởi SGLang. Chọn preset Nexus GLM-5.2 cho mỗi trợ lý để bắt đầu.",
-    "bodyOfficial": "Preset Nexus GLM-5.2 trỏ tới http://127.0.0.1:30000/v1 và tái sử dụng lớp chuyển đổi giao thức nội bộ để Codex (Responses) và Claude Code (Anthropic Messages) đều có thể giao tiếp với endpoint tương thích OpenAI của SGLang.",
+    "bodyDefault": "Nexus Composer kết nối Codex, Claude Code và các trợ lý lập trình khác với endpoint mô hình của bạn. Chọn một preset Nexus để bắt đầu.",
+    "bodyOfficial": "Preset Nexus GLM-5.2 tự động cấu hình Codex và Claude Code dùng endpoint Nexus qua bộ chuyển đổi giao thức tích hợp.",
     "confirm": "Đã hiểu"
   },
   "apiKeyInput": {
@@ -2917,25 +2916,6 @@
     "refresh": "Refresh"
   },
   "nexus": {
-    "home": {
-      "endpointTitle": "Endpoint SGLang",
-      "reachable": "Có thể kết nối",
-      "checking": "Đang kiểm tra...",
-      "unreachable": "Không kết nối được",
-      "contextWindow": "Context {{n}} tokens",
-      "tunnelHint": "Đảm bảo rằng đường hầm SSH đến endpoint SGLang đang chạy trước khi sử dụng Nexus Composer.",
-      "connected": "Đã kết nối",
-      "configured": "Đã cấu hình",
-      "notSetup": "Chưa cài đặt",
-      "openProviders": "Mở cài đặt provider",
-      "orchestrationTitle": "Trinity / Conductor",
-      "comingLater": "Sắp ra mắt",
-      "orchestrationDesc": "Orchestration mô hình, định tuyến và huấn luyện thuộc kế hoạch dài hạn của Nexus. MVP1 kết nối trợ lý trực tiếp đến một endpoint GLM-5.2 duy nhất.",
-      "setupTitle": "Cài đặt",
-      "step1": "Đảm bảo đường hầm SSH SGLang đang chạy tại",
-      "step2": "Thêm preset Nexus GLM-5.2 cho Codex và Claude Code từ danh sách provider.",
-      "step3": "Chuyển sang provider Nexus GLM-5.2 trong mỗi trợ lý để định tuyến qua lớp chuyển đổi giao thức nội bộ."
-    },
     "preset": {
       "nexusLocal": "Nexus GLM-5.2"
     }

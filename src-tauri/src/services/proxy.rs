@@ -229,7 +229,7 @@ impl ProxyService {
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
             CLAUDE_TAKEOVER_HAIKU_MODEL,
-            false,
+            true,
             haiku_model,
         );
         Self::push_claude_takeover_role_fields(
@@ -402,11 +402,26 @@ impl ProxyService {
         });
     }
 
-    pub(crate) async fn lock_switch_for_app(
+    pub(crate) async fn lock_takeover_ownership_for_app(
         &self,
-        app_type: &str,
-    ) -> tokio::sync::OwnedMutexGuard<()> {
-        self.switch_locks.lock_for_app(app_type).await
+        app_type: &AppType,
+    ) -> Result<(tokio::sync::OwnedMutexGuard<()>, bool), String> {
+        let app = app_type.as_str();
+        let guard = self.switch_locks.lock_for_app(app).await;
+        let has_backup = self
+            .db
+            .get_live_backup(app)
+            .await
+            .map_err(|e| format!("Failed to read {app} live backup: {e}"))?
+            .is_some();
+        let live_taken_over = self.detect_takeover_in_live_config_for_app(app_type);
+        let enabled = self
+            .db
+            .get_proxy_config_for_app(app)
+            .await
+            .map_err(|e| format!("Failed to read {app} proxy config: {e}"))?
+            .enabled;
+        Ok((guard, enabled && (has_backup || live_taken_over)))
     }
 
     /// 启动代理服务器
@@ -834,12 +849,9 @@ impl ProxyService {
                             ]
                             .into_iter()
                             .find_map(|key| {
-                                env.get(key)
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| (key, s.trim()))
-                            })
-                            .filter(|(_, token)| {
-                                !token.is_empty() && *token != PROXY_TOKEN_PLACEHOLDER
+                                let token = env.get(key).and_then(|v| v.as_str()).map(str::trim)?;
+                                (!token.is_empty() && token != PROXY_TOKEN_PLACEHOLDER)
+                                    .then_some((key, token))
                             });
 
                             if let Some((token_key, token)) = token_pair {
@@ -2003,7 +2015,7 @@ impl ProxyService {
     }
 
     /// 仅供已持有 per-app 切换锁的调用方使用。
-    async fn update_live_backup_from_provider_inner(
+    pub(crate) async fn update_live_backup_from_provider_inner(
         &self,
         app_type: &str,
         provider: &Provider,
@@ -2380,6 +2392,40 @@ impl ProxyService {
 
     fn write_codex_live(&self, config: &Value) -> Result<(), String> {
         self.write_codex_live_verbatim(config)
+    }
+
+    pub(crate) fn scrub_leaked_live_credentials(&self) -> Result<usize, String> {
+        let mut scrubbed = 0;
+        match self.read_claude_live() {
+            Ok(mut config) => {
+                if crate::database::scrub_leaked_nexus_credentials(&AppType::Claude, &mut config)
+                    .map_err(|e| format!("Failed to scrub Claude live credentials: {e}"))?
+                {
+                    self.write_claude_live(&config)?;
+                    scrubbed += 1;
+                }
+            }
+            Err(error) if get_claude_settings_path().exists() => return Err(error),
+            Err(_) => {}
+        }
+        match self.read_codex_live() {
+            Ok(mut config) => {
+                if crate::database::scrub_leaked_nexus_credentials(&AppType::Codex, &mut config)
+                    .map_err(|e| format!("Failed to scrub Codex live credentials: {e}"))?
+                {
+                    self.write_codex_live(&config)?;
+                    scrubbed += 1;
+                }
+            }
+            Err(error)
+                if crate::codex_config::get_codex_auth_path().exists()
+                    || crate::codex_config::get_codex_config_path().exists() =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
+        }
+        Ok(scrubbed)
     }
 
     fn write_codex_live_for_provider(
@@ -2986,6 +3032,23 @@ mod tests {
         assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", Some("gpt-5.4"));
         assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
         assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[test]
+    fn claude_takeover_preserves_one_m_capability_for_haiku() {
+        let fields: std::collections::HashMap<_, _> =
+            ProxyService::build_claude_takeover_model_fields(&json!({
+                "env": {"ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-5.2-FP8[1m]"}
+            }))
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .map(String::as_str),
+            Some("claude-haiku-4-5[1M]")
+        );
     }
 
     #[test]
@@ -3636,7 +3699,7 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
-    async fn codex_sync_current_to_live_during_takeover_activation_keeps_proxy_live_config() {
+    async fn codex_sync_current_to_live_repairs_disabled_stale_takeover() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
@@ -3707,7 +3770,7 @@ wire_api = "responses"
                 .await
                 .expect("get Codex proxy config")
                 .enabled,
-            "this reproduces the activation window before set_takeover_for_app marks enabled=true"
+            "this reproduces a stale placeholder while takeover is disabled"
         );
 
         crate::services::provider::ProviderService::sync_current_to_live(&state)
@@ -3717,25 +3780,26 @@ wire_api = "responses"
             crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
                 .expect("read live auth");
         assert_eq!(
-            live_auth, oauth_auth,
-            "activation-time provider sync must not rewrite Codex OAuth auth.json"
+            live_auth,
+            json!({"OPENAI_API_KEY":"deepseek-key"}),
+            "disabled takeover must restore the current provider auth"
         );
 
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read live config");
         assert!(
-            live_config.contains(PROXY_TOKEN_PLACEHOLDER),
-            "activation-time provider sync must keep the proxy bearer placeholder"
+            !live_config.contains(PROXY_TOKEN_PLACEHOLDER),
+            "disabled takeover must not retain the proxy bearer placeholder"
         );
         assert!(
-            live_config.contains("http://127.0.0.1"),
-            "activation-time provider sync must keep the local proxy base_url"
+            live_config.contains("https://api.deepseek.com/v1"),
+            "disabled takeover must restore the current provider base_url"
         );
         assert!(
-            state
+            !state
                 .proxy_service
                 .detect_takeover_in_live_config_for_app(&AppType::Codex),
-            "Codex live config should still be detected as taken over"
+            "disabled takeover must no longer be detected as active"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
@@ -4383,7 +4447,8 @@ model = "gpt-5.1-codex"
 
         let live_config = json!({
             "env": {
-                "ANTHROPIC_AUTH_TOKEN": "fresh"
+                "ANTHROPIC_AUTH_TOKEN": PROXY_TOKEN_PLACEHOLDER,
+                "ANTHROPIC_API_KEY": "fresh"
             }
         });
 
@@ -6046,6 +6111,62 @@ requires_openai_auth = true
             backup_after.original_config, good_backup,
             "must not overwrite a good backup with a proxy placeholder"
         );
+    }
+
+    #[tokio::test]
+    async fn takeover_ownership_waits_for_activation_state_commit() {
+        let db = Arc::new(Database::memory().unwrap());
+        let service = Arc::new(ProxyService::new(db.clone()));
+        let activation_guard = service.lock_switch_for_test("claude").await;
+        let waiter_service = service.clone();
+        let waiter = tokio::spawn(async move {
+            let (_guard, owns_live) = waiter_service
+                .lock_takeover_ownership_for_app(&AppType::Claude)
+                .await
+                .unwrap();
+            owns_live
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        db.save_live_backup("claude", "{}").await.unwrap();
+        let mut config = db.get_proxy_config_for_app("claude").await.unwrap();
+        config.enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+        drop(activation_guard);
+
+        assert!(waiter.await.unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn startup_scrub_preserves_placeholders_and_rotated_credentials() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let service = ProxyService::new(Arc::new(Database::memory().unwrap()));
+        let live = json!({"env": {
+            "ANTHROPIC_AUTH_TOKEN":"dummy",
+            "OPENAI_API_KEY":"rotated"
+        }});
+        service.write_claude_live(&live).unwrap();
+
+        assert_eq!(service.scrub_leaked_live_credentials().unwrap(), 0);
+        assert_eq!(service.read_claude_live().unwrap(), live);
+    }
+
+    #[test]
+    #[serial]
+    fn startup_scrub_rejects_malformed_existing_codex_config() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let path = crate::codex_config::get_codex_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "experimental_bearer_token = [not-valid").unwrap();
+
+        let service = ProxyService::new(Arc::new(Database::memory().unwrap()));
+        let error = service.scrub_leaked_live_credentials().unwrap_err();
+        assert!(error.contains("Codex"));
     }
 
     /// Regression: when ALL apps have Live=proxy-placeholder (worst-case

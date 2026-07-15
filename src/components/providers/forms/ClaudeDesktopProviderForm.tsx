@@ -292,7 +292,10 @@ export function ClaudeDesktopProviderForm({
     isPartner?: boolean;
     partnerPromotionKey?: string;
     providerType?: string;
+    managedNexusPresetVersion?: number;
     requiresOAuth?: boolean;
+    modelCatalog?: ClaudeDesktopProviderPreset["modelCatalog"];
+    localProxyRequestOverrides?: ClaudeDesktopProviderPreset["localProxyRequestOverrides"];
   } | null>(null);
   const [routes, setRoutes] = useState<RouteRow[]>(() => {
     const rows = initialRouteRows(initialData?.meta?.claudeDesktopModelRoutes);
@@ -375,11 +378,12 @@ export function ClaudeDesktopProviderForm({
     }),
     [t],
   );
-  const activeProviderType =
-    activePreset?.providerType ?? initialData?.meta?.providerType;
-  const isOfficial =
-    initialData?.category === "official" ||
-    activePreset?.category === "official";
+  const activeProviderType = activePreset
+    ? activePreset.providerType
+    : initialData?.meta?.providerType;
+  const isOfficial = activePreset
+    ? activePreset.category === "official"
+    : initialData?.category === "official";
   const usesManagedOAuth =
     activePreset?.requiresOAuth === true ||
     activeProviderType === "github_copilot" ||
@@ -457,7 +461,10 @@ export function ClaudeDesktopProviderForm({
       isPartner: entry.preset.isPartner,
       partnerPromotionKey: entry.preset.partnerPromotionKey,
       providerType: entry.preset.providerType,
+      managedNexusPresetVersion: entry.preset.managedNexusPresetVersion,
       requiresOAuth: entry.preset.requiresOAuth,
+      modelCatalog: entry.preset.modelCatalog,
+      localProxyRequestOverrides: entry.preset.localProxyRequestOverrides,
     });
     applyDesktopPreset(entry.preset);
   };
@@ -550,12 +557,16 @@ export function ClaudeDesktopProviderForm({
       // 与启动 seed 的 OFFICIAL_SEEDS 占位语义一致。
       const settingsConfig = clonePlainRecord(initialData?.settingsConfig);
       settingsConfig.env = {};
+      delete settingsConfig.modelCatalog;
       const meta: ProviderMeta = { ...(initialData?.meta ?? {}) };
       delete meta.claudeDesktopMode;
       delete meta.claudeDesktopModelRoutes;
       delete meta.apiFormat;
       delete meta.endpointAutoSelect;
       delete meta.isFullUrl;
+      delete meta.providerType;
+      delete meta.managedNexusPresetVersion;
+      delete meta.localProxyRequestOverrides;
       await onSubmit({
         ...values,
         name: values.name.trim(),
@@ -636,6 +647,9 @@ export function ClaudeDesktopProviderForm({
     }
 
     const settingsConfig = clonePlainRecord(initialData?.settingsConfig);
+    if (activePreset?.modelCatalog) {
+      settingsConfig.modelCatalog = activePreset.modelCatalog;
+    }
     const env = clonePlainRecord(settingsConfig.env);
     delete env.ANTHROPIC_AUTH_TOKEN;
     delete env.ANTHROPIC_API_KEY;
@@ -670,6 +684,12 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    meta.managedNexusPresetVersion = activePreset
+      ? activePreset.managedNexusPresetVersion
+      : initialData?.meta?.managedNexusPresetVersion;
+    meta.localProxyRequestOverrides = activePreset
+      ? activePreset.localProxyRequestOverrides
+      : initialData?.meta?.localProxyRequestOverrides;
     meta.authBinding =
       activeProviderType === "github_copilot"
         ? {

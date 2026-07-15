@@ -10,16 +10,17 @@
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
     error_mapper::{get_error_message, map_proxy_error_to_status},
-    forwarder::ActiveConnectionGuard,
+    forwarder::{is_claude_count_tokens_path, ActiveConnectionGuard},
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
         CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
     },
     handler_context::RequestContext,
     providers::{
+        claude_api_format_needs_transform,
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
-        get_adapter, get_claude_api_format,
+        get_claude_api_format,
         reasoning_chat::{is_tool_protocol_error, normalize_chat_json},
         streaming::create_anthropic_sse_stream_with_reasoning,
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_reasoning,
@@ -28,9 +29,9 @@ use super::{
         transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
-        create_logged_passthrough_stream, process_response, read_decoded_body,
-        strip_entity_headers_for_rebuilt_body, strip_hop_by_hop_response_headers,
-        usage_logging_enabled, SseUsageCollector,
+        create_logged_passthrough_stream, process_response, process_response_with_usage,
+        read_decoded_body, strip_entity_headers_for_rebuilt_body,
+        strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -149,6 +150,11 @@ pub async fn handle_claude_desktop_models(
     Ok(Json(response))
 }
 
+fn should_record_claude_usage(endpoint: &str) -> bool {
+    let path = endpoint.split_once('?').map_or(endpoint, |(path, _)| path);
+    !is_claude_count_tokens_path(path)
+}
+
 async fn handle_messages_for_app(
     state: ProxyState,
     request: axum::extract::Request,
@@ -180,6 +186,7 @@ async fn handle_messages_for_app(
     let endpoint = strip_prefix
         .and_then(|prefix| raw_endpoint.strip_prefix(prefix))
         .unwrap_or(raw_endpoint);
+    let record_usage = should_record_claude_usage(endpoint);
 
     let is_stream = body
         .get("stream")
@@ -205,7 +212,9 @@ async fn handle_messages_for_app(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            if record_usage {
+                log_forward_error(&state, &ctx, is_stream, &err.error);
+            }
             return Err(err.error);
         }
     };
@@ -221,8 +230,7 @@ async fn handle_messages_for_app(
     let response = result.response;
 
     // 检查是否需要格式转换（OpenRouter 等中转服务）
-    let adapter = get_adapter(&app_type);
-    let needs_transform = adapter.needs_transform(&ctx.provider);
+    let needs_transform = claude_api_format_needs_transform(&api_format);
 
     // Claude 特有：格式转换处理
     if needs_transform {
@@ -239,12 +247,13 @@ async fn handle_messages_for_app(
     }
 
     // 通用响应处理（透传模式）
-    process_response(
+    process_response_with_usage(
         response,
         &ctx,
         &state,
         &CLAUDE_PARSER_CONFIG,
         connection_guard,
+        record_usage,
     )
     .await
 }
@@ -2113,7 +2122,8 @@ mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_boundary_error, chat_sse_to_response_value,
         codex_proxy_error_json, responses_sse_to_response_value, should_emit_anthropic_thinking,
-        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
+        should_record_claude_usage, should_use_claude_transform_streaming, transform,
+        upstream_body_parse_error,
     };
     use crate::proxy::providers::reasoning_chat::normalize_chat_json;
     use crate::proxy::ProxyError;
@@ -2178,6 +2188,16 @@ mod tests {
             }
             other => panic!("expected typed upstream protocol error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn count_tokens_is_the_only_claude_path_excluded_from_usage() {
+        assert!(!should_record_claude_usage("/v1/messages/count_tokens"));
+        assert!(!should_record_claude_usage(
+            "/claude/v1/messages/count_tokens?beta=true"
+        ));
+        assert!(should_record_claude_usage("/v1/messages"));
+        assert!(should_record_claude_usage("/claude/v1/messages?beta=true"));
     }
 
     #[test]

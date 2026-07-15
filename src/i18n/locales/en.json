@@ -1,7 +1,6 @@
 {
   "app": {
-    "title": "Nexus Composer",
-    "description": "Connect Codex and Claude Code to your GLM-5.2 SGLang endpoint"
+    "title": "Nexus Composer"
   },
   "common": {
     "add": "Add",
@@ -44,8 +43,8 @@
   },
   "firstRunNotice": {
     "title": "Welcome to Nexus Composer",
-    "bodyDefault": "Nexus Composer connects your local coding assistants (Codex and Claude Code) to a single GLM-5.2 model endpoint served by SGLang. Pick the Nexus GLM-5.2 preset for each assistant to get started.",
-    "bodyOfficial": "The Nexus GLM-5.2 preset points at http://127.0.0.1:30000/v1 and reuses the built-in protocol conversion so Codex (Responses) and Claude Code (Anthropic Messages) can both speak to the OpenAI-compatible SGLang endpoint.",
+    "bodyDefault": "Nexus Composer connects Codex, Claude Code, and other coding assistants to your model endpoints. Choose a Nexus preset to get started.",
+    "bodyOfficial": "The Nexus GLM-5.2 preset configures Codex and Claude Code to use the Nexus endpoint through the built-in protocol adapter.",
     "confirm": "Got it"
   },
   "apiKeyInput": {
@@ -2917,25 +2916,6 @@
     "refresh": "Refresh"
   },
   "nexus": {
-    "home": {
-      "endpointTitle": "SGLang Endpoint",
-      "reachable": "Reachable",
-      "checking": "Checking...",
-      "unreachable": "Unreachable",
-      "contextWindow": "{{n}} token context",
-      "tunnelHint": "Make sure the SSH tunnel to the SGLang endpoint is running before using Nexus Composer.",
-      "connected": "Connected",
-      "configured": "Configured",
-      "notSetup": "Not set up",
-      "openProviders": "Open provider settings",
-      "orchestrationTitle": "Trinity / Conductor",
-      "comingLater": "Coming later",
-      "orchestrationDesc": "Model orchestration, routing, and training are part of the long-term Nexus roadmap. MVP1 connects your assistants directly to a single GLM-5.2 endpoint.",
-      "setupTitle": "Setup",
-      "step1": "Ensure the SGLang tunnel is running on",
-      "step2": "Add the Nexus GLM-5.2 preset for Codex and Claude Code from the provider list.",
-      "step3": "Switch to the Nexus GLM-5.2 provider in each assistant to route through the built-in protocol conversion layer."
-    },
     "preset": {
       "nexusLocal": "Nexus GLM-5.2"
     }

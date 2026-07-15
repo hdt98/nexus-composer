@@ -62,19 +62,17 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
     // 代理接管期间 live 归代理所有（开启代理时官方供应商只警告不拦截，
     // 二者可以共存）。与切换/保存路径一致：以 backup/占位符为所有权信号，
     // 只更新备份，注入后的配置由接管释放时的恢复路径落盘。
-    let has_live_backup =
-        futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
-            .ok()
-            .flatten()
-            .is_some();
-    let live_taken_over = state
-        .proxy_service
-        .detect_takeover_in_live_config_for_app(&AppType::Codex);
-    if has_live_backup || live_taken_over {
+    let (_guard, takeover_owns_live) = futures::executor::block_on(
+        state
+            .proxy_service
+            .lock_takeover_ownership_for_app(&AppType::Codex),
+    )
+    .map_err(AppError::Message)?;
+    if takeover_owns_live {
         futures::executor::block_on(
             state
                 .proxy_service
-                .update_live_backup_from_provider(AppType::Codex.as_str(), provider),
+                .update_live_backup_from_provider_inner(AppType::Codex.as_str(), provider),
         )
         .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
         return Ok(true);
@@ -944,6 +942,55 @@ base_url = "http://localhost:8080"
         );
     }
 
+    #[test]
+    #[serial]
+    fn gemini_sync_paths_preserve_takeover_live_and_update_backup() {
+        with_test_home(|state, _| {
+            crate::settings::reload_settings().expect("reload settings");
+            let provider = |id: &str, key: &str| {
+                Provider::with_id(
+                    id.into(),
+                    id.into(),
+                    json!({"env":{"GEMINI_API_KEY":key}}),
+                    None,
+                )
+            };
+            let mut current = provider("gemini", "first-key");
+            state.db.save_provider("gemini", &current).unwrap();
+            state.db.set_current_provider("gemini", "gemini").unwrap();
+            live::write_gemini_live(&provider("proxy", "PROXY_MANAGED")).unwrap();
+            let mut proxy_config = futures::executor::block_on(
+                state.db.get_proxy_config_for_app(AppType::Gemini.as_str()),
+            )
+            .unwrap();
+            proxy_config.enabled = true;
+            futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))
+                .unwrap();
+            let backup_key = || {
+                let backup =
+                    futures::executor::block_on(state.db.get_live_backup(AppType::Gemini.as_str()))
+                        .unwrap()
+                        .unwrap();
+                serde_json::from_str::<Value>(&backup.original_config).unwrap()["env"]
+                    ["GEMINI_API_KEY"]
+                    .clone()
+            };
+
+            live::sync_current_to_live(state).unwrap();
+            assert_eq!(backup_key(), "first-key");
+
+            current.settings_config["env"]["GEMINI_API_KEY"] = json!("updated-key");
+            state.db.save_provider("gemini", &current).unwrap();
+            ProviderService::sync_current_provider_for_app(state, AppType::Gemini).unwrap();
+
+            assert_eq!(backup_key(), "updated-key");
+            assert_eq!(
+                live::read_live_settings(AppType::Gemini).unwrap()["env"]["GEMINI_API_KEY"],
+                "PROXY_MANAGED"
+            );
+        });
+    }
+
     #[cfg(any(target_os = "macos", windows))]
     #[tokio::test]
     #[serial]
@@ -1544,6 +1591,124 @@ base_url = "http://localhost:8080"
             );
         });
     }
+
+    #[test]
+    #[serial]
+    fn update_detaches_a_customized_managed_nexus_row_at_the_service_boundary() {
+        with_test_home(|state, _| {
+            let settings = json!({"env":{"ANTHROPIC_BASE_URL":crate::database::NEXUS_ENDPOINT}});
+            let mut provider = Provider::with_id("nexus".into(), "Nexus".into(), settings, None);
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("nexus".into()),
+                managed_nexus_preset_version: Some(crate::database::NEXUS_VERSION),
+                api_format: Some("openai_chat".to_string()),
+                ..Default::default()
+            });
+            state.db.save_provider("claude", &provider).unwrap();
+            for endpoint in crate::database::managed_nexus_endpoint_candidates() {
+                state
+                    .db
+                    .add_custom_endpoint("claude", "nexus", endpoint)
+                    .unwrap();
+            }
+            state
+                .db
+                .add_custom_endpoint("claude", "nexus", "https://custom.example/v1")
+                .unwrap();
+
+            let mut updated = provider;
+            updated.settings_config["env"]["ANTHROPIC_BASE_URL"] = json!("https://custom/v1");
+            ProviderService::update(state, AppType::Claude, None, updated).unwrap();
+
+            let saved = state.db.get_all_providers("claude").unwrap()["nexus"].clone();
+            let meta = saved.meta.unwrap();
+            assert_eq!(meta.provider_type, None);
+            assert_eq!(meta.managed_nexus_preset_version, None);
+            assert_eq!(meta.custom_endpoints.len(), 1);
+            assert!(meta
+                .custom_endpoints
+                .contains_key("https://custom.example/v1"));
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn disabled_takeover_ignores_stale_backup_for_switch_and_reapply() {
+        with_test_home(|state, _| {
+            let first = Provider::with_id(
+                "first".into(),
+                "First".into(),
+                codex_settings("https://first.example/v1", "first-key"),
+                None,
+            );
+            let second = Provider::with_id(
+                "second".into(),
+                "Second".into(),
+                codex_settings("https://second.example/v1", "second-key"),
+                None,
+            );
+            let mut official = Provider::with_id(
+                "official".into(),
+                "Official".into(),
+                codex_settings("https://official.example/v1", "official-key"),
+                None,
+            );
+            official.category = Some("official".into());
+            for provider in [&first, &second, &official] {
+                state.db.save_provider("codex", provider).unwrap();
+            }
+            state.db.set_current_provider("codex", "first").unwrap();
+            crate::settings::set_current_provider(&AppType::Codex, Some("first")).unwrap();
+            write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &first).unwrap();
+            futures::executor::block_on(state.db.save_live_backup("codex", r#"{"stale":true}"#))
+                .unwrap();
+            let placeholder = Provider::with_id(
+                "proxy".into(),
+                "Proxy".into(),
+                codex_settings("http://127.0.0.1:15721/v1", "PROXY_MANAGED"),
+                None,
+            );
+            write_live_with_common_config(state.db.as_ref(), &AppType::Codex, &placeholder)
+                .unwrap();
+            assert!(state
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&AppType::Codex));
+
+            ProviderService::switch(state, AppType::Codex, "second").unwrap();
+
+            let backup = futures::executor::block_on(state.db.get_live_backup("codex"))
+                .unwrap()
+                .unwrap();
+            assert_eq!(backup.original_config, r#"{"stale":true}"#);
+            assert_eq!(
+                state
+                    .db
+                    .get_provider_by_id("first", "codex")
+                    .unwrap()
+                    .unwrap()
+                    .settings_config,
+                first.settings_config,
+                "stale takeover live state must not be backfilled into the old provider"
+            );
+            let live = crate::codex_config::read_codex_live_settings().unwrap();
+            assert_eq!(
+                crate::codex_config::extract_codex_base_url(live["config"].as_str().unwrap())
+                    .as_deref(),
+                Some("https://second.example/v1")
+            );
+
+            state.db.set_current_provider("codex", "official").unwrap();
+            crate::settings::set_current_provider(&AppType::Codex, Some("official")).unwrap();
+            assert!(reapply_current_codex_official_live(state).unwrap());
+
+            let live = crate::codex_config::read_codex_live_settings().unwrap();
+            assert_eq!(
+                crate::codex_config::extract_codex_base_url(live["config"].as_str().unwrap())
+                    .as_deref(),
+                Some("https://official.example/v1")
+            );
+        });
+    }
 }
 
 impl ProviderService {
@@ -1739,6 +1904,9 @@ impl ProviderService {
             .get_provider_by_id(&original_id, app_type.as_str())?;
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
+        let detached_from_nexus = existing_provider.as_ref().is_some_and(|existing| {
+            crate::database::reconcile_managed_nexus_update(&app_type, existing, &mut provider)
+        });
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
@@ -1873,8 +2041,14 @@ impl ProviderService {
             return Ok(true);
         }
 
-        // Save to database
-        state.db.save_provider(app_type.as_str(), &provider)?;
+        if detached_from_nexus {
+            let endpoints: Vec<_> = crate::database::managed_nexus_endpoint_candidates().collect();
+            state
+                .db
+                .save_provider_removing_endpoints(app_type.as_str(), &provider, &endpoints)?;
+        } else {
+            state.db.save_provider(app_type.as_str(), &provider)?;
+        }
 
         // For other apps: Check if this is current provider (use effective current, not just DB)
         let effective_current =
@@ -1882,49 +2056,7 @@ impl ProviderService {
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
         if is_current {
-            // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
-            // - 不直接走普通 Live 写入逻辑
-            // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
-            let has_live_backup =
-                futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                    .ok()
-                    .flatten()
-                    .is_some();
-            let live_taken_over = state
-                .proxy_service
-                .detect_takeover_in_live_config_for_app(&app_type);
-            // Backup or live placeholders mean the live file is currently owned
-            // by proxy takeover, including the short activation window before
-            // proxy_config.enabled is committed.
-            let should_sync_via_proxy = has_live_backup || live_taken_over;
-
-            if should_sync_via_proxy {
-                if matches!(app_type, AppType::ClaudeDesktop) {
-                    write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                } else {
-                    futures::executor::block_on(
-                        state
-                            .proxy_service
-                            .update_live_backup_from_provider(app_type.as_str(), &provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
-                }
-
-                if matches!(app_type, AppType::Claude)
-                    && futures::executor::block_on(state.proxy_service.is_running())
-                {
-                    futures::executor::block_on(
-                        state
-                            .proxy_service
-                            .sync_claude_live_from_provider_while_proxy_active(&provider),
-                    )
-                    .map_err(|e| AppError::Message(format!("同步 Claude Live 配置失败: {e}")))?;
-                }
-            } else {
-                write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
-                // Sync MCP
-                McpService::sync_all_enabled(state)?;
-            }
+            Self::sync_current_provider_for_app(state, app_type)?;
         }
 
         Ok(true)
@@ -2096,28 +2228,18 @@ impl ProviderService {
         // restore backup. Serialize them per app, then decide from the locked
         // current state so a just-started takeover cannot be overwritten by a
         // normal live write.
-        let _switch_guard =
+        let (switch_guard, should_hot_switch) =
             if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
-                Some(futures::executor::block_on(
-                    state.proxy_service.lock_switch_for_app(app_type.as_str()),
-                ))
+                let (guard, owns_live) = futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .lock_takeover_ownership_for_app(&app_type),
+                )
+                .map_err(AppError::Message)?;
+                (Some(guard), owns_live)
             } else {
-                None
+                (None, false)
             };
-
-        // Backup or live placeholders mean the live file is owned by proxy
-        // takeover, even if the proxy server is temporarily stopped or is in the
-        // activation window before enabled=true is committed.
-        let is_app_taken_over =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
-        let live_taken_over = state
-            .proxy_service
-            .detect_takeover_in_live_config_for_app(&app_type);
-
-        let should_hot_switch = is_app_taken_over || live_taken_over;
 
         // Switching to an official provider while proxy takeover is active:
         // automatically disable takeover first (restore original Live config),
@@ -2129,9 +2251,13 @@ impl ProviderService {
                 id,
                 app_type.as_str()
             );
+            drop(switch_guard);
             futures::executor::block_on(
-                state.proxy_service.set_takeover_for_app(app_type.as_str(), false),
-            ).map_err(|e| AppError::Message(format!("关闭代理接管失败: {e}")))?;
+                state
+                    .proxy_service
+                    .set_takeover_for_app(app_type.as_str(), false),
+            )
+            .map_err(|e| AppError::Message(format!("Failed to disable proxy takeover: {e}")))?;
 
             // After disabling takeover, the Live config has been restored from backup.
             // Fall through to switch_normal which will write the official provider config.
@@ -2204,7 +2330,11 @@ impl ProviderService {
             if current_id != id {
                 // Additive mode apps - all providers coexist in the same file,
                 // no backfill needed (backfill is for exclusive mode apps like Claude/Codex/Gemini)
-                if !app_type.is_additive_mode() {
+                if !app_type.is_additive_mode()
+                    && !state
+                        .proxy_service
+                        .detect_takeover_in_live_config_for_app(&app_type)
+                {
                     // Only backfill when switching to a different provider
                     if let Ok(live_config) = read_live_settings(app_type.clone()) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
@@ -2325,6 +2455,22 @@ impl ProviderService {
             return sync_current_provider_for_app_to_live(state, &app_type);
         }
 
+        // Provider edits, switches, and takeover toggles all mutate the same
+        // backup/live pair. Resolve current state only after acquiring their
+        // shared lock so a stale edit cannot revive or overwrite a transition.
+        let (_switch_guard, takeover_owns_live) =
+            if matches!(app_type, AppType::Claude | AppType::Codex | AppType::Gemini) {
+                let (guard, owns_live) = futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .lock_takeover_ownership_for_app(&app_type),
+                )
+                .map_err(AppError::Message)?;
+                (Some(guard), owns_live)
+            } else {
+                (None, false)
+            };
+
         let current_id =
             match crate::settings::get_effective_current_provider(&state.db, &app_type)? {
                 Some(id) => id,
@@ -2336,30 +2482,43 @@ impl ProviderService {
             return Ok(());
         };
 
-        let has_live_backup =
-            futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
-                .ok()
-                .flatten()
-                .is_some();
+        let proxy_running = futures::executor::block_on(state.proxy_service.is_running());
 
-        let live_taken_over = state
-            .proxy_service
-            .detect_takeover_in_live_config_for_app(&app_type);
+        if takeover_owns_live {
+            if matches!(app_type, AppType::Claude | AppType::Codex) {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .update_live_backup_from_provider_inner(app_type.as_str(), provider),
+                )
+                .map_err(|e| AppError::Message(format!("Failed to update live backup: {e}")))?;
 
-        // See the save path above: backup/placeholders are the ownership signal
-        // here, not just proxy_config.enabled.
-        if has_live_backup || live_taken_over {
-            if matches!(app_type, AppType::ClaudeDesktop) {
-                write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
-                return Ok(());
+                if proxy_running {
+                    let result = match app_type {
+                        AppType::Claude => futures::executor::block_on(
+                            state
+                                .proxy_service
+                                .sync_claude_live_from_provider_while_proxy_active(provider),
+                        ),
+                        AppType::Codex => futures::executor::block_on(
+                            state
+                                .proxy_service
+                                .sync_codex_live_from_provider_while_proxy_active(provider),
+                        ),
+                        _ => unreachable!(),
+                    };
+                    result.map_err(|e| {
+                        AppError::Message(format!("Failed to sync takeover live config: {e}"))
+                    })?;
+                }
+            } else {
+                futures::executor::block_on(
+                    state
+                        .proxy_service
+                        .update_live_backup_from_provider_inner(app_type.as_str(), provider),
+                )
+                .map_err(|e| AppError::Message(format!("Failed to update live backup: {e}")))?;
             }
-
-            futures::executor::block_on(
-                state
-                    .proxy_service
-                    .update_live_backup_from_provider(app_type.as_str(), provider),
-            )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
             return Ok(());
         }
 

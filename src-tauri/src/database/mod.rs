@@ -38,6 +38,12 @@ pub(crate) use dao::proxy::{
     PRICING_SOURCE_RESPONSE,
 };
 pub use dao::FailoverQueueItem;
+pub(crate) use dao::{
+    managed_nexus_endpoint_candidates, reconcile_managed_nexus_update,
+    scrub_leaked_nexus_credentials, NexusMigrationOutcome,
+};
+#[cfg(test)]
+pub(crate) use dao::{NEXUS_ENDPOINT, NEXUS_VERSION};
 
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
