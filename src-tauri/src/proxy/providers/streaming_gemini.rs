@@ -256,6 +256,7 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
         let mut latest_usage: Option<Value> = None;
         let mut latest_finish_reason: Option<String> = None;
         let mut blocked_text: Option<String> = None;
+        let mut saw_done_sentinel = false;
         tokio::pin!(stream);
 
         while let Some(chunk) = stream.next().await {
@@ -281,6 +282,7 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
 
                         let data = data_lines.join("\n");
                         if data.trim() == "[DONE]" {
+                            saw_done_sentinel = true;
                             break;
                         }
 
@@ -324,6 +326,8 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                             .get("promptFeedback")
                             .and_then(|value| value.get("blockReason"))
                             .and_then(|value| value.as_str())
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
                         {
                             blocked_text = Some(format!("Request blocked by Gemini safety filters: {reason}"));
                         }
@@ -333,7 +337,12 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                             .and_then(|value| value.as_array())
                             .and_then(|value| value.first())
                         {
-                            if let Some(reason) = candidate.get("finishReason").and_then(|value| value.as_str()) {
+                            if let Some(reason) = candidate
+                                .get("finishReason")
+                                .and_then(|value| value.as_str())
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                            {
                                 latest_finish_reason = Some(reason.to_string());
                             }
                             if let Some(usage) = chunk_json.get("usageMetadata") {
@@ -401,12 +410,27 @@ pub fn create_anthropic_sse_stream_from_gemini<E: std::error::Error + Send + 'st
                             }
                         }
                     }
+                    if saw_done_sentinel {
+                        break;
+                    }
                 }
                 Err(error) => {
                     yield Err(std::io::Error::other(error.to_string()));
                     return;
                 }
             }
+        }
+
+        if latest_finish_reason.is_none() && blocked_text.is_none() && !saw_done_sentinel {
+            let error = json!({
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": "Upstream Gemini stream ended before a terminal event"
+                }
+            });
+            yield Ok(encode_sse("error", &error));
+            return;
         }
 
         if !has_sent_message_start {
@@ -642,6 +666,28 @@ mod tests {
         assert!(output.contains("\"text\":\"lo\""));
         assert!(output.contains("\"stop_reason\":\"end_turn\""));
         assert!(output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn raw_eof_without_valid_finish_reason_emits_error_not_message_stop() {
+        let output = collect_stream_output(vec![
+            "data: {\"responseId\":\"resp_truncated\",\"modelVersion\":\"gemini-2.5-pro\",\"promptFeedback\":{\"blockReason\":\"  \"},\"candidates\":[{\"finishReason\":\"  \",\"content\":{\"parts\":[{\"text\":\"partial\"}]}}]}\n\n",
+        ]);
+
+        assert!(output.contains("event: error"));
+        assert!(output.contains("terminal event"));
+        assert!(!output.contains("event: message_stop"));
+    }
+
+    #[test]
+    fn done_sentinel_ignores_trailing_chunks() {
+        let output = collect_stream_output(vec![
+            "data: {\"responseId\":\"resp_done\",\"modelVersion\":\"gemini-2.5-pro\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"complete\"}]}}]}\n\ndata: [DONE]\n\n",
+            "data: {\"responseId\":\"resp_done\",\"candidates\":[{\"finishReason\":\"STOP\",\"content\":{\"parts\":[{\"text\":\"complete late\"}]}}]}\n\n",
+        ]);
+
+        assert!(output.contains("event: message_stop"));
+        assert!(!output.contains("complete late"));
     }
 
     #[test]
