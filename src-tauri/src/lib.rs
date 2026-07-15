@@ -600,10 +600,18 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
-            match app_state.db.migrate_legacy_nexus_providers() {
-                Ok(count) if count > 0 => log::info!("✓ Normalized {count} Nexus provider(s)"),
-                Ok(_) => {}
-                Err(e) => log::warn!("✗ Failed to normalize Nexus providers: {e}"),
+            let normalized_nexus_provider_count = match app_state.db.migrate_legacy_nexus_providers()
+            {
+                Ok(count) => count,
+                Err(e) => {
+                    log::warn!("✗ Failed to normalize Nexus providers: {e}");
+                    0
+                }
+            };
+            if normalized_nexus_provider_count > 0 {
+                log::info!(
+                    "✓ Normalized {normalized_nexus_provider_count} Nexus provider(s)"
+                );
             }
 
             {
@@ -1056,6 +1064,18 @@ pub fn run() {
 
                 // 检查 settings 表中的代理状态，自动恢复代理服务
                 restore_proxy_state_on_startup(&state).await;
+
+                let codex_takeover_enabled = state
+                    .db
+                    .get_proxy_config_for_app("codex")
+                    .await
+                    .map(|config| config.enabled)
+                    .unwrap_or(false);
+                if normalized_nexus_provider_count > 0 || codex_takeover_enabled {
+                    if let Err(e) = sync_current_nexus_codex_on_startup(&state) {
+                        log::warn!("✗ Failed to refresh the current Nexus Codex provider: {e}");
+                    }
+                }
 
                 // Periodic backup check (on startup)
                 if let Err(e) = state.db.periodic_backup_if_needed() {
@@ -1773,6 +1793,26 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
             }
         }
     }
+}
+
+fn sync_current_nexus_codex_on_startup(state: &store::AppState) -> Result<(), error::AppError> {
+    let current_id =
+        services::provider::ProviderService::current(state, app_config::AppType::Codex)?;
+    let Some(provider) = state.db.get_provider_by_id(&current_id, "codex")? else {
+        return Ok(());
+    };
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("nexus")
+    {
+        services::provider::ProviderService::sync_current_provider_for_app(
+            state,
+            app_config::AppType::Codex,
+        )?;
+    }
+    Ok(())
 }
 
 fn initialize_common_config_snippets(state: &store::AppState) {

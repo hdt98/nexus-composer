@@ -11,7 +11,9 @@ const NEXUS_MODEL: &str = "GLM-5.2-FP8";
 const NEXUS_CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
 const NEXUS_CONTEXT_WINDOW: i64 = 1_048_576;
 const NEXUS_AUTO_COMPACT_TOKENS: i64 = 252_000;
-const NEXUS_MANAGED_PRESET_VERSION: u32 = 2;
+const NEXUS_MAX_OUTPUT_TOKENS: u64 = 65_536;
+const NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS: i64 = 900_000;
+const NEXUS_MANAGED_PRESET_VERSION: u32 = 3;
 const LEGACY_MODEL: &str = "glm-5.2";
 const LEGACY_CLAUDE_MODEL: &str = "glm-5.2[1m]";
 const LEGACY_CLAUDE_DESKTOP_ID: &str = "nexus-glm-5-2-hosted";
@@ -23,6 +25,10 @@ const LEGACY_ENDPOINTS: [&str; 3] = [
 const LEGACY_NAMES: [&str; 4] = ["Nexus", "Nexus Local", "Nexus GLM-5.2 Hosted", NEXUS_NAME];
 
 type ProviderRow = (String, String, String, String, Option<String>, String);
+
+fn is_managed_max_tokens(value: &Value) -> bool {
+    matches!(value.as_u64(), Some(4_096) | Some(NEXUS_MAX_OUTPUT_TOKENS))
+}
 
 fn is_managed_signature(
     endpoint: Option<&str>,
@@ -64,7 +70,7 @@ fn is_custom_signature(
         )
 }
 
-fn is_customized_v1_target(app_type: &str, id: &str, settings: &Value, meta: &Value) -> bool {
+fn is_customized_managed_target(app_type: &str, id: &str, settings: &Value, meta: &Value) -> bool {
     match app_type {
         "claude" => is_custom_signature(
             settings
@@ -157,6 +163,9 @@ fn remove_managed_reasoning_override(meta: &mut Map<String, Value>) {
         };
         let remove_body =
             if let Some(body) = overrides.get_mut("body").and_then(Value::as_object_mut) {
+                if body.get("max_tokens").is_some_and(is_managed_max_tokens) {
+                    body.remove("max_tokens");
+                }
                 let remove_template = if let Some(template) = body
                     .get_mut("chat_template_kwargs")
                     .and_then(Value::as_object_mut)
@@ -417,6 +426,8 @@ fn migrate_codex_settings(settings: &mut Value, provider_type: Option<&str>) -> 
     document["model_auto_compact_token_limit"] = value(NEXUS_AUTO_COMPACT_TOKENS);
     document.as_table_mut().remove("model_reasoning_effort");
     document["model_providers"][&active_provider]["base_url"] = value(NEXUS_ENDPOINT);
+    document["model_providers"][&active_provider]["stream_idle_timeout_ms"] =
+        value(NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS);
     settings["config"] = json!(document.to_string());
     upsert_codex_model(settings)
 }
@@ -473,8 +484,15 @@ fn merge_reasoning_override(meta: &mut Map<String, Value>) -> bool {
     let Some(body) = body.as_object_mut() else {
         return false;
     };
-    if body.get("max_tokens").and_then(Value::as_u64) == Some(4096) {
-        body.remove("max_tokens");
+    match body.get("max_tokens") {
+        None => {
+            body.insert("max_tokens".to_string(), json!(NEXUS_MAX_OUTPUT_TOKENS));
+        }
+        Some(value) if is_managed_max_tokens(value) => {
+            body.insert("max_tokens".to_string(), json!(NEXUS_MAX_OUTPUT_TOKENS));
+        }
+        Some(value) if value.as_u64().is_some() => {}
+        Some(_) => return false,
     }
     body.remove("model");
     let template_kwargs = body
@@ -530,9 +548,11 @@ impl Database {
                 .get("providerType")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let is_version_one_managed =
-                preset_version == Some(1) && provider_type.as_deref() == Some("nexus");
-            if !is_version_one_managed && !LEGACY_NAMES.contains(&name.as_str()) {
+            let is_previous_managed = preset_version.is_some_and(|version| {
+                version < u64::from(NEXUS_MANAGED_PRESET_VERSION)
+                    && provider_type.as_deref() == Some("nexus")
+            });
+            if !is_previous_managed && !LEGACY_NAMES.contains(&name.as_str()) {
                 continue;
             }
             let original_settings = settings.clone();
@@ -547,8 +567,8 @@ impl Database {
                 _ => false,
             };
             if !recognized {
-                if is_version_one_managed
-                    && is_customized_v1_target(&app_type, &id, &settings, &meta)
+                if is_previous_managed
+                    && is_customized_managed_target(&app_type, &id, &settings, &meta)
                 {
                     remove_managed_nexus_catalog(&mut settings);
                     let Some(meta_object) = meta.as_object_mut() else {
@@ -732,7 +752,7 @@ mod tests {
             json!({
                 "auth": {"OPENAI_API_KEY": "keep-codex-key"},
                 "config": format!(
-                    "model_provider = \"custom\"\nmodel = \"{}\"\nmodel_reasoning_effort = \"high\"\nkeep = true\n[model_providers.custom]\nbase_url = \"{}\"\nwire_api = \"responses\"\n",
+                    "model_provider = \"nexus-active\"\nmodel = \"{}\"\nmodel_reasoning_effort = \"high\"\nkeep = true\n[model_providers.nexus-active]\n# keep active comment\nbase_url = \"{}\"\nwire_api = \"responses\"\nkeep_provider = true\n[model_providers.sibling]\n# keep sibling comment\nbase_url = \"https://sibling.example/v1\"\nkeep_sibling = true\n",
                     LEGACY_MODEL, LEGACY_ENDPOINTS[0]
                 ),
                 "modelCatalog": {"models": [{"model": LEGACY_MODEL, "keep": true}]},
@@ -773,7 +793,10 @@ mod tests {
             .and_then(|overrides| overrides.body.as_ref())
             .unwrap();
         assert!(body.get("model").is_none());
-        assert!(body.get("max_tokens").is_none());
+        assert_eq!(
+            body.get("max_tokens"),
+            Some(&json!(NEXUS_MAX_OUTPUT_TOKENS))
+        );
         assert_eq!(body.get("keep"), Some(&json!(true)));
         assert_eq!(
             body.pointer("/chat_template_kwargs/enable_thinking"),
@@ -793,17 +816,35 @@ mod tests {
             Some(&json!("keep-codex-key"))
         );
         assert_eq!(codex.settings_config.get("keepTop"), Some(&json!(true)));
-        let config = codex.settings_config["config"]
-            .as_str()
-            .unwrap()
-            .parse::<toml::Value>()
-            .unwrap();
+        let config_text = codex.settings_config["config"].as_str().unwrap();
+        assert!(config_text.contains("# keep active comment"));
+        assert!(config_text.contains("# keep sibling comment"));
+        let config = config_text.parse::<toml::Value>().unwrap();
         assert_eq!(config["model"].as_str(), Some(NEXUS_MODEL));
         assert!(config.get("model_reasoning_effort").is_none());
         assert_eq!(
             config["model_auto_compact_token_limit"].as_integer(),
             Some(NEXUS_AUTO_COMPACT_TOKENS)
         );
+        assert_eq!(
+            config["model_providers"]["nexus-active"]["stream_idle_timeout_ms"].as_integer(),
+            Some(NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            config["model_providers"]["nexus-active"]["keep_provider"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            config["model_providers"]["sibling"]["base_url"].as_str(),
+            Some("https://sibling.example/v1")
+        );
+        assert_eq!(
+            config["model_providers"]["sibling"]["keep_sibling"].as_bool(),
+            Some(true)
+        );
+        assert!(config["model_providers"]["sibling"]
+            .get("stream_idle_timeout_ms")
+            .is_none());
         assert_eq!(
             codex
                 .settings_config
@@ -930,7 +971,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrades_version_one_managed_row_once() {
+    fn upgrades_previous_managed_rows_once() {
         let db = Database::memory().unwrap();
         save_provider(
             &db,
@@ -954,7 +995,26 @@ mod tests {
         provider.meta.as_mut().unwrap().managed_nexus_preset_version = Some(1);
         db.save_provider("claude", &provider).unwrap();
 
-        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 1);
+        save_provider(
+            &db,
+            "codex",
+            "codex-v2",
+            "My Nexus Codex",
+            NEXUS_ENDPOINT,
+            Some("nexus"),
+            json!({
+                "config": format!(
+                    "model_provider = \"custom\"\nmodel = \"{}\"\n[model_providers.custom]\nbase_url = \"{}\"\nwire_api = \"responses\"\n",
+                    NEXUS_MODEL, NEXUS_ENDPOINT
+                )
+            }),
+        );
+        let mut provider = db.get_provider_by_id("codex-v2", "codex").unwrap().unwrap();
+        provider.meta.as_mut().unwrap().managed_nexus_preset_version =
+            Some(NEXUS_MANAGED_PRESET_VERSION - 1);
+        db.save_provider("codex", &provider).unwrap();
+
+        assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 2);
         assert_eq!(
             db.get_provider_by_id("claude-v1", "claude")
                 .unwrap()
@@ -962,6 +1022,25 @@ mod tests {
                 .meta
                 .and_then(|meta| meta.managed_nexus_preset_version),
             Some(NEXUS_MANAGED_PRESET_VERSION)
+        );
+        let codex = db.get_provider_by_id("codex-v2", "codex").unwrap().unwrap();
+        let config = codex.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .parse::<toml::Value>()
+            .unwrap();
+        assert_eq!(
+            config["model_providers"]["custom"]["stream_idle_timeout_ms"].as_integer(),
+            Some(NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS)
+        );
+        assert_eq!(
+            codex
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.local_proxy_request_overrides.as_ref())
+                .and_then(|overrides| overrides.body.as_ref())
+                .and_then(|body| body.get("max_tokens")),
+            Some(&json!(NEXUS_MAX_OUTPUT_TOKENS))
         );
         assert_eq!(db.migrate_legacy_nexus_providers().unwrap(), 0);
     }
@@ -1042,7 +1121,7 @@ mod tests {
     }
 
     #[test]
-    fn version_one_custom_target_drops_only_managed_state() {
+    fn previous_custom_target_drops_only_managed_state() {
         let db = Database::memory().unwrap();
         save_provider(
             &db,
@@ -1073,10 +1152,11 @@ mod tests {
             .unwrap()
             .unwrap();
         let meta = provider.meta.as_mut().unwrap();
-        meta.managed_nexus_preset_version = Some(1);
+        meta.managed_nexus_preset_version = Some(NEXUS_MANAGED_PRESET_VERSION - 1);
         meta.local_proxy_request_overrides = Some(LocalProxyRequestOverrides {
             headers: HashMap::from([("keep-header".to_string(), "yes".to_string())]),
             body: Some(json!({
+                "max_tokens": NEXUS_MAX_OUTPUT_TOKENS,
                 "keep": true,
                 "chat_template_kwargs": {
                     "enable_thinking": true,
@@ -1123,6 +1203,7 @@ mod tests {
             overrides.body.as_ref().unwrap().get("keep"),
             Some(&json!(true))
         );
+        assert!(overrides.body.as_ref().unwrap().get("max_tokens").is_none());
         assert_eq!(
             overrides
                 .body
@@ -1220,6 +1301,11 @@ mod tests {
                 .and_then(|value| value.pointer("/body/max_tokens")),
             Some(&json!(8192))
         );
+        let mut malformed_cap = Map::from_iter([(
+            "localProxyRequestOverrides".to_string(),
+            json!({"body": {"max_tokens": "8192"}}),
+        )]);
+        assert!(!merge_reasoning_override(&mut malformed_cap));
 
         for (id, body) in [
             ("unrelated", json!({"model": "another-model", "keep": true})),

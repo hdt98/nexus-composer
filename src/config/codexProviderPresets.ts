@@ -11,6 +11,7 @@ import type {
 import type { PresetTheme } from "./claudeProviderPresets";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS,
   NEXUS_CONTEXT_WINDOW,
   NEXUS_ENDPOINT,
   NEXUS_MANAGED_PRESET_VERSION,
@@ -131,14 +132,15 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     nameKey: "providerForm.presets.nexus",
     websiteUrl: NEXUS_ENDPOINT,
     auth: generateThirdPartyAuth(""),
-    config: generateThirdPartyConfig(
+    config: `${generateThirdPartyConfig(
       "Nexus GLM-5.2",
       NEXUS_ENDPOINT,
       NEXUS_MODEL,
       null,
       NEXUS_CONTEXT_WINDOW,
       NEXUS_AUTO_COMPACT_TOKENS,
-    ),
+    )}
+stream_idle_timeout_ms = ${NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS}`,
     endpointCandidates: [NEXUS_ENDPOINT],
     apiFormat: "openai_chat",
     providerType: "nexus",

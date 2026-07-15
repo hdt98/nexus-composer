@@ -2,12 +2,14 @@
  * Focused checks for the Nexus Composer presets.
  */
 import { describe, expect, it } from "vitest";
+import { parse as parseToml } from "smol-toml";
 import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
   NEXUS_CLAUDE_MODEL,
+  NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS,
   NEXUS_CONTEXT_WINDOW,
   NEXUS_ENDPOINT,
   NEXUS_MAX_OUTPUT_TOKENS,
@@ -88,6 +90,13 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
       `model_auto_compact_token_limit = ${NEXUS_AUTO_COMPACT_TOKENS}`,
     );
     expect(nexus().config).not.toContain("model_reasoning_effort");
+  });
+
+  it("allows extended stream idle gaps", () => {
+    const config = parseToml(nexus().config) as any;
+    expect(config.model_providers.custom.stream_idle_timeout_ms).toBe(
+      NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS,
+    );
   });
 
   it("has a text-only model catalog", () => {

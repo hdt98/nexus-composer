@@ -2003,7 +2003,7 @@ impl ProxyService {
     }
 
     /// 仅供已持有 per-app 切换锁的调用方使用。
-    async fn update_live_backup_from_provider_inner(
+    pub(crate) async fn update_live_backup_from_provider_inner(
         &self,
         app_type: &str,
         provider: &Provider,
