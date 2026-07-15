@@ -94,7 +94,6 @@ fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     false
 }
 const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.6-sol";
-const CODEX_SOL_REASONING_EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
 
 /// Which Codex tool surface the generated model catalog should target.
 ///
@@ -614,12 +613,9 @@ fn find_codex_model_template(catalog: &Value) -> Option<Value> {
                     .and_then(Value::as_array);
                 model.get("slug").and_then(Value::as_str) == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
                     && efforts.is_some_and(|levels| {
-                        levels.len() == CODEX_SOL_REASONING_EFFORTS.len()
-                            && levels.iter().zip(CODEX_SOL_REASONING_EFFORTS).all(
-                                |(level, expected)| {
-                                    level.get("effort").and_then(Value::as_str) == Some(expected)
-                                },
-                            )
+                        levels.iter().any(|level| {
+                            level.get("effort").and_then(Value::as_str) == Some("ultra")
+                        })
                     })
                     && model.get("multi_agent_version").and_then(Value::as_str) == Some("v2")
                     && matches!(
@@ -1119,9 +1115,9 @@ fn build_simplified_catalog_from_texts(config_text: &str, catalog_text: &str) ->
             obj.insert("contextWindow".to_string(), json!(context_window));
         }
 
-        // Preserve native-profile per-row overrides so a DB-SSOT-missing
-        // fallback round-trip doesn't silently drop them (they are ignored by
-        // the ProxyChat profile, so carrying them is harmless).
+        // Preserve per-row overrides so a DB-SSOT-missing fallback round-trip
+        // does not silently drop them. Parallel tool support is native-only;
+        // input modalities apply to both profiles.
         if let Some(parallel) = entry
             .get("supports_parallel_tool_calls")
             .and_then(|v| v.as_bool())
@@ -2992,8 +2988,21 @@ web_search = "disabled"
             "models": [{"slug": "gpt-5.5"}]
         }))
         .is_none());
+
+        let mut reordered = valid.clone();
+        let levels = reordered["supported_reasoning_levels"]
+            .as_array_mut()
+            .expect("reasoning levels");
+        levels.reverse();
+        levels.push(json!({"effort": "future"}));
+        assert_eq!(
+            find_codex_model_template(&json!({"models": [reordered.clone()]})),
+            Some(reordered),
+            "template discovery must tolerate reordered or additional efforts"
+        );
+
         let mut stale = valid.clone();
-        stale["supported_reasoning_levels"][5]["effort"] = json!("maximum");
+        stale["supported_reasoning_levels"] = json!([{"effort": "maximum"}]);
         let catalog = json!({"models": [stale, valid.clone()]});
         assert_eq!(find_codex_model_template(&catalog), Some(valid.clone()));
 
