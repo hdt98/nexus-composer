@@ -412,14 +412,14 @@ impl ProxyService {
             .db
             .get_live_backup(app)
             .await
-            .map_err(|e| format!("读取 {app} Live 备份失败: {e}"))?
+            .map_err(|e| format!("Failed to read {app} live backup: {e}"))?
             .is_some();
         let live_taken_over = self.detect_takeover_in_live_config_for_app(app_type);
         let enabled = self
             .db
             .get_proxy_config_for_app(app)
             .await
-            .map_err(|e| format!("读取 {app} 代理配置失败: {e}"))?
+            .map_err(|e| format!("Failed to read {app} proxy config: {e}"))?
             .enabled;
         Ok((guard, enabled && (has_backup || live_taken_over)))
     }
@@ -2399,7 +2399,7 @@ impl ProxyService {
         match self.read_claude_live() {
             Ok(mut config) => {
                 if crate::database::scrub_leaked_nexus_credentials(&AppType::Claude, &mut config)
-                    .map_err(|e| format!("清理 Claude Live 凭据失败: {e}"))?
+                    .map_err(|e| format!("Failed to scrub Claude live credentials: {e}"))?
                 {
                     self.write_claude_live(&config)?;
                     scrubbed += 1;
@@ -2411,7 +2411,7 @@ impl ProxyService {
         match self.read_codex_live() {
             Ok(mut config) => {
                 if crate::database::scrub_leaked_nexus_credentials(&AppType::Codex, &mut config)
-                    .map_err(|e| format!("清理 Codex Live 凭据失败: {e}"))?
+                    .map_err(|e| format!("Failed to scrub Codex live credentials: {e}"))?
                 {
                     self.write_codex_live(&config)?;
                     scrubbed += 1;

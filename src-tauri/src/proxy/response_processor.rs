@@ -1108,6 +1108,10 @@ mod tests {
             .recv()
             .await
             .ok_or_else(|| AppError::Message("missing upstream headers".to_string()))?;
+        assert_eq!(
+            upstream_headers[http::header::AUTHORIZATION],
+            "Bearer test-token"
+        );
         assert_eq!(upstream_headers["x-test"], "override-applied");
         assert_eq!(upstream_headers["x-request-id"], "request-joined");
         assert_eq!(

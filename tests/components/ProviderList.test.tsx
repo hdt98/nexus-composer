@@ -264,6 +264,41 @@ describe("ProviderList Component", () => {
     );
   });
 
+  it.each(["claude", "claude-desktop", "codex"] as const)(
+    "hides duplicate for managed Nexus providers in %s",
+    (appId) => {
+      const provider = createProvider({
+        id: "nexus",
+        meta: {
+          providerType: "nexus",
+          managedNexusPresetVersion: 4,
+        },
+      });
+      useDragSortMock.mockReturnValue({
+        sortedProviders: [provider],
+        sensors: [],
+        handleDragEnd: vi.fn(),
+      });
+
+      renderWithQueryClient(
+        <ProviderList
+          providers={{ nexus: provider }}
+          currentProviderId="nexus"
+          appId={appId}
+          onSwitch={vi.fn()}
+          onEdit={vi.fn()}
+          onDelete={vi.fn()}
+          onDuplicate={vi.fn()}
+          onOpenWebsite={vi.fn()}
+        />,
+      );
+
+      expect(providerCardRenderSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ onDuplicate: undefined }),
+      );
+    },
+  );
+
   it("filters providers with the search input", () => {
     const providerAlpha = createProvider({ id: "alpha", name: "Alpha Labs" });
     const providerBeta = createProvider({ id: "beta", name: "Beta Works" });

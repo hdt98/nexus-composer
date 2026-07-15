@@ -46,13 +46,13 @@ describe("Nexus Composer preset arrays", () => {
 });
 
 describe("Nexus GLM-5.2 Claude preset config", () => {
-  it("points to the SGLang endpoint", () => {
+  it("points to the Nexus endpoint", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     const env = (nexus.settingsConfig as any).env;
     expect(env.ANTHROPIC_BASE_URL).toBe("https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1");
   });
 
-  it("uses GLM-5.2-SGLang as the model", () => {
+  it("uses GLM-5.2 as the model", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     const env = (nexus.settingsConfig as any).env;
     expect(env.ANTHROPIC_MODEL).toBe("GLM-5.2-FP8[1m]");
@@ -74,12 +74,12 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
 });
 
 describe("Nexus GLM-5.2 Codex preset config", () => {
-  it("points to the SGLang endpoint", () => {
+  it("points to the Nexus endpoint", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     expect(nexus.config).toContain("https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1");
   });
 
-  it("uses GLM-5.2-SGLang as the model", () => {
+  it("uses GLM-5.2 as the model", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     expect(nexus.config).toContain("GLM-5.2-FP8");
   });

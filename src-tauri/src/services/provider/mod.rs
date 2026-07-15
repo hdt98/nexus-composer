@@ -2257,7 +2257,7 @@ impl ProviderService {
                     .proxy_service
                     .set_takeover_for_app(app_type.as_str(), false),
             )
-            .map_err(|e| AppError::Message(format!("关闭代理接管失败: {e}")))?;
+            .map_err(|e| AppError::Message(format!("Failed to disable proxy takeover: {e}")))?;
 
             // After disabling takeover, the Live config has been restored from backup.
             // Fall through to switch_normal which will write the official provider config.

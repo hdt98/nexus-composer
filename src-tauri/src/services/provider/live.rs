@@ -976,7 +976,7 @@ fn sync_current_provider_for_app_respecting_takeover(
                 .proxy_service
                 .update_live_backup_from_provider_inner(app_type.as_str(), provider),
         )
-        .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+        .map_err(|e| AppError::Message(format!("Failed to update live backup: {e}")))?;
         return Ok(());
     }
 

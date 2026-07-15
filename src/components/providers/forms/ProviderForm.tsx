@@ -159,10 +159,8 @@ export const normalizeCodexCatalogModelsForSave = (
 
   for (const item of models) {
     const model = item.model.trim();
-    const role = item.role?.trim();
-    const identity = `${model}\0${role ?? ""}`;
-    if (!model || seen.has(identity)) continue;
-    seen.add(identity);
+    if (!model || seen.has(model)) continue;
+    seen.add(model);
 
     const displayName = item.displayName?.trim();
     const rawContextWindow = String(item.contextWindow ?? "").replace(
@@ -181,7 +179,6 @@ export const normalizeCodexCatalogModelsForSave = (
 
     normalized.push({
       model,
-      ...(role ? { role } : {}),
       ...(displayName ? { displayName } : {}),
       ...(contextWindow && contextWindow > 0 ? { contextWindow } : {}),
       // Native Responses profile overrides (ignored by the chat/proxy profile).

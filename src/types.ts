@@ -258,7 +258,6 @@ export type CodexApiFormat = "openai_responses" | "openai_chat";
 
 export interface CodexCatalogModel {
   model: string;
-  role?: string;
   displayName?: string;
   contextWindow?: string | number;
   // Native Responses (direct) profile overrides for the generated
