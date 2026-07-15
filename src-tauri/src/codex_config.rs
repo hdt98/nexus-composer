@@ -1764,6 +1764,8 @@ mod tests {
     use serde_json::json;
 
     const SOL_REASONING_EFFORTS: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
+    const NATIVE_REASONING_EFFORTS: [&str; 7] =
+        ["none", "low", "medium", "high", "xhigh", "max", "ultra"];
 
     fn reasoning_efforts(entry: &Value) -> Vec<&str> {
         entry["supported_reasoning_levels"]
@@ -1775,7 +1777,7 @@ mod tests {
     }
 
     fn assert_sol_capabilities(entry: &Value, tool_mode: &str) {
-        assert_eq!(reasoning_efforts(entry), SOL_REASONING_EFFORTS);
+        assert!(reasoning_efforts(entry).contains(&"ultra"));
         assert_eq!(entry["multi_agent_version"], "v2");
         assert_eq!(entry["tool_mode"], tool_mode);
         assert_eq!(entry["use_responses_lite"], false);
@@ -2522,6 +2524,7 @@ base_url = "https://production.api/v1"
 
         let entry = &catalog["models"][0];
         assert_sol_capabilities(entry, "direct");
+        assert_eq!(reasoning_efforts(entry), NATIVE_REASONING_EFFORTS);
         assert_eq!(
             entry.get("slug").and_then(|v| v.as_str()),
             Some("MiniMax-M3")

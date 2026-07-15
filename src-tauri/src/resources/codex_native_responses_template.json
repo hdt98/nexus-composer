@@ -6,6 +6,10 @@
   "default_reasoning_level": "high",
   "supported_reasoning_levels": [
     {
+      "effort": "none",
+      "description": "Disables reasoning"
+    },
+    {
       "effort": "low",
       "description": "Fast responses with lighter reasoning"
     },
