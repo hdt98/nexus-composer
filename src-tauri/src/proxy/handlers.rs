@@ -20,9 +20,9 @@ use super::{
         codex_chat_common::extract_reasoning_field_text,
         codex_chat_history::record_responses_sse_stream,
         get_adapter, get_claude_api_format,
-        reasoning_chat::{normalize_chat_json, normalize_chat_sse},
-        streaming::create_anthropic_sse_stream_with_thinking,
-        streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
+        reasoning_chat::{is_tool_protocol_error, normalize_chat_json},
+        streaming::create_anthropic_sse_stream_with_reasoning,
+        streaming_codex_chat::create_responses_sse_stream_from_chat_with_reasoning,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_responses::create_anthropic_sse_stream_from_responses,
         transform, transform_codex_chat, transform_gemini, transform_responses,
@@ -33,7 +33,7 @@ use super::{
         usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
-    sse::{error_event_message, strip_sse_field, take_sse_block},
+    sse::{strip_sse_field, take_sse_block},
     types::*,
     usage::parser::TokenUsage,
     ProxyError,
@@ -211,7 +211,6 @@ async fn handle_messages_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
-    let reasoning_boundary_enabled = result.reasoning_boundary_enabled;
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let api_format = result
@@ -232,9 +231,9 @@ async fn handle_messages_for_app(
             &ctx,
             &state,
             &body,
+            is_stream,
             &api_format,
             connection_guard,
-            reasoning_boundary_enabled,
         )
         .await;
     }
@@ -280,7 +279,10 @@ fn validate_claude_desktop_gateway_auth(
 /// Claude 格式转换处理（独有逻辑）
 ///
 /// 支持 OpenAI Chat Completions 和 Responses API 两种格式的转换
-fn should_emit_anthropic_thinking(body: &Value) -> bool {
+fn should_emit_anthropic_thinking(body: &Value, normalize_reasoning: bool) -> bool {
+    if !normalize_reasoning {
+        return true;
+    }
     let Some(thinking) = body.get("thinking").and_then(Value::as_object) else {
         return false;
     };
@@ -291,20 +293,36 @@ fn should_emit_anthropic_thinking(body: &Value) -> bool {
     matches!(thinking_type, Some("enabled" | "adaptive")) && display != Some("omitted")
 }
 
+fn chat_boundary_error(error: std::io::Error) -> ProxyError {
+    if !is_tool_protocol_error(&error) {
+        return ProxyError::TransformError(error.to_string());
+    }
+
+    let body = json!({
+        "error": {
+            "message": error.to_string(),
+            "type": "upstream_tool_protocol_error",
+            "code": "upstream_tool_protocol_error",
+        }
+    });
+    ProxyError::UpstreamError {
+        status: StatusCode::BAD_GATEWAY.as_u16(),
+        body: Some(body.to_string()),
+    }
+}
+
 async fn handle_claude_transform(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     state: &ProxyState,
     original_body: &Value,
+    is_stream: bool,
     api_format: &str,
     connection_guard: Option<ActiveConnectionGuard>,
-    reasoning_boundary_enabled: bool,
 ) -> Result<axum::response::Response, ProxyError> {
+    let reasoning_boundary_enabled =
+        super::providers::reasoning_chat::enabled_for_attempt(&ctx.provider, original_body);
     let status = response.status();
-    let is_stream = original_body
-        .get("stream")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
     let is_codex_oauth = ctx
         .provider
         .meta
@@ -330,7 +348,8 @@ async fn handle_claude_transform(
     };
     let tool_schema_hints = transform_gemini::extract_anthropic_tool_schema_hints(original_body);
     let tool_schema_hints = (!tool_schema_hints.is_empty()).then_some(tool_schema_hints);
-    let emit_anthropic_thinking = should_emit_anthropic_thinking(original_body);
+    let emit_anthropic_thinking =
+        should_emit_anthropic_thinking(original_body, reasoning_boundary_enabled);
 
     if use_streaming {
         // 根据 api_format 选择流式转换器
@@ -348,9 +367,10 @@ async fn handle_claude_transform(
                 tool_schema_hints.clone(),
             )))
         } else {
-            Box::new(Box::pin(create_anthropic_sse_stream_with_thinking(
-                normalize_chat_sse(stream, reasoning_boundary_enabled),
+            Box::new(Box::pin(create_anthropic_sse_stream_with_reasoning(
+                stream,
                 emit_anthropic_thinking,
+                reasoning_boundary_enabled,
             )))
         };
 
@@ -490,8 +510,7 @@ async fn handle_claude_transform(
         }
     };
     if api_format == "openai_chat" && reasoning_boundary_enabled {
-        normalize_chat_json(&mut upstream_response)
-            .map_err(|error| ProxyError::TransformError(error.to_string()))?;
+        normalize_chat_json(&mut upstream_response).map_err(chat_boundary_error)?;
     }
 
     // 根据 api_format 选择非流式转换器
@@ -736,6 +755,8 @@ pub async fn handle_responses(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let request_enables_reasoning =
+        body.pointer("/chat_template_kwargs/enable_thinking") == Some(&Value::Bool(true));
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -761,9 +782,12 @@ pub async fn handle_responses(
     };
 
     let connection_guard = result.connection_guard.take();
-    let reasoning_boundary_enabled = result.reasoning_boundary_enabled;
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
+    let reasoning_boundary_enabled = super::providers::reasoning_chat::enabled_for_request(
+        &ctx.provider,
+        request_enables_reasoning,
+    );
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
@@ -817,6 +841,8 @@ pub async fn handle_responses_compact(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let request_enables_reasoning =
+        body.pointer("/chat_template_kwargs/enable_thinking") == Some(&Value::Bool(true));
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -842,9 +868,12 @@ pub async fn handle_responses_compact(
     };
 
     let connection_guard = result.connection_guard.take();
-    let reasoning_boundary_enabled = result.reasoning_boundary_enabled;
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
+    let reasoning_boundary_enabled = super::providers::reasoning_chat::enabled_for_request(
+        &ctx.provider,
+        request_enables_reasoning,
+    );
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
@@ -890,8 +919,11 @@ async fn handle_codex_chat_to_responses_transform(
 
     if is_stream || response.is_sse() {
         let stream = response.bytes_stream();
-        let stream = normalize_chat_sse(stream, reasoning_boundary_enabled);
-        let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
+        let sse_stream = create_responses_sse_stream_from_chat_with_reasoning(
+            stream,
+            tool_context,
+            reasoning_boundary_enabled,
+        );
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
         let usage_collector = if usage_logging_enabled(state) {
@@ -1013,8 +1045,7 @@ async fn handle_codex_chat_to_responses_transform(
         }
     };
     if reasoning_boundary_enabled {
-        normalize_chat_json(&mut chat_response)
-            .map_err(|error| ProxyError::TransformError(error.to_string()))?;
+        normalize_chat_json(&mut chat_response).map_err(chat_boundary_error)?;
     }
     let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
@@ -1603,6 +1634,19 @@ fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> Strin
     )
 }
 
+/// 从 SSE chunk 的 error 字段提取可报告的错误消息。占位形状（空对象、空消息、
+/// false、空字符串等，常见于 OpenAI 兼容网关每 chunk 附带的 error 字段）返回
+/// None——不应据此判定整条流失败（否则会把成功流误杀成 422，C12/C2234 目标人群）。
+fn error_event_message(error: &Value) -> Option<String> {
+    if let Some(msg) = error.get("message").and_then(|m| m.as_str()) {
+        return (!msg.is_empty()).then(|| msg.to_string());
+    }
+    if let Some(s) = error.as_str() {
+        return (!s.is_empty()).then(|| s.to_string());
+    }
+    None
+}
+
 /// 取 body 前 `max_chars` 个字符的单行摘要：\r 丢弃、\n 折叠为字面 \n、
 /// 其余控制字符替换为 �，超长加省略号。
 fn body_snippet(body: &str, max_chars: usize) -> String {
@@ -2067,28 +2111,72 @@ async fn log_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_emit_anthropic_thinking,
+        body_looks_like_sse, body_snippet, chat_boundary_error, chat_sse_to_response_value,
+        codex_proxy_error_json, responses_sse_to_response_value, should_emit_anthropic_thinking,
         should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
+    use crate::proxy::providers::reasoning_chat::normalize_chat_json;
     use crate::proxy::ProxyError;
     use serde_json::json;
 
     #[test]
     fn anthropic_thinking_visibility_tracks_explicit_request() {
         let cases = [
-            ("missing", json!({}), false),
-            ("enabled", json!({"thinking": {"type": "enabled"}}), true),
-            ("adaptive", json!({"thinking": {"type": "adaptive"}}), true),
+            ("legacy missing", json!({}), false, true),
+            ("nexus missing", json!({}), true, false),
+            (
+                "enabled",
+                json!({"thinking": {"type": "enabled"}}),
+                true,
+                true,
+            ),
+            (
+                "adaptive",
+                json!({"thinking": {"type": "adaptive"}}),
+                true,
+                true,
+            ),
             (
                 "display omitted",
                 json!({"thinking": {"type": "enabled", "display": "omitted"}}),
+                true,
                 false,
             ),
         ];
 
-        for (label, body, expected) in cases {
-            assert_eq!(should_emit_anthropic_thinking(&body), expected, "{label}");
+        for (label, body, normalize, expected) in cases {
+            assert_eq!(
+                should_emit_anthropic_thinking(&body, normalize),
+                expected,
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn nonstream_tool_protocol_failure_keeps_specific_error_type() {
+        let mut response = json!({"choices": [{"message": {
+            "content": " leaked tail",
+            "tool_calls": [{"function": {"arguments": "{\"content\":\"before"}}]
+        }, "finish_reason": "tool_calls"}]});
+        let error = normalize_chat_json(&mut response).unwrap_err();
+
+        match chat_boundary_error(error) {
+            ProxyError::UpstreamError { status, body } => {
+                assert_eq!(status, 502);
+                let body: serde_json::Value =
+                    serde_json::from_str(body.as_deref().unwrap()).unwrap();
+                assert_eq!(
+                    body.pointer("/error/type"),
+                    Some(&json!("upstream_tool_protocol_error"))
+                );
+                assert_eq!(
+                    body.pointer("/error/code"),
+                    Some(&json!("upstream_tool_protocol_error"))
+                );
+                assert!(!body.to_string().contains("leaked tail"));
+            }
+            other => panic!("expected typed upstream protocol error, got {other:?}"),
         }
     }
 

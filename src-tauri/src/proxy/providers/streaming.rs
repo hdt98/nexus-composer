@@ -2,7 +2,8 @@
 //!
 //! 实现 OpenAI SSE → Anthropic SSE 格式转换
 
-use crate::proxy::sse::{is_sse_comment_block, strip_sse_field, take_sse_block};
+use super::reasoning_chat::{is_tool_protocol_error, ChatBoundaryNormalizer};
+use crate::proxy::sse::{strip_sse_field, take_sse_block};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -143,6 +144,22 @@ fn build_message_delta_event(stop_reason: Option<String>, usage_json: Option<Val
     })
 }
 
+fn tool_protocol_error_event(error: &std::io::Error) -> Option<Bytes> {
+    is_tool_protocol_error(error).then(|| {
+        let event = json!({
+            "type": "error",
+            "error": {
+                "type": "upstream_tool_protocol_error",
+                "message": error.to_string()
+            }
+        });
+        Bytes::from(format!(
+            "event: error\ndata: {}\n\n",
+            serde_json::to_string(&event).unwrap_or_default()
+        ))
+    })
+}
+
 #[allow(dead_code)] // Backward-compatible entry point for the public provider module.
 pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
@@ -153,6 +170,14 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
 pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
     emit_thinking: bool,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_anthropic_sse_stream_with_reasoning(stream, emit_thinking, false)
+}
+
+pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + Send + 'static>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    emit_thinking: bool,
+    normalize_reasoning: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
@@ -168,8 +193,8 @@ pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + '
         // 2) pending_message_delta: 缓存延迟到 [DONE] 发送，确保 usage 完整
         let mut has_emitted_message_delta = false;
         let mut pending_message_delta: Option<(Option<String>, Option<Value>)> = None;
-        let mut has_sent_message_stop = false;
         let mut stream_ended_with_error = false;
+        let mut reasoning = normalize_reasoning.then(ChatBoundaryNormalizer::default);
         let mut latest_usage: Option<Value> = None;
         let mut current_non_tool_block_type: Option<&'static str> = None;
         let mut current_non_tool_block_index: Option<u32> = None;
@@ -187,14 +212,19 @@ pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + '
                         if line.trim().is_empty() {
                             continue;
                         }
-                        if is_sse_comment_block(&line) {
-                            yield Ok(Bytes::from(format!("{line}\n\n")));
-                            continue;
-                        }
-
                         for l in line.lines() {
                             if let Some(data) = strip_sse_field(l, "data") {
                                 if data.trim() == "[DONE]" {
+                                    if let Some(reasoning) = &reasoning {
+                                        if let Err(error) = reasoning.finish() {
+                                            if let Some(event) = tool_protocol_error_event(&error) {
+                                                yield Ok(event);
+                                            } else {
+                                                yield Err(error);
+                                            }
+                                            return;
+                                        }
+                                    }
                                     log::debug!("[Claude/OpenRouter] <<< OpenAI SSE: [DONE]");
 
                                     // 流正常结束，发出缓存的 message_delta（含完整 usage）。
@@ -211,11 +241,33 @@ pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + '
                                         serde_json::to_string(&event).unwrap_or_default());
                                     log::debug!("[Claude/OpenRouter] >>> Anthropic SSE: message_stop");
                                     yield Ok(Bytes::from(sse_data));
-                                    has_sent_message_stop = true;
-                                    continue;
+                                    return;
                                 }
 
-                                if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
+                                let parsed = if let Some(reasoning) = &mut reasoning {
+                                    let mut value: Value = match serde_json::from_str(data) {
+                                        Ok(value) => value,
+                                        Err(error) => {
+                                            yield Err(std::io::Error::new(
+                                                std::io::ErrorKind::InvalidData,
+                                                error,
+                                            ));
+                                            return;
+                                        }
+                                    };
+                                    if let Err(error) = reasoning.normalize_chunk(&mut value) {
+                                        if let Some(event) = tool_protocol_error_event(&error) {
+                                            yield Ok(event);
+                                        } else {
+                                            yield Err(error);
+                                        }
+                                        return;
+                                    }
+                                    serde_json::from_value::<OpenAIStreamChunk>(value)
+                                } else {
+                                    serde_json::from_str::<OpenAIStreamChunk>(data)
+                                };
+                                if let Ok(chunk) = parsed {
                                     log::debug!("[Claude/OpenRouter] <<< SSE chunk received");
 
                                     if message_id.is_none() && !chunk.id.is_empty() {
@@ -658,6 +710,16 @@ pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + '
         // 流自然结束但未收到 [DONE] 时，确保发送缓存的 message_delta 和 message_stop。
         // 若上游已显式报错，则只保留 error 事件，避免把失败伪装成成功完成。
         if !stream_ended_with_error {
+            if let Some(reasoning) = &reasoning {
+                if let Err(error) = reasoning.finish() {
+                    if let Some(event) = tool_protocol_error_event(&error) {
+                        yield Ok(event);
+                    } else {
+                        yield Err(error);
+                    }
+                    return;
+                }
+            }
             let emitted_pending_message_delta = if let Some((stop_reason, usage_json)) =
                 pending_message_delta.take()
             {
@@ -671,7 +733,7 @@ pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + '
                 false
             };
 
-            if emitted_pending_message_delta && !has_sent_message_stop {
+            if emitted_pending_message_delta {
                 let event = json!({"type": "message_stop"});
                 let sse_data = format!("event: message_stop\ndata: {}\n\n",
                     serde_json::to_string(&event).unwrap_or_default());
@@ -729,10 +791,22 @@ mod tests {
         input: &str,
         emit_thinking: bool,
     ) -> Vec<Value> {
+        collect_anthropic_events_with_options(input, emit_thinking, false).await
+    }
+
+    async fn collect_anthropic_events_with_options(
+        input: &str,
+        emit_thinking: bool,
+        normalize_reasoning: bool,
+    ) -> Vec<Value> {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream_with_thinking(upstream, emit_thinking);
+        let converted = create_anthropic_sse_stream_with_reasoning(
+            upstream,
+            emit_thinking,
+            normalize_reasoning,
+        );
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
             .into_iter()
@@ -748,6 +822,82 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn nexus_boundary_recovers_swallowed_markdown_close() {
+        let input = concat!(
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Before `No raw <think> marker\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"` and continued reasoning. \"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me write checkpoint V now.</think>Good, I have a clear picture now.\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = collect_anthropic_events_with_options(input, true, true).await;
+        let join = |pointer: &str| {
+            events
+                .iter()
+                .filter_map(|event| event.pointer(pointer).and_then(Value::as_str))
+                .collect::<String>()
+        };
+        assert_eq!(
+            join("/delta/thinking"),
+            "Before `No raw <think> marker` and continued reasoning. Let me write checkpoint V now."
+        );
+        assert_eq!(join("/delta/text"), "Good, I have a clear picture now.");
+    }
+
+    #[tokio::test]
+    async fn nexus_boundary_rejects_content_after_finish_reason() {
+        let upstream = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n",
+            )),
+        ]);
+        let items = create_anthropic_sse_stream_with_reasoning(upstream, true, true)
+            .collect::<Vec<_>>()
+            .await;
+        assert!(items.iter().any(Result::is_err));
+        assert!(!items
+            .iter()
+            .filter_map(|item| item.as_ref().ok())
+            .any(|item| String::from_utf8_lossy(item).contains("message_stop")));
+    }
+
+    #[tokio::test]
+    async fn captured_glm47_tail_returns_typed_tool_protocol_error() {
+        let tool = json!({"id": "capture", "model": "glm-5.2", "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_write",
+                "function": {
+                    "name": "Write",
+                    "arguments": r#"{"content":"before \"</tool_call>"#
+                }
+            }]}
+        }]});
+        let tail = json!({"id": "capture", "model": "glm-5.2", "choices": [{
+            "index": 0,
+            "delta": {"content": r#"\" after</arg_value>"#},
+            "finish_reason": "tool_calls"
+        }]});
+        let input = format!("data: {tool}\n\ndata: {tail}\n\n");
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(input))]);
+        let items = create_anthropic_sse_stream_with_reasoning(upstream, true, true)
+            .collect::<Vec<_>>()
+            .await;
+
+        assert!(items.iter().all(Result::is_ok), "items: {items:#?}");
+        let output = items
+            .into_iter()
+            .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+            .collect::<String>();
+        assert!(output.contains("upstream_tool_protocol_error"));
+        assert!(!output.contains(r#"\" after</arg_value>"#));
+        assert!(!output.contains("message_stop"));
     }
 
     #[tokio::test]
@@ -1107,9 +1257,6 @@ mod tests {
     async fn boundary_normalizer_preserves_one_terminal_and_final_usage() {
         let upstream = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
-                b": nexus-boundary-buffered\n\n",
-            )),
-            Ok::<_, std::io::Error>(Bytes::from_static(
                 b"data: {\"id\":\"chatcmpl_boundary\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
             )),
             Ok(Bytes::from_static(
@@ -1117,13 +1264,10 @@ mod tests {
             )),
             Ok(Bytes::from_static(b"data: [DONE]\n\n")),
         ]);
-        let normalized =
-            crate::proxy::providers::reasoning_chat::normalize_chat_sse(upstream, true);
-        let merged = create_anthropic_sse_stream_with_thinking(normalized, true)
+        let merged = create_anthropic_sse_stream_with_reasoning(upstream, true, true)
             .map(|item| String::from_utf8_lossy(item.unwrap().as_ref()).to_string())
             .collect::<String>()
             .await;
-        assert!(merged.contains(": nexus-boundary-buffered"));
         let events = merged
             .split("\n\n")
             .filter_map(|block| {

@@ -4,6 +4,7 @@ use super::{
     codex_chat_common::{
         extract_reasoning_field_text, split_leading_think_block, strip_leading_think_open_tag,
     },
+    reasoning_chat::{is_tool_protocol_error, ChatBoundaryNormalizer},
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
         response_id_from_chat_id, response_status_from_finish_reason,
@@ -12,9 +13,7 @@ use super::{
     },
 };
 use crate::proxy::json_canonical::canonicalize_tool_arguments_str;
-use crate::proxy::sse::{
-    error_event_message, is_reportable_error, is_sse_comment_block, strip_sse_field, take_sse_block,
-};
+use crate::proxy::sse::{strip_sse_field, take_sse_block};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
@@ -908,12 +907,22 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
     tool_context: CodexToolContext,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_responses_sse_stream_from_chat_with_reasoning(stream, tool_context, false)
+}
+
+pub(crate) fn create_responses_sse_stream_from_chat_with_reasoning<
+    E: std::error::Error + Send + 'static,
+>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    tool_context: CodexToolContext,
+    normalize_reasoning: bool,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut state = ChatToResponsesState::with_tool_context(tool_context);
         let mut stream_failed = false;
-        let mut saw_done_sentinel = false;
+        let mut reasoning = normalize_reasoning.then(ChatBoundaryNormalizer::default);
 
         tokio::pin!(stream);
 
@@ -926,11 +935,6 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                         if block.trim().is_empty() {
                             continue;
                         }
-                        if is_sse_comment_block(&block) {
-                            yield Ok(Bytes::from(format!("{block}\n\n")));
-                            continue;
-                        }
-
                         let mut event_name: Option<String> = None;
                         let mut data_parts: Vec<String> = Vec::new();
                         for line in block.lines() {
@@ -948,21 +952,45 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
 
                         let data = data_parts.join("\n");
                         if data.trim() == "[DONE]" {
+                            if let Some(reasoning) = &reasoning {
+                                if let Err(error) = reasoning.finish() {
+                                    yield Ok(state.failed_event(
+                                        error.to_string(),
+                                        Some(boundary_error_code(&error).to_string()),
+                                    ));
+                                    return;
+                                }
+                            }
                             for event in state.finalize() {
                                 yield Ok(event);
                             }
-                            saw_done_sentinel = true;
-                            break;
+                            return;
                         }
 
-                        let chunk: Value = match serde_json::from_str(&data) {
+                        let mut chunk: Value = match serde_json::from_str(&data) {
                             Ok(value) => value,
+                            Err(error) if normalize_reasoning => {
+                                yield Ok(state.failed_event(
+                                    format!("Invalid upstream Chat SSE JSON: {error}"),
+                                    Some("stream_protocol_error".to_string()),
+                                ));
+                                stream_failed = true;
+                                break;
+                            }
                             Err(_) => continue,
                         };
+                        if let Some(reasoning) = &mut reasoning {
+                            if let Err(error) = reasoning.normalize_chunk(&mut chunk) {
+                                yield Ok(state.failed_event(
+                                    error.to_string(),
+                                    Some(boundary_error_code(&error).to_string()),
+                                ));
+                                stream_failed = true;
+                                break;
+                            }
+                        }
 
-                        let has_reportable_error =
-                            chunk.get("error").is_some_and(is_reportable_error);
-                        if event_name.as_deref() == Some("error") || has_reportable_error {
+                        if event_name.as_deref() == Some("error") || chunk.get("error").is_some() {
                             let (message, error_type) = extract_chat_sse_error(&chunk);
                             yield Ok(state.failed_event(message, error_type));
                             stream_failed = true;
@@ -974,7 +1002,7 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                         }
                     }
 
-                    if stream_failed || saw_done_sentinel {
+                    if stream_failed {
                         break;
                     }
                 }
@@ -990,6 +1018,15 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
         }
 
         if !stream_failed {
+            if let Some(reasoning) = &reasoning {
+                if let Err(error) = reasoning.finish() {
+                    yield Ok(state.failed_event(
+                        error.to_string(),
+                        Some(boundary_error_code(&error).to_string()),
+                    ));
+                    return;
+                }
+            }
             if state.completed || state.finish_reason.is_some() {
                 for event in state.finalize() {
                     yield Ok(event);
@@ -1004,9 +1041,27 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
     }
 }
 
+fn boundary_error_code(error: &std::io::Error) -> &'static str {
+    if is_tool_protocol_error(error) {
+        "upstream_tool_protocol_error"
+    } else {
+        "stream_protocol_error"
+    }
+}
+
 fn extract_chat_sse_error(value: &Value) -> (String, Option<String>) {
     let error = value.get("error").unwrap_or(value);
-    let message = error_event_message(error).unwrap_or_else(|| error.to_string());
+    let message = error
+        .as_str()
+        .map(ToString::to_string)
+        .or_else(|| {
+            error
+                .get("message")
+                .or_else(|| error.get("detail"))
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string)
+        })
+        .unwrap_or_else(|| error.to_string());
     let error_type = error
         .get("type")
         .or_else(|| error.get("code"))
@@ -1033,14 +1088,119 @@ mod tests {
     }
 
     async fn collect_with_context(chunks: Vec<&str>, tool_context: CodexToolContext) -> String {
+        collect_with_options(chunks, tool_context, false).await
+    }
+
+    async fn collect_with_options(
+        chunks: Vec<&str>,
+        tool_context: CodexToolContext,
+        normalize_reasoning: bool,
+    ) -> String {
         let chunks: Vec<Result<Bytes, std::io::Error>> = chunks
             .into_iter()
             .map(|chunk| Ok(Bytes::copy_from_slice(chunk.as_bytes())))
             .collect();
         let upstream = stream::iter(chunks);
-        let converted = create_responses_sse_stream_from_chat_with_context(upstream, tool_context);
+        let converted = create_responses_sse_stream_from_chat_with_reasoning(
+            upstream,
+            tool_context,
+            normalize_reasoning,
+        );
         let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
         String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn nexus_boundary_recovers_swallowed_markdown_close() {
+        let output = collect_with_options(
+            vec![
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Before `No raw <think> marker\"}}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"` and continued reasoning. \"}}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me write checkpoint V now.</think>Good, I have a clear picture now.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            CodexToolContext::default(),
+            true,
+        )
+        .await;
+        let events = output.split("\n\n").filter_map(|block| {
+            block
+                .lines()
+                .find_map(|line| strip_sse_field(line, "data"))
+                .and_then(|data| serde_json::from_str::<Value>(data).ok())
+        });
+        let mut reasoning = String::new();
+        let mut content = String::new();
+        for event in events {
+            match event.get("type").and_then(Value::as_str) {
+                Some("response.reasoning_summary_text.delta") => reasoning.push_str(
+                    event
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ),
+                Some("response.output_text.delta") => content.push_str(
+                    event
+                        .get("delta")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default(),
+                ),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            reasoning,
+            "Before `No raw <think> marker` and continued reasoning. Let me write checkpoint V now."
+        );
+        assert_eq!(content, "Good, I have a clear picture now.");
+    }
+
+    #[tokio::test]
+    async fn nexus_boundary_rejects_content_after_finish_reason() {
+        let output = collect_with_options(
+            vec![
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            ],
+            CodexToolContext::default(),
+            true,
+        )
+        .await;
+        assert!(output.contains("event: response.failed"));
+        assert!(!output.contains("event: response.completed"));
+    }
+
+    #[tokio::test]
+    async fn captured_glm47_tail_returns_typed_tool_protocol_error() {
+        let tool = json!({"id": "capture", "model": "glm-5.2", "choices": [{
+            "index": 0,
+            "delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call_write",
+                "function": {
+                    "name": "Write",
+                    "arguments": r#"{"content":"before \"</tool_call>"#
+                }
+            }]}
+        }]});
+        let tail = json!({"id": "capture", "model": "glm-5.2", "choices": [{
+            "index": 0,
+            "delta": {"content": r#"\" after</arg_value>"#},
+            "finish_reason": "tool_calls"
+        }]});
+        let tool_sse = format!("data: {tool}\n\n");
+        let tail_sse = format!("data: {tail}\n\n");
+        let output = collect_with_options(
+            vec![&tool_sse, &tail_sse],
+            CodexToolContext::default(),
+            true,
+        )
+        .await;
+
+        assert!(output.contains("upstream_tool_protocol_error"));
+        assert!(!output.contains(r#"\" after</arg_value>"#));
+        assert!(!output.contains("response.completed"));
     }
 
     #[tokio::test]
@@ -1064,7 +1224,7 @@ mod tests {
         let output = collect(vec![
             "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need context. \"}}]}\n\n",
             "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"reasoning\":\"Now answer. \"}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10,\"reasoning_tokens\":3}}\n\n",
+            "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10,\"completion_tokens_details\":{\"reasoning_tokens\":3}}}\n\n",
             "data: [DONE]\n\n",
         ])
         .await;
@@ -1338,22 +1498,5 @@ mod tests {
         assert!(output.contains("quota exceeded"));
         assert!(output.contains("rate_limit_exceeded"));
         assert!(!output.contains("event: response.completed"));
-    }
-
-    #[tokio::test]
-    async fn normalized_error_placeholders_do_not_fail_responses_streams() {
-        let upstream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
-            b": nexus-boundary-buffered\n\ndata: {\"error\":{},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        ))]);
-        let normalized = super::super::reasoning_chat::normalize_chat_sse(upstream, true);
-        let converted = create_responses_sse_stream_from_chat(normalized);
-        let output = converted
-            .map(|item| String::from_utf8_lossy(&item.unwrap()).into_owned())
-            .collect::<String>()
-            .await;
-        assert!(output.starts_with(": nexus-boundary-buffered\n\n"));
-        assert!(!output.contains("event: response.failed"), "{output}");
-        assert!(output.contains("event: response.completed"), "{output}");
-        assert!(output.contains("\"text\":\"ok\""), "{output}");
     }
 }

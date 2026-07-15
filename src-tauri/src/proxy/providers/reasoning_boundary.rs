@@ -218,12 +218,6 @@ impl Markdown {
         result
     }
 
-    fn promote_reasoning(&mut self) {
-        if !matches!(self.mode, Mode::Plain) {
-            self.held.reasoning_bytes = self.held.text.len();
-        }
-    }
-
     fn observe_plain(&mut self, character: char) {
         if character == '\n' {
             self.line_indent = 0;
@@ -250,37 +244,6 @@ fn fence_closes(line: &str, symbol: char, width: usize) -> bool {
             .all(|character| matches!(character, ' ' | '\t'))
 }
 
-fn is_semantic_neighbor(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '_' | '<' | '`')
-}
-
-fn is_structural_marker(opens: bool, left: Option<char>, right: Option<char>) -> bool {
-    let attached_left = left.is_some_and(is_semantic_neighbor);
-    let attached_right = right.is_some_and(is_semantic_neighbor);
-    let line_left = left.is_none_or(|character| matches!(character, '\r' | '\n'));
-    let line_right = right.is_none_or(|character| matches!(character, '\r' | '\n'));
-    // A bare close marker attached at line end is protocol; literal examples
-    // must be whitespace-delimited or protected as Markdown.
-    let attached_before_line_end =
-        !opens && line_right && left.is_some_and(|character| !character.is_whitespace());
-    (opens && line_left)
-        || attached_left
-        || attached_right
-        || attached_before_line_end
-        || (line_left && line_right)
-}
-
-fn is_literal_enclosure(left: Option<char>, right: Option<char>) -> bool {
-    matches!(
-        (left, right),
-        (Some('('), Some(')'))
-            | (Some('['), Some(']'))
-            | (Some('{'), Some('}'))
-            | (Some('"'), Some('"'))
-            | (Some('\''), Some('\''))
-    )
-}
-
 /// Repairs the GLM hybrid-reasoning boundary without guessing from prose.
 ///
 /// Before the first unprotected close marker, content is provisional: a later
@@ -292,10 +255,10 @@ pub(crate) struct ReasoningBoundary {
     markdown: Markdown,
     candidate: String,
     candidate_reasoning_bytes: usize,
-    plain_tail: Option<char>,
     provisional: String,
     explicit_open: bool,
     authoritative_reasoning: bool,
+    saw_content_input: bool,
     // Marker lookahead is separately bounded by the longest static marker.
     max_provisional_bytes: usize,
 }
@@ -307,10 +270,10 @@ impl ReasoningBoundary {
             markdown: Markdown::default(),
             candidate: String::new(),
             candidate_reasoning_bytes: 0,
-            plain_tail: None,
             provisional: String::new(),
             explicit_open: false,
             authoritative_reasoning: false,
+            saw_content_input: false,
             max_provisional_bytes,
         }
     }
@@ -323,15 +286,17 @@ impl ReasoningBoundary {
         if self.phase == Phase::Done {
             return Err(BoundaryError::Malformed);
         }
+        if !text.is_empty() {
+            if field == Field::Reasoning && (self.saw_content_input || self.phase == Phase::Content)
+            {
+                return Err(BoundaryError::Malformed);
+            }
+            self.saw_content_input |= field == Field::Content;
+        }
 
         let mut output = BoundaryOutput::default();
         if self.phase == Phase::Unresolved && field == Field::Reasoning && !text.is_empty() {
             self.authoritative_reasoning = true;
-            output
-                .reasoning
-                .push_str(&std::mem::take(&mut self.provisional));
-            self.candidate_reasoning_bytes = self.candidate.len();
-            self.markdown.promote_reasoning();
         }
 
         self.scan(field, text, &mut output)?;
@@ -382,43 +347,28 @@ impl ReasoningBoundary {
     }
 
     fn commit_into(&mut self, output: &mut BoundaryOutput) -> Result<(), BoundaryError> {
-        loop {
-            match self.markdown.finish() {
-                Step::Done => break,
-                Step::Flush(held) => {
-                    self.consume(&held.text, held.reasoning_bytes, false, output)?
-                }
-                Step::Replay(held) => {
-                    let at = held.opener_bytes;
-                    self.consume(
-                        &held.text[..at],
-                        held.reasoning_bytes.min(at),
-                        false,
-                        output,
-                    )?;
-                    self.consume(
-                        &held.text[at..],
-                        held.reasoning_bytes.saturating_sub(at),
-                        true,
-                        output,
-                    )?;
-                }
-                _ => unreachable!("non-terminal Markdown step"),
+        match self.markdown.finish() {
+            Step::Done => {}
+            Step::Flush(held) => self.consume(&held.text, held.reasoning_bytes, false, output)?,
+            Step::Replay(held) => {
+                let at = held.opener_bytes;
+                self.consume(
+                    &held.text[..at],
+                    held.reasoning_bytes.min(at),
+                    false,
+                    output,
+                )?;
+                self.consume(
+                    &held.text[at..],
+                    held.reasoning_bytes.saturating_sub(at),
+                    true,
+                    output,
+                )?;
             }
+            _ => unreachable!("non-terminal Markdown step"),
         }
         if !self.candidate.is_empty() {
-            if let Some(opens) = self.pending_marker() {
-                if (!opens && self.phase == Phase::Unresolved && self.authoritative_reasoning)
-                    || (self.explicit_open && !opens)
-                    || is_structural_marker(opens, self.plain_tail, None)
-                {
-                    self.resolve_marker(opens, output)?;
-                } else {
-                    self.flush_candidate(output)?;
-                }
-            } else {
-                self.flush_candidate(output)?;
-            }
+            self.flush_candidate(output)?;
         }
         if self.explicit_open {
             return Err(BoundaryError::Malformed);
@@ -446,41 +396,21 @@ impl ReasoningBoundary {
                     field
                 };
                 if !self.candidate.is_empty() {
-                    if let Some(opens) = self.pending_marker() {
-                        let authoritative_close = !opens
-                            && self.phase == Phase::Unresolved
-                            && self.authoritative_reasoning
-                            && !is_literal_enclosure(self.plain_tail, Some(character));
-                        let structural = authoritative_close
-                            || (self.explicit_open && !opens)
-                            || is_structural_marker(opens, self.plain_tail, Some(character));
-                        if structural {
-                            self.resolve_marker(opens, output)?;
-                        } else {
-                            self.flush_candidate(output)?;
-                        }
-                        current = Some(character);
-                        continue;
-                    }
-                    let mut extended = self.candidate.clone();
-                    extended.push(character);
-                    if let Some((_, opens)) = MARKERS.iter().find(|(tag, _)| *tag == extended) {
-                        self.candidate = extended;
+                    self.candidate.push(character);
+                    if MARKERS
+                        .iter()
+                        .any(|(tag, _)| tag.starts_with(&self.candidate))
+                    {
                         if field == Field::Reasoning {
                             self.candidate_reasoning_bytes = self.candidate.len();
                         }
-                        if self.explicit_open
-                            && *opens
-                            && self.plain_tail.is_some_and(is_semantic_neighbor)
+                        if let Some((_, opens)) =
+                            MARKERS.iter().find(|(tag, _)| *tag == self.candidate)
                         {
                             self.resolve_marker(*opens, output)?;
                         }
-                    } else if MARKERS.iter().any(|(tag, _)| tag.starts_with(&extended)) {
-                        self.candidate = extended;
-                        if field == Field::Reasoning {
-                            self.candidate_reasoning_bytes = self.candidate.len();
-                        }
                     } else {
+                        self.candidate.pop();
                         self.flush_candidate(output)?;
                         current = Some(character);
                     }
@@ -516,12 +446,6 @@ impl ReasoningBoundary {
         Ok(())
     }
 
-    fn pending_marker(&self) -> Option<bool> {
-        MARKERS
-            .iter()
-            .find_map(|(tag, opens)| (*tag == self.candidate).then_some(*opens))
-    }
-
     fn resolve_marker(
         &mut self,
         opens: bool,
@@ -529,7 +453,6 @@ impl ReasoningBoundary {
     ) -> Result<(), BoundaryError> {
         self.candidate.clear();
         self.candidate_reasoning_bytes = 0;
-        self.plain_tail = None;
         self.markdown = Markdown::default();
         match opens {
             true if self.phase == Phase::Unresolved && !self.explicit_open => {
@@ -592,9 +515,6 @@ impl ReasoningBoundary {
             Phase::Content => output.content.push_str(text),
             _ => return Err(BoundaryError::Malformed),
         }
-        if let Some(character) = text.chars().next_back() {
-            self.plain_tail = Some(character);
-        }
         Ok(())
     }
 }
@@ -649,7 +569,6 @@ mod tests {
             &[
                 (Field::Content, Field::Content),
                 (Field::Reasoning, Field::Content),
-                (Field::Content, Field::Reasoning),
             ],
         );
     }
@@ -665,20 +584,20 @@ mod tests {
     #[test]
     fn literal_and_structural_marker_matrices_are_partition_safe() {
         for text in [
-            "The model leaked reasoning delimiters (open or /</think>) into visible output",
-            "- </think>: a literal close marker",
-            r#"Call it "</think>" here."#,
+            "Use `</think>` literally.",
+            "Use \\</think> literally.",
+            "```text\n</think>\n```",
         ] {
             assert_content(text);
         }
-        assert_content("Use <think> then continue.");
         for (text, reasoning, content) in [
             ("<think>plan</think>answer", "plan", "answer"),
             ("<think> plan</think>answer", " plan", "answer"),
             ("<thinking>\nplan</thinking>answer", "\nplan", "answer"),
             ("plan</think>answer", "plan", "answer"),
             ("plan</think> answer", "plan", " answer"),
-            ("(</think>)plan</think>answer", "(</think>)plan", "answer"),
+            ("plan </think> answer", "plan ", " answer"),
+            ("plan\n</thinking>\nanswer", "plan\n", "\nanswer"),
             ("plan</think>", "plan", ""),
             ("Xong…</thinking>\nĐáp án", "Xong…", "\nĐáp án"),
         ] {
@@ -738,9 +657,38 @@ mod tests {
             Ok(expected("plan", "answer"))
         );
         assert_eq!(
-            boundary.push(Field::Reasoning, " later").unwrap().content,
-            " later"
+            boundary.push(Field::Reasoning, " later"),
+            Err(BoundaryError::Malformed)
         );
+    }
+
+    #[test]
+    fn reasoning_cannot_reenter_after_content_while_state_is_buffered() {
+        for parts in [
+            [
+                (Field::Reasoning, "`r"),
+                (Field::Content, "c"),
+                (Field::Reasoning, "r`"),
+            ],
+            [
+                (Field::Reasoning, "```\nr\n"),
+                (Field::Content, "c"),
+                (Field::Reasoning, "\n```"),
+            ],
+            [
+                (Field::Reasoning, "</th"),
+                (Field::Content, "i"),
+                (Field::Reasoning, "nk>"),
+            ],
+        ] {
+            let mut boundary = ReasoningBoundary::new(4096);
+            assert!(boundary.push(parts[0].0, parts[0].1).is_ok());
+            assert!(boundary.push(parts[1].0, parts[1].1).is_ok());
+            assert_eq!(
+                boundary.push(parts[2].0, parts[2].1),
+                Err(BoundaryError::Malformed)
+            );
+        }
     }
 
     #[test]
@@ -798,6 +746,19 @@ mod tests {
 
         assert_content("\\\\\\</thinking>");
         assert_boundary("\\\\</think>answer", "\\\\", "answer");
+
+        assert_run(
+            &[
+                (Field::Reasoning, "Before `No raw <think> marker"),
+                (Field::Content, "` and continued reasoning. "),
+                (
+                    Field::Content,
+                    "Let me write checkpoint V now.</think>Good, I have a clear picture now.",
+                ),
+            ],
+            "Before `No raw <think> marker` and continued reasoning. Let me write checkpoint V now.",
+            "Good, I have a clear picture now.",
+        );
     }
 
     #[test]
