@@ -7,8 +7,8 @@ export const NEXUS_CLAUDE_MODEL = `${NEXUS_MODEL}[1m]`;
 export const NEXUS_CONTEXT_WINDOW = 1_048_576;
 export const NEXUS_AUTO_COMPACT_TOKENS = 252_000;
 export const NEXUS_MAX_OUTPUT_TOKENS = 65_536;
-export const NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS = 900_000;
-export const NEXUS_MANAGED_PRESET_VERSION = 3;
+export const NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS = 3_000_000;
+export const NEXUS_MANAGED_PRESET_VERSION = 4;
 export const NEXUS_TEXT_MODEL_CATALOG = {
   models: [
     { model: NEXUS_MODEL, inputModalities: ["text"] },

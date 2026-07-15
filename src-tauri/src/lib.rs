@@ -600,21 +600,28 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
-            let current_codex_id = services::provider::ProviderService::current(
-                &app_state,
-                app_config::AppType::Codex,
-            )
-            .ok()
-            .filter(|id| !id.is_empty());
-            let nexus_migration = match app_state
+            let current_provider_id = |app_type| {
+                services::provider::ProviderService::current(&app_state, app_type)
+                    .ok()
+                    .filter(|id| !id.is_empty())
+            };
+            let current_claude_id = current_provider_id(app_config::AppType::Claude);
+            let current_claude_desktop_id =
+                current_provider_id(app_config::AppType::ClaudeDesktop);
+            let current_codex_id = current_provider_id(app_config::AppType::Codex);
+            let (nexus_migration, startup_proxy_safe) = match app_state
                 .db
-                .migrate_legacy_nexus_providers(current_codex_id.as_deref())
+                .migrate_legacy_nexus_providers(
+                    current_claude_id.as_deref(),
+                    current_claude_desktop_id.as_deref(),
+                    current_codex_id.as_deref(),
+                )
             {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    log::warn!("✗ Failed to normalize Nexus providers: {e}");
-                    database::NexusMigrationOutcome::default()
-                }
+                Ok(outcome) => (outcome, Ok(())),
+                Err(e) => (
+                    database::NexusMigrationOutcome::default(),
+                    Err(format!("provider migration failed: {e}")),
+                ),
             };
             if nexus_migration.migrated > 0 {
                 log::info!(
@@ -622,7 +629,20 @@ pub fn run() {
                     nexus_migration.migrated
                 );
             }
-            let migrated_current_nexus_codex = nexus_migration.current_codex_changed;
+            let migrated_current_nexus_apps = [
+                (
+                    app_config::AppType::Claude,
+                    nexus_migration.current_claude_changed,
+                ),
+                (
+                    app_config::AppType::ClaudeDesktop,
+                    nexus_migration.current_claude_desktop_changed,
+                ),
+                (
+                    app_config::AppType::Codex,
+                    nexus_migration.current_codex_changed,
+                ),
+            ];
 
             {
                 let db_for_codex_history_migration = app_state.db.clone();
@@ -1050,50 +1070,16 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 let state = app_handle.state::<AppState>();
 
-                // 检查是否有 Live 备份（表示上次异常退出时可能处于接管状态）
-                let has_backups = match state.db.has_any_live_backup().await {
-                    Ok(v) => v,
-                    Err(e) => {
-                        log::error!("检查 Live 备份失败: {e}");
-                        false
-                    }
-                };
-                // 检查 Live 配置是否仍处于被接管状态（包含占位符）
-                let live_taken_over = state.proxy_service.detect_takeover_in_live_configs();
-
-                if has_backups || live_taken_over {
-                    log::warn!("检测到上次异常退出（存在接管残留），正在恢复 Live 配置...");
-                    if let Err(e) = state.proxy_service.recover_from_crash().await {
-                        log::error!("恢复 Live 配置失败: {e}");
-                    } else {
-                        log::info!("Live 配置已恢复");
-                    }
-                }
-
-                initialize_common_config_snippets(&state);
-
-                // 检查 settings 表中的代理状态，自动恢复代理服务
-                restore_proxy_state_on_startup(&state).await;
-
-                let codex_takeover_enabled = state
-                    .db
-                    .get_proxy_config_for_app("codex")
-                    .await
-                    .map(|config| config.enabled)
-                    .unwrap_or(false);
-                if migrated_current_nexus_codex {
-                    if let Err(e) =
-                        services::provider::ProviderService::sync_current_provider_for_app(
-                            &state,
-                            app_config::AppType::Codex,
-                        )
-                    {
-                        log::warn!("✗ Failed to refresh the migrated current Codex provider: {e}");
-                    }
-                } else if codex_takeover_enabled {
-                    if let Err(e) = sync_current_nexus_codex_on_startup(&state) {
-                        log::warn!("✗ Failed to refresh the current Nexus Codex provider: {e}");
-                    }
+                if let Err(error) = restore_proxy_state_on_startup(
+                    &state,
+                    migrated_current_nexus_apps,
+                    startup_proxy_safe,
+                )
+                .await
+                {
+                    log::error!(
+                        "Proxy takeover was not restored at startup: {error}. Fix the reported configuration and restart Nexus Composer; enabled states were preserved for retry."
+                    );
                 }
 
                 // Periodic backup check (on startup)
@@ -1767,51 +1753,122 @@ pub(crate) fn remove_tray_icon_before_exit(app_handle: &tauri::AppHandle) {
 // 启动时恢复代理状态
 // ============================================================
 
-/// 启动时根据 proxy_config 表中的代理状态自动恢复代理服务
-///
-/// 检查 `proxy_config.enabled` 字段，如果有任一应用的状态为 `true`，
-/// 则自动启动代理服务并接管对应应用的 Live 配置。
-async fn restore_proxy_state_on_startup(state: &store::AppState) {
-    // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
-    let mut apps_to_restore = Vec::new();
-    for app_type in ["claude", "codex", "gemini"] {
-        if let Ok(config) = state.db.get_proxy_config_for_app(app_type).await {
-            if config.enabled {
-                apps_to_restore.push(app_type);
-            }
+fn record_startup_proxy_error(
+    startup_proxy_safe: &mut Result<(), String>,
+    stage: &str,
+    error: impl std::fmt::Display,
+) {
+    if startup_proxy_safe.is_ok() {
+        *startup_proxy_safe = Err(format!("{stage}: {error}"));
+    }
+}
+
+/// Recover and sanitize live state before restoring persisted proxy takeover.
+/// Any failed prerequisite keeps the UI running but leaves every enabled flag
+/// intact so the same state can be retried after the reported issue is fixed.
+async fn restore_proxy_state_on_startup(
+    state: &store::AppState,
+    migrated_current_nexus_apps: [(app_config::AppType, bool); 3],
+    mut startup_proxy_safe: Result<(), String>,
+) -> Result<(), String> {
+    let migrated_current_nexus_codex = migrated_current_nexus_apps
+        .iter()
+        .any(|(app, changed)| *changed && matches!(app, app_config::AppType::Codex));
+
+    let has_backups = match state.db.has_any_live_backup().await {
+        Ok(value) => value,
+        Err(error) => {
+            record_startup_proxy_error(
+                &mut startup_proxy_safe,
+                "live-backup inspection failed",
+                error,
+            );
+            false
+        }
+    };
+    if has_backups || state.proxy_service.detect_takeover_in_live_configs() {
+        if let Err(error) = state.proxy_service.recover_from_crash().await {
+            record_startup_proxy_error(&mut startup_proxy_safe, "crash recovery failed", error);
         }
     }
 
+    // Crash recovery may replace live files from a sanitized backup. Project every
+    // changed current provider after recovery, then scrub the resulting live files.
+    for (app_type, changed) in migrated_current_nexus_apps {
+        if changed {
+            if let Err(error) = services::provider::ProviderService::sync_current_provider_for_app(
+                state,
+                app_type.clone(),
+            ) {
+                record_startup_proxy_error(
+                    &mut startup_proxy_safe,
+                    &format!("{app_type:?} current-provider projection failed"),
+                    error,
+                );
+            }
+        }
+    }
+    match state.proxy_service.scrub_leaked_live_credentials() {
+        Ok(count) if count > 0 => {
+            log::info!("✓ Removed leaked credentials from {count} live file(s)")
+        }
+        Ok(_) => {}
+        Err(error) => record_startup_proxy_error(
+            &mut startup_proxy_safe,
+            "live credential scrub failed",
+            error,
+        ),
+    }
+
+    initialize_common_config_snippets(state);
+
+    // 收集需要恢复接管的应用列表（从 proxy_config.enabled 读取）
+    let mut apps_to_restore = Vec::new();
+    for app_type in ["claude", "codex", "gemini"] {
+        match state.db.get_proxy_config_for_app(app_type).await {
+            Ok(config) if config.enabled => apps_to_restore.push(app_type),
+            Ok(_) => {}
+            Err(error) => record_startup_proxy_error(
+                &mut startup_proxy_safe,
+                &format!("read {app_type} proxy state failed"),
+                error,
+            ),
+        }
+    }
+    let codex_takeover_enabled = apps_to_restore.contains(&"codex");
+    if !migrated_current_nexus_codex && codex_takeover_enabled {
+        if let Err(error) = sync_current_nexus_codex_on_startup(state) {
+            record_startup_proxy_error(
+                &mut startup_proxy_safe,
+                "Codex startup projection failed",
+                error,
+            );
+        }
+    }
+    startup_proxy_safe?;
+
     if apps_to_restore.is_empty() {
         log::debug!("启动时无需恢复代理状态");
-        return;
+        return Ok(());
     }
 
     log::info!("检测到上次代理状态需要恢复，应用列表: {apps_to_restore:?}");
 
     // 逐个恢复接管状态
+    let mut errors = Vec::new();
     for app_type in apps_to_restore {
-        match state
+        if let Err(error) = state
             .proxy_service
             .set_takeover_for_app(app_type, true)
             .await
         {
-            Ok(()) => {
-                log::info!("✓ 已恢复 {app_type} 的代理接管状态");
-            }
-            Err(e) => {
-                log::error!("✗ 恢复 {app_type} 的代理接管状态失败: {e}");
-                // 失败时清除该应用的状态，避免下次启动再次尝试
-                if let Err(clear_err) = state
-                    .proxy_service
-                    .set_takeover_for_app(app_type, false)
-                    .await
-                {
-                    log::error!("清除 {app_type} 代理状态失败: {clear_err}");
-                }
-            }
+            errors.push(format!("restore {app_type} takeover failed: {error}"));
         }
     }
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    Ok(())
 }
 
 fn sync_current_nexus_codex_on_startup(state: &store::AppState) -> Result<(), error::AppError> {
@@ -2118,7 +2175,84 @@ pub fn restart_process(app_handle: &tauri::AppHandle) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_exit_request, ExitRequestAction};
+    use super::{classify_exit_request, restore_proxy_state_on_startup, ExitRequestAction};
+    use crate::app_config::AppType;
+    use crate::config::{get_claude_settings_path, write_json_file};
+    use crate::database::Database;
+    use crate::provider::Provider;
+    use crate::proxy::types::ProxyConfig;
+    use crate::store::AppState;
+    use serde_json::json;
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    struct TestHome {
+        _dir: TempDir,
+        original: Option<OsString>,
+    }
+
+    impl TestHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp home");
+            let original = std::env::var_os("CC_SWITCH_TEST_HOME");
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            Self {
+                _dir: dir,
+                original,
+            }
+        }
+    }
+
+    impl Drop for TestHome {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var("CC_SWITCH_TEST_HOME", value),
+                None => std::env::remove_var("CC_SWITCH_TEST_HOME"),
+            }
+        }
+    }
+
+    fn no_migrated_current_providers() -> [(AppType, bool); 3] {
+        [
+            (AppType::Claude, false),
+            (AppType::ClaudeDesktop, false),
+            (AppType::Codex, false),
+        ]
+    }
+
+    async fn startup_state() -> (TestHome, Arc<Database>, AppState) {
+        let home = TestHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Arc::new(Database::memory().expect("database"));
+        db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        })
+        .await
+        .expect("ephemeral proxy port");
+        let state = AppState::new(db.clone());
+        (home, db, state)
+    }
+
+    async fn enable_proxy(db: &Database, app: &str) {
+        let mut config = db
+            .get_proxy_config_for_app(app)
+            .await
+            .expect("proxy config");
+        config.enabled = true;
+        db.update_proxy_config_for_app(config)
+            .await
+            .expect("enable proxy");
+    }
+
+    async fn proxy_enabled(db: &Database, app: &str) -> bool {
+        db.get_proxy_config_for_app(app)
+            .await
+            .expect("proxy config")
+            .enabled
+    }
 
     #[test]
     fn no_code_keeps_app_alive_in_tray() {
@@ -2143,5 +2277,144 @@ mod tests {
             classify_exit_request(Some(1)),
             ExitRequestAction::CleanupAndExit
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn malformed_backup_skips_startup_proxy_restore_and_preserves_enabled_state() {
+        let (_home, db, state) = startup_state().await;
+        enable_proxy(&db, "claude").await;
+        db.save_live_backup("claude", "{not-json")
+            .await
+            .expect("save malformed backup");
+
+        let error = restore_proxy_state_on_startup(&state, no_migrated_current_providers(), Ok(()))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("crash recovery"), "{error}");
+        assert!(!state.proxy_service.is_running().await);
+        assert!(proxy_enabled(&db, "claude").await);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn malformed_codex_toml_skips_startup_proxy_restore() {
+        let (_home, db, state) = startup_state().await;
+        enable_proxy(&db, "claude").await;
+        let path = crate::codex_config::get_codex_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "experimental_bearer_token = [not-valid").unwrap();
+
+        let error = restore_proxy_state_on_startup(&state, no_migrated_current_providers(), Ok(()))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("credential scrub"), "{error}");
+        assert!(!state.proxy_service.is_running().await);
+        assert!(proxy_enabled(&db, "claude").await);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_current_projection_skips_startup_proxy_restore() {
+        let (_home, db, state) = startup_state().await;
+        enable_proxy(&db, "claude").await;
+        db.save_provider(
+            "codex",
+            &Provider::with_id("broken".into(), "Broken".into(), json!({}), None),
+        )
+        .unwrap();
+        db.set_current_provider("codex", "broken").unwrap();
+
+        let error = restore_proxy_state_on_startup(
+            &state,
+            [
+                (AppType::Claude, false),
+                (AppType::ClaudeDesktop, false),
+                (AppType::Codex, true),
+            ],
+            Ok(()),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error.contains("Codex current-provider projection"),
+            "{error}"
+        );
+        assert!(!state.proxy_service.is_running().await);
+        assert!(proxy_enabled(&db, "claude").await);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn migration_failure_remains_the_single_startup_proxy_error() {
+        let (_home, db, state) = startup_state().await;
+        enable_proxy(&db, "claude").await;
+        let path = crate::codex_config::get_codex_config_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "experimental_bearer_token = [not-valid").unwrap();
+
+        let error = restore_proxy_state_on_startup(
+            &state,
+            no_migrated_current_providers(),
+            Err("provider migration: broken row".into()),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "provider migration: broken row");
+        assert!(!state.proxy_service.is_running().await);
+        assert!(proxy_enabled(&db, "claude").await);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_takeover_restore_preserves_enabled_state_for_retry() {
+        let (_home, db, state) = startup_state().await;
+        enable_proxy(&db, "claude").await;
+
+        let error = restore_proxy_state_on_startup(&state, no_migrated_current_providers(), Ok(()))
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("restore claude takeover failed"), "{error}");
+        assert!(proxy_enabled(&db, "claude").await);
+        state.proxy_service.stop().await.expect("stop test proxy");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn clean_startup_restores_enabled_proxy_state() {
+        let (_home, db, state) = startup_state().await;
+        enable_proxy(&db, "claude").await;
+        db.save_provider(
+            "claude",
+            &Provider::with_id(
+                "claude".into(),
+                "Claude".into(),
+                json!({"env":{"ANTHROPIC_AUTH_TOKEN":"rotated-token"}}),
+                None,
+            ),
+        )
+        .unwrap();
+        db.set_current_provider("claude", "claude").unwrap();
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({"env":{"ANTHROPIC_AUTH_TOKEN":"rotated-token"}}),
+        )
+        .unwrap();
+
+        restore_proxy_state_on_startup(&state, no_migrated_current_providers(), Ok(()))
+            .await
+            .unwrap();
+
+        assert!(state.proxy_service.is_running().await);
+        state
+            .proxy_service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("restore clean live state");
     }
 }

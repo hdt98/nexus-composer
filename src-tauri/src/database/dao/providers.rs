@@ -178,6 +178,15 @@ impl Database {
     }
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        self.save_provider_removing_endpoints(app_type, provider, &[])
+    }
+
+    pub(crate) fn save_provider_removing_endpoints(
+        &self,
+        app_type: &str,
+        provider: &Provider,
+        removed_endpoints: &[&str],
+    ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction()
@@ -273,6 +282,14 @@ impl Database {
             }
         }
 
+        for endpoint in removed_endpoints {
+            tx.execute(
+                "DELETE FROM provider_endpoints
+                 WHERE provider_id = ?1 AND app_type = ?2 AND url = ?3",
+                params![provider.id, app_type, endpoint],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
@@ -711,6 +728,8 @@ impl Database {
 mod ensure_official_seed_tests {
     use crate::app_config::AppType;
     use crate::database::{Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
+    use crate::provider::Provider;
+    use serde_json::json;
 
     #[test]
     fn ensure_inserts_when_missing() {
@@ -782,5 +801,37 @@ mod ensure_official_seed_tests {
         let result =
             db.ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::Claude);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
+    }
+
+    #[test]
+    fn provider_update_and_endpoint_removal_roll_back_together() {
+        let db = Database::memory().unwrap();
+        let mut provider = Provider::with_id("provider".into(), "Original".into(), json!({}), None);
+        db.save_provider("claude", &provider).unwrap();
+        db.add_custom_endpoint("claude", "provider", "https://managed.example/v1")
+            .unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_managed_endpoint_delete
+                 BEFORE DELETE ON provider_endpoints
+                 WHEN OLD.url = 'https://managed.example/v1'
+                 BEGIN SELECT RAISE(ABORT, 'forced endpoint delete failure'); END;",
+            )
+            .unwrap();
+
+        provider.name = "Updated".into();
+        assert!(db
+            .save_provider_removing_endpoints("claude", &provider, &["https://managed.example/v1"])
+            .is_err());
+
+        let saved = db.get_all_providers("claude").unwrap()["provider"].clone();
+        assert_eq!(saved.name, "Original");
+        assert!(saved
+            .meta
+            .expect("provider meta")
+            .custom_endpoints
+            .contains_key("https://managed.example/v1"));
     }
 }

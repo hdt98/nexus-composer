@@ -84,6 +84,12 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
     expect(nexus.config).toContain("GLM-5.2-FP8");
   });
 
+  it("uses the hosted route timeout contract", () => {
+    const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
+    expect(nexus.config).toContain("stream_idle_timeout_ms = 3000000");
+    expect(nexus.managedNexusPresetVersion).toBe(4);
+  });
+
   it("uses openai_chat format for proxy conversion", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     expect(nexus.apiFormat).toBe("openai_chat");

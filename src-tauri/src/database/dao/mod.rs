@@ -5,7 +5,10 @@
 pub mod failover;
 pub mod mcp;
 mod nexus_migration;
-pub(crate) use nexus_migration::{reconcile_managed_nexus_update, NexusMigrationOutcome};
+pub(crate) use nexus_migration::{
+    managed_nexus_endpoint_candidates, reconcile_managed_nexus_update,
+    scrub_leaked_nexus_credentials, NexusMigrationOutcome,
+};
 #[cfg(test)]
 pub(crate) use nexus_migration::{ENDPOINT as NEXUS_ENDPOINT, VERSION as NEXUS_VERSION};
 pub mod prompts;

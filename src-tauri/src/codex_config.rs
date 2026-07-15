@@ -1237,6 +1237,21 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
     Ok(doc.to_string())
 }
 
+fn remove_matching_experimental_bearer_token(
+    table: &mut toml_edit::Table,
+    predicate: &impl Fn(&str) -> bool,
+) -> bool {
+    let should_remove = table
+        .get("experimental_bearer_token")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(predicate);
+    if should_remove {
+        table.remove("experimental_bearer_token");
+    }
+    should_remove
+}
+
 pub fn remove_codex_experimental_bearer_token_if(
     config_text: &str,
     predicate: impl Fn(&str) -> bool,
@@ -1256,26 +1271,38 @@ pub fn remove_codex_experimental_bearer_token_if(
             .and_then(|table| table.get_mut(provider_id.as_str()))
             .and_then(|item| item.as_table_mut())
         {
-            let should_remove = provider_table
-                .get("experimental_bearer_token")
-                .and_then(|item| item.as_str())
-                .map(str::trim)
-                .is_some_and(&predicate);
-            if should_remove {
-                provider_table.remove("experimental_bearer_token");
-            }
+            remove_matching_experimental_bearer_token(provider_table, &predicate);
         }
     }
 
-    let should_remove_top_level = doc
-        .get("experimental_bearer_token")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .is_some_and(&predicate);
-    if should_remove_top_level {
-        doc.as_table_mut().remove("experimental_bearer_token");
-    }
+    remove_matching_experimental_bearer_token(doc.as_table_mut(), &predicate);
     Ok(doc.to_string())
+}
+
+pub fn remove_all_codex_experimental_bearer_tokens_if(
+    config_text: &str,
+    predicate: impl Fn(&str) -> bool,
+) -> Result<Option<String>, AppError> {
+    if config_text.trim().is_empty() || !config_text.contains("experimental_bearer_token") {
+        return Ok(None);
+    }
+
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let mut changed = false;
+    if let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        for (_, provider) in providers.iter_mut() {
+            if let Some(table) = provider.as_table_mut() {
+                changed |= remove_matching_experimental_bearer_token(table, &predicate);
+            }
+        }
+    }
+    changed |= remove_matching_experimental_bearer_token(doc.as_table_mut(), &predicate);
+    Ok(changed.then(|| doc.to_string()))
 }
 
 fn remove_codex_experimental_bearer_token(config_text: &str) -> Result<String, AppError> {
@@ -1893,6 +1920,19 @@ experimental_bearer_token = "stale-table-key"
         assert_eq!(
             extract_codex_experimental_bearer_token(input).as_deref(),
             Some("top-level-key")
+        );
+    }
+
+    #[test]
+    fn bearer_scrub_skips_malformed_config_without_bearer_field() {
+        let input = "model_provider = [not-valid";
+        assert_eq!(
+            remove_codex_experimental_bearer_token_if(input, |_| true).unwrap(),
+            input
+        );
+        assert_eq!(
+            remove_all_codex_experimental_bearer_tokens_if(input, |_| true).unwrap(),
+            None
         );
     }
 
