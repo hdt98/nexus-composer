@@ -10,7 +10,7 @@ use toml_edit::{value, DocumentMut};
 pub(crate) const ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
 pub(crate) const MODEL: &str = "GLM-5.2-FP8";
 pub(crate) const CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
-pub(crate) const VERSION: u32 = 4;
+pub(crate) const VERSION: u32 = 5;
 const NAME: &str = "Nexus GLM-5.2";
 const CONTEXT: i64 = 1_048_576;
 const COMPACT: i64 = 252_000;
@@ -188,6 +188,9 @@ fn remove_thinking(meta: &mut Map<String, Value>) {
     {
         if template.get("enable_thinking") == Some(&json!(true)) {
             template.remove("enable_thinking");
+        }
+        if template.get("clear_thinking") == Some(&json!(false)) {
+            template.remove("clear_thinking");
         }
         if template.is_empty() {
             body.remove("chat_template_kwargs");
@@ -470,6 +473,7 @@ fn merge_override(meta: &mut Map<String, Value>) -> bool {
         return false;
     };
     template.insert("enable_thinking".into(), json!(true));
+    template.insert("clear_thinking".into(), json!(false));
     true
 }
 
@@ -811,7 +815,8 @@ mod tests {
     }
 
     #[test]
-    fn canonical_v4_provider_is_a_byte_for_byte_no_op() {
+    fn v4_upgrade_produces_a_byte_for_byte_idempotent_v5_provider() {
+        assert_eq!(VERSION, 5);
         let db = Database::memory().unwrap();
         save(
             &db,
@@ -831,7 +836,7 @@ mod tests {
             }),
             json!({
                 "providerType":"nexus",
-                "managedNexusPresetVersion":VERSION,
+                "managedNexusPresetVersion":4,
                 "commonConfigEnabled":true,
                 "customUserAgent":"keep-agent",
                 "localProxyRequestOverrides":{
@@ -880,7 +885,36 @@ mod tests {
                 .unwrap();
             (provider, endpoints)
         };
-        let before = snapshot();
+        assert_eq!(
+            db.migrate_legacy_nexus_providers(None, None, Some("v4"))
+                .unwrap(),
+            NexusMigrationOutcome {
+                migrated: 1,
+                current_codex_changed: true,
+                ..Default::default()
+            }
+        );
+        let provider = db.get_provider_by_id("v4", "codex").unwrap().unwrap();
+        let meta = serde_json::to_value(provider.meta.unwrap()).unwrap();
+        assert_eq!(meta["managedNexusPresetVersion"], 5);
+        assert_eq!(meta["customUserAgent"], "keep-agent");
+        assert_eq!(
+            meta.pointer("/localProxyRequestOverrides/headers/x-keep"),
+            Some(&json!("yes"))
+        );
+        assert_eq!(
+            meta.pointer("/localProxyRequestOverrides/body/temperature"),
+            Some(&json!(0.25))
+        );
+        assert_eq!(
+            meta.pointer("/localProxyRequestOverrides/body/max_tokens"),
+            Some(&json!(MAX_TOKENS))
+        );
+        assert_eq!(
+            meta.pointer("/localProxyRequestOverrides/body/chat_template_kwargs/clear_thinking"),
+            Some(&json!(false))
+        );
+        let after = snapshot();
 
         for _ in 0..2 {
             assert_eq!(
@@ -888,7 +922,7 @@ mod tests {
                     .unwrap(),
                 NexusMigrationOutcome::default()
             );
-            assert_eq!(snapshot(), before);
+            assert_eq!(snapshot(), after);
         }
     }
 
@@ -1208,7 +1242,11 @@ mod tests {
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": LEGACY_MODEL,
                 "KEEP_ME":"custom"
             }}),
-            json!({"localProxyRequestOverrides":{"body":{"model":"keep","max_tokens":4096}}}),
+            json!({
+                "providerType":"nexus",
+                "managedNexusPresetVersion":4,
+                "localProxyRequestOverrides":{"body":{"model":"keep","max_tokens":4096}}
+            }),
         );
         save(
             &db,
@@ -1251,16 +1289,16 @@ mod tests {
             }
         );
         let claude = db.get_provider_by_id("claude", "claude").unwrap().unwrap();
-        let body = claude
-            .meta
-            .unwrap()
-            .local_proxy_request_overrides
-            .unwrap()
-            .body
-            .unwrap();
+        let meta = claude.meta.unwrap();
+        assert_eq!(meta.managed_nexus_preset_version, Some(5));
+        let body = meta.local_proxy_request_overrides.unwrap().body.unwrap();
         assert_eq!(
             (body["model"].as_str(), body["max_tokens"].as_u64()),
             (Some("keep"), Some(4096))
+        );
+        assert_eq!(
+            body.pointer("/chat_template_kwargs/clear_thinking"),
+            Some(&json!(false))
         );
         assert!(claude
             .settings_config
@@ -1299,7 +1337,8 @@ mod tests {
             "renamed",
             json!({"env":{"ANTHROPIC_BASE_URL":DRAFT_ENDPOINT}}),
             json!({
-                "providerType":"nexus", "claudeDesktopMode":"proxy",
+                "providerType":"nexus", "managedNexusPresetVersion":4,
+                "claudeDesktopMode":"proxy",
                 "claudeDesktopModelRoutes":{"claude-sonnet-5":{
                     "model":LEGACY_MODEL,"labelOverride":"keep","supports1m":true
                 }}
@@ -1311,15 +1350,23 @@ mod tests {
                 .migrated,
             1
         );
+        let provider = db
+            .get_provider_by_id("desktop", "claude-desktop")
+            .unwrap()
+            .unwrap();
+        let meta = provider.meta.unwrap();
+        assert_eq!(meta.managed_nexus_preset_version, Some(5));
         assert_eq!(
-            db.get_provider_by_id("desktop", "claude-desktop")
-                .unwrap()
-                .unwrap()
-                .meta
-                .unwrap()
-                .claude_desktop_model_routes["claude-sonnet-5"]
-                .model,
+            meta.claude_desktop_model_routes["claude-sonnet-5"].model,
             MODEL
+        );
+        assert_eq!(
+            meta.local_proxy_request_overrides
+                .unwrap()
+                .body
+                .unwrap()
+                .pointer("/chat_template_kwargs/clear_thinking"),
+            Some(&json!(false))
         );
     }
 
@@ -1374,7 +1421,9 @@ mod tests {
                 "localProxyRequestOverrides":{"headers":{"x-keep":"yes"},"body":{
                     "max_tokens":MAX_TOKENS,
                     "temperature":0.25,
-                    "chat_template_kwargs":{"enable_thinking":true,"keep":"yes"}
+                    "chat_template_kwargs":{
+                        "enable_thinking":true,"clear_thinking":false,"keep":"yes"
+                    }
                 }}
             }))
             .unwrap(),

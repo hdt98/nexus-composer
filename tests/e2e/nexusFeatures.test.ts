@@ -8,8 +8,10 @@
  * - Claude Official has empty env (resets to native API)
  */
 import { describe, expect, it } from "vitest";
+import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
 import { providerPresets } from "@/config/claudeProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
+import { NEXUS_REASONING_REQUEST_OVERRIDES } from "@/config/nexus";
 
 describe("Nexus Composer preset arrays", () => {
   it("Claude presets contain exactly Nexus GLM-5.2 and Claude Official", () => {
@@ -41,6 +43,27 @@ describe("Nexus Composer preset arrays", () => {
     for (const name of removed) {
       expect(claudeNames).not.toContain(name);
       expect(codexNames).not.toContain(name);
+    }
+  });
+
+  it("shares the v5 GLM thinking-continuity settings across every client", () => {
+    expect(NEXUS_REASONING_REQUEST_OVERRIDES.body.chat_template_kwargs).toEqual(
+      {
+        enable_thinking: true,
+        clear_thinking: false,
+      },
+    );
+    for (const preset of [
+      providerPresets.find(({ providerType }) => providerType === "nexus"),
+      codexProviderPresets.find(({ providerType }) => providerType === "nexus"),
+      claudeDesktopProviderPresets.find(
+        ({ providerType }) => providerType === "nexus",
+      ),
+    ]) {
+      expect(preset?.managedNexusPresetVersion).toBe(5);
+      expect(preset?.localProxyRequestOverrides).toBe(
+        NEXUS_REASONING_REQUEST_OVERRIDES,
+      );
     }
   });
 });
@@ -87,7 +110,6 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
   it("uses the hosted route timeout contract", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     expect(nexus.config).toContain("stream_idle_timeout_ms = 3000000");
-    expect(nexus.managedNexusPresetVersion).toBe(4);
   });
 
   it("uses openai_chat format for proxy conversion", () => {
