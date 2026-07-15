@@ -359,14 +359,14 @@ fn reasoning_history_policy(
     let matches = |value: Option<&str>, expected: &str| {
         value.is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
     };
-    if config.is_some_and(|config| {
+    if preserve_exact_history {
+        ReasoningHistoryPolicy::Preserve
+    } else if config.is_some_and(|config| {
         config.supports_thinking.unwrap_or(false)
             && matches(config.output_format.as_deref(), "reasoning_content")
             && matches(config.thinking_param.as_deref(), "thinking")
     }) {
         ReasoningHistoryPolicy::FillMissing
-    } else if preserve_exact_history {
-        ReasoningHistoryPolicy::Preserve
     } else {
         ReasoningHistoryPolicy::Drop
     }
@@ -1850,10 +1850,25 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            reasoning_history_policy(Some(&config), true),
+            reasoning_history_policy(Some(&config), false),
             ReasoningHistoryPolicy::FillMissing
         );
         responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap()
+    }
+
+    #[test]
+    fn exact_history_takes_precedence_over_synthetic_backfill() {
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            thinking_param: Some("thinking".to_string()),
+            output_format: Some("reasoning_content".to_string()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            reasoning_history_policy(Some(&config), true),
+            ReasoningHistoryPolicy::Preserve
+        );
     }
 
     #[test]
