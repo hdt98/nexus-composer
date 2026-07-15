@@ -9,6 +9,23 @@ use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+const ANTHROPIC_PING_INTERVAL: Duration = Duration::from_secs(15);
+const ANTHROPIC_PING_EVENT: &[u8] = b"event: ping\ndata: {\"type\":\"ping\"}\n\n";
+
+fn should_emit_activity_ping(
+    last_at: &mut Instant,
+    active: bool,
+    now: Instant,
+    interval: Duration,
+) -> bool {
+    let due = active && now.duration_since(*last_at) >= interval;
+    if due {
+        *last_at = now;
+    }
+    due
+}
 
 /// OpenAI 流式响应数据结构
 #[derive(Debug, Deserialize)]
@@ -179,6 +196,22 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
     emit_thinking: bool,
     normalize_reasoning: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_anthropic_sse_stream_with_reasoning_and_ping_interval(
+        stream,
+        emit_thinking,
+        normalize_reasoning,
+        ANTHROPIC_PING_INTERVAL,
+    )
+}
+
+fn create_anthropic_sse_stream_with_reasoning_and_ping_interval<
+    E: std::error::Error + Send + 'static,
+>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    emit_thinking: bool,
+    normalize_reasoning: bool,
+    ping_interval: Duration,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
@@ -200,6 +233,7 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
         let mut current_non_tool_block_index: Option<u32> = None;
         let mut tool_blocks_by_index: HashMap<usize, ToolBlockState> = HashMap::new();
         let mut open_tool_block_indices: HashSet<u32> = HashSet::new();
+        let mut last_activity_ping = Instant::now();
 
         tokio::pin!(stream);
 
@@ -244,6 +278,10 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                     return;
                                 }
 
+                                let nonempty = |value: Option<&str>| {
+                                    value.is_some_and(|value| !value.is_empty())
+                                };
+                                let mut raw_activity = false;
                                 let parsed = if let Some(reasoning) = &mut reasoning {
                                     let mut value: Value = match serde_json::from_str(data) {
                                         Ok(value) => value,
@@ -255,6 +293,10 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                             return;
                                         }
                                     };
+                                    raw_activity = value
+                                        .pointer("/choices/0/delta")
+                                        .and_then(Value::as_object)
+                                        .is_some_and(|delta| !delta.is_empty());
                                     if let Err(error) = reasoning.normalize_chunk(&mut value) {
                                         if let Some(event) = tool_protocol_error_event(&error) {
                                             yield Ok(event);
@@ -327,9 +369,20 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                             has_sent_message_start = true;
                                         }
 
+                                        let choice_activity = raw_activity
+                                            || nonempty(choice.delta.content.as_deref())
+                                            || nonempty(choice.delta.reasoning.as_deref())
+                                            || choice
+                                                .delta
+                                                .tool_calls
+                                                .as_ref()
+                                                .is_some_and(|calls| !calls.is_empty());
+                                        let mut emitted_activity = false;
+
                                         // 处理 reasoning（thinking）
                                         if let Some(reasoning) = &choice.delta.reasoning {
                                             if emit_thinking {
+                                                emitted_activity = true;
                                                 if current_non_tool_block_type != Some("thinking") {
                                                     if let Some(index) = current_non_tool_block_index.take() {
                                                         let event = json!({
@@ -376,6 +429,7 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                         // 处理文本内容
                                         if let Some(content) = &choice.delta.content {
                                             if !content.is_empty() {
+                                                emitted_activity = true;
                                                 if current_non_tool_block_type != Some("text") {
                                                     if let Some(index) = current_non_tool_block_index.take() {
                                                         let event = json!({
@@ -424,6 +478,7 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                         if let Some(tool_calls) = &choice.delta.tool_calls {
                                             if !tool_calls.is_empty() {
                                                 if let Some(index) = current_non_tool_block_index.take() {
+                                                    emitted_activity = true;
                                                     let event = json!({
                                                         "type": "content_block_stop",
                                                         "index": index
@@ -526,6 +581,10 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                                         )
                                                     };
 
+                                                    emitted_activity |= should_start
+                                                        || pending_after_start.is_some()
+                                                        || immediate_delta.is_some();
+
                                                     if should_start {
                                                         let event = json!({
                                                             "type": "content_block_start",
@@ -592,6 +651,7 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                             has_emitted_message_delta = true;
 
                                             if let Some(index) = current_non_tool_block_index.take() {
+                                                emitted_activity = true;
                                                 let event = json!({
                                                     "type": "content_block_stop",
                                                     "index": index
@@ -635,6 +695,7 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                                 ));
                                             }
                                             late_tool_starts.sort_unstable_by_key(|(index, _, _, _)| *index);
+                                            emitted_activity |= !late_tool_starts.is_empty();
                                             for (index, id, name, pending) in late_tool_starts {
                                                 let event = json!({
                                                     "type": "content_block_start",
@@ -665,6 +726,7 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
                                             }
 
                                             if !open_tool_block_indices.is_empty() {
+                                                emitted_activity = true;
                                                 let mut tool_indices: Vec<u32> =
                                                     open_tool_block_indices.iter().copied().collect();
                                                 tool_indices.sort_unstable();
@@ -682,6 +744,15 @@ pub(crate) fn create_anthropic_sse_stream_with_reasoning<E: std::error::Error + 
 
                                             // 缓存 message_delta，等到 [DONE] 时发送（以便收集完整的 usage）
                                             pending_message_delta = Some((stop_reason, usage_json));
+                                        }
+
+                                        if should_emit_activity_ping(
+                                            &mut last_activity_ping,
+                                            choice_activity && !emitted_activity,
+                                            Instant::now(),
+                                            ping_interval,
+                                        ) {
+                                            yield Ok(Bytes::from_static(ANTHROPIC_PING_EVENT));
                                         }
                                     }
                                 }
@@ -802,10 +873,11 @@ mod tests {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream_with_reasoning(
+        let converted = create_anthropic_sse_stream_with_reasoning_and_ping_interval(
             upstream,
             emit_thinking,
             normalize_reasoning,
+            std::time::Duration::ZERO,
         );
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
@@ -827,7 +899,8 @@ mod tests {
     #[tokio::test]
     async fn nexus_boundary_recovers_swallowed_markdown_close() {
         let input = concat!(
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Before `No raw <think> marker\"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Before \"}}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"`No raw <think> marker\"}}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"` and continued reasoning. \"}}]}\n\n",
             "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Let me write checkpoint V now.</think>Good, I have a clear picture now.\"},\"finish_reason\":\"stop\"}]}\n\n",
             "data: [DONE]\n\n"
@@ -844,6 +917,7 @@ mod tests {
             "Before `No raw <think> marker` and continued reasoning. Let me write checkpoint V now."
         );
         assert_eq!(join("/delta/text"), "Good, I have a clear picture now.");
+        assert!(events.iter().any(|event| event_type(event) == Some("ping")));
     }
 
     #[tokio::test]
@@ -922,6 +996,10 @@ mod tests {
                     .any(|event| event.pointer("/delta/thinking").is_some()),
                 emit
             );
+            assert_eq!(
+                events.iter().any(|event| event_type(event) == Some("ping")),
+                !emit
+            );
             assert!(events.iter().any(|event| {
                 event.pointer("/delta/text").and_then(|v| v.as_str())
                     == Some("<title>GLM benchmark</title>")
@@ -931,6 +1009,72 @@ mod tests {
 
     fn event_type(event: &Value) -> Option<&str> {
         event.get("type").and_then(|v| v.as_str())
+    }
+
+    #[tokio::test]
+    async fn suppressed_provisional_reasoning_emits_transcript_neutral_ping() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_ping\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"private reasoning\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_ping\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"</think>final answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let events = collect_anthropic_events_with_options(input, true, true).await;
+
+        assert_eq!(events.first().and_then(event_type), Some("message_start"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event_type(event) == Some("ping"))
+                .count(),
+            1
+        );
+        let join = |pointer: &str| {
+            events
+                .iter()
+                .filter_map(|event| event.pointer(pointer).and_then(Value::as_str))
+                .collect::<String>()
+        };
+        assert_eq!(join("/delta/thinking"), "private reasoning");
+        assert_eq!(join("/delta/text"), "final answer");
+        assert!(!serde_json::to_string(&events).unwrap().contains("</think>"));
+    }
+
+    #[tokio::test]
+    async fn silent_upstream_does_not_generate_ping() {
+        let upstream = stream::pending::<Result<Bytes, std::io::Error>>();
+        let converted = create_anthropic_sse_stream_with_reasoning_and_ping_interval(
+            upstream,
+            true,
+            true,
+            std::time::Duration::ZERO,
+        );
+        tokio::pin!(converted);
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), converted.next())
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn activity_ping_is_rate_limited() {
+        let start = std::time::Instant::now();
+        let interval = std::time::Duration::from_secs(15);
+        let mut last = start;
+        let mut due = |active, seconds| {
+            should_emit_activity_ping(
+                &mut last,
+                active,
+                start + std::time::Duration::from_secs(seconds),
+                interval,
+            )
+        };
+
+        assert!(!due(true, 14));
+        assert!(due(true, 15));
+        assert!(!due(false, 30));
+        assert!(due(true, 30));
     }
 
     #[test]
@@ -946,7 +1090,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_streaming_tool_calls_routed_by_index() {
+    async fn test_streaming_tool_calls_routed_without_spurious_ping() {
         let input = concat!(
             "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_0\",\"type\":\"function\",\"function\":{\"name\":\"first_tool\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_1\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"second_tool\"}}]}}]}\n\n",
@@ -959,7 +1103,12 @@ mod tests {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
+        let converted = create_anthropic_sse_stream_with_reasoning_and_ping_interval(
+            upstream,
+            true,
+            true,
+            std::time::Duration::ZERO,
+        );
         let chunks: Vec<_> = converted.collect().await;
 
         let merged = chunks
@@ -976,6 +1125,7 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect();
+        assert!(!events.iter().any(|event| event_type(event) == Some("ping")));
 
         let mut tool_index_by_call: HashMap<String, u64> = HashMap::new();
         for event in &events {
@@ -1049,7 +1199,12 @@ mod tests {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
+        let converted = create_anthropic_sse_stream_with_reasoning_and_ping_interval(
+            upstream,
+            true,
+            true,
+            std::time::Duration::ZERO,
+        );
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
             .into_iter()
@@ -1065,6 +1220,13 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event_type(event) == Some("ping"))
+                .count(),
+            1
+        );
 
         let starts: Vec<&Value> = events
             .iter()
