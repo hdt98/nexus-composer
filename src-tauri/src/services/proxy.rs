@@ -2860,6 +2860,23 @@ mod tests {
         .expect("write models_cache.json");
     }
 
+    fn assert_restored_native_catalog() {
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated catalog"),
+        )
+        .expect("parse generated catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["tool_mode"], "direct");
+        assert_eq!(entry["multi_agent_version"], "v2");
+        assert!(entry["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
+        for key in ["apply_patch_tool_type", "web_search_tool_type", "tools"] {
+            assert!(entry.get(key).is_none(), "native restore leaked {key}");
+        }
+    }
+
     #[test]
     fn managed_account_claude_takeover_uses_api_key_placeholder() {
         let mut provider = Provider::with_id(
@@ -5906,7 +5923,39 @@ requires_openai_auth = true
 
     #[tokio::test]
     #[serial]
-    async fn codex_restore_native_backup_preserves_direct_tool_profile() {
+    async fn codex_restore_marked_native_backup_preserves_direct_tool_profile() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let backup = json!({
+            "auth": { "OPENAI_API_KEY": "native-key" },
+            "config": "model_provider = \"custom\"\nmodel = \"native-model\"\n",
+            "modelCatalog": { "models": [{
+                "model": "native-model",
+                "inputModalities": ["text"]
+            }] },
+            "apiFormat": "openai_responses"
+        });
+        db.save_live_backup(
+            "codex",
+            &serde_json::to_string(&backup).expect("serialize marked backup"),
+        )
+        .await
+        .expect("save marked backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore marked native backup");
+
+        assert_restored_native_catalog();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_legacy_native_backup_infers_direct_tool_profile() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -5963,20 +6012,7 @@ requires_openai_auth = true
             .await
             .expect("restore native backup");
 
-        let catalog: Value = serde_json::from_str(
-            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
-                .expect("read generated catalog"),
-        )
-        .expect("parse generated catalog");
-        let entry = &catalog["models"][0];
-        assert_eq!(entry["tool_mode"], "direct");
-        assert_eq!(entry["multi_agent_version"], "v2");
-        assert!(entry["supported_reasoning_levels"]
-            .as_array()
-            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
-        for key in ["apply_patch_tool_type", "web_search_tool_type", "tools"] {
-            assert!(entry.get(key).is_none(), "native restore leaked {key}");
-        }
+        assert_restored_native_catalog();
     }
 
     /// Regression: a provider-rebuilt backup can pair an inline `modelCatalog`

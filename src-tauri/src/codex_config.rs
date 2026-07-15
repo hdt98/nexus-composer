@@ -451,16 +451,12 @@ fn codex_catalog_model_entry(
     );
 
     if let Some(modalities) = &spec.input_modalities {
+        let supports_images = modalities.iter().any(|item| item == "image");
         entry_obj.insert("input_modalities".to_string(), json!(modalities));
+        if !supports_images {
+            entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+        }
     }
-    let supports_images = entry_obj
-        .get("input_modalities")
-        .and_then(Value::as_array)
-        .is_some_and(|items| items.iter().any(|item| item.as_str() == Some("image")));
-    entry_obj.insert(
-        "supports_image_detail_original".to_string(),
-        json!(supports_images),
-    );
 
     if profile == CodexCatalogToolProfile::NativeResponses {
         // Native `/responses` gateways reject Codex's freeform `apply_patch`
@@ -602,6 +598,25 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
     specs
 }
 
+fn codex_supports_multi_agent_v2_or_later(model: &Value) -> bool {
+    let Some(version) = model
+        .get("multi_agent_version")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|version| !version.is_empty())
+    else {
+        return false;
+    };
+    let version = version
+        .strip_prefix('v')
+        .or_else(|| version.strip_prefix('V'))
+        .unwrap_or(version);
+    let major_len = version.bytes().take_while(u8::is_ascii_digit).count();
+    version[..major_len]
+        .parse::<u64>()
+        .is_ok_and(|major| major >= 2)
+}
+
 fn find_codex_model_template(catalog: &Value) -> Option<Value> {
     catalog
         .get("models")
@@ -617,11 +632,7 @@ fn find_codex_model_template(catalog: &Value) -> Option<Value> {
                             level.get("effort").and_then(Value::as_str) == Some("ultra")
                         })
                     })
-                    && model.get("multi_agent_version").and_then(Value::as_str) == Some("v2")
-                    && matches!(
-                        model.get("tool_mode").and_then(Value::as_str),
-                        Some("code_mode_only" | "direct")
-                    )
+                    && codex_supports_multi_agent_v2_or_later(model)
             })
         })
         .cloned()
@@ -2566,7 +2577,10 @@ base_url = "https://production.api/v1"
             entry.get("context_window").and_then(|v| v.as_u64()),
             Some(1_000_000)
         );
-        assert_eq!(entry["supports_image_detail_original"], true);
+        assert_eq!(
+            entry["supports_image_detail_original"], false,
+            "image input alone must not enable original-detail support"
+        );
     }
 
     #[test]
@@ -2998,10 +3012,12 @@ web_search = "disabled"
             .expect("reasoning levels");
         levels.reverse();
         levels.push(json!({"effort": "future"}));
+        reordered["multi_agent_version"] = json!("v3");
+        reordered["tool_mode"] = json!("future_mode");
         assert_eq!(
             find_codex_model_template(&json!({"models": [reordered.clone()]})),
             Some(reordered),
-            "template discovery must tolerate reordered or additional efforts"
+            "template discovery must tolerate future capability and tool-mode drift"
         );
 
         let mut stale = valid.clone();
@@ -3011,7 +3027,7 @@ web_search = "disabled"
 
         for (field, value) in [
             ("multi_agent_version", json!("v1")),
-            ("tool_mode", json!("unknown")),
+            ("multi_agent_version", json!("")),
         ] {
             let mut invalid = valid.clone();
             invalid[field] = value;
