@@ -146,13 +146,6 @@ stream_idle_timeout_ms = ${NEXUS_CODEX_STREAM_IDLE_TIMEOUT_MS}`,
     providerType: "nexus",
     managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
     localProxyRequestOverrides: NEXUS_REASONING_REQUEST_OVERRIDES,
-    codexChatReasoning: {
-      supportsThinking: true,
-      supportsEffort: false,
-      thinkingParam: "chat_template_kwargs.enable_thinking",
-      effortParam: "none",
-      outputFormat: "reasoning_content",
-    },
     modelCatalog: modelCatalog([
       {
         model: NEXUS_MODEL,

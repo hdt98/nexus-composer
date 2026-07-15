@@ -61,19 +61,10 @@ import {
 } from "@/utils/providerConfigUtils";
 import { mergeProviderMeta } from "@/utils/providerMetaUtils";
 import {
-  extractCodexBaseUrl,
   extractCodexWireApi,
-  extractCodexModelName,
   setCodexWireApi,
   setCodexModelName as setCodexModelNameInConfig,
 } from "@/utils/providerConfigUtils";
-import {
-  isManagedNexusEndpoint,
-  NEXUS_CLAUDE_MODEL,
-  NEXUS_MODEL,
-  removeManagedNexusCatalog,
-  removeManagedNexusReasoningOverride,
-} from "@/config/nexus";
 import { isNonNegativeDecimalString } from "@/types/usage";
 import { getCodexCustomTemplate } from "@/config/codexTemplates";
 import CodexConfigEditor from "./CodexConfigEditor";
@@ -1549,80 +1540,6 @@ function ProviderFormFull({
 
     if (!isCodexOauthProvider && "codexFastMode" in nextMeta) {
       delete nextMeta.codexFastMode;
-    }
-
-    const editingManagedNexus =
-      selectedPresetId === null && initialData?.meta?.providerType === "nexus";
-    if (editingManagedNexus) {
-      const parsedSettings = JSON.parse(payload.settingsConfig) as Record<
-        string,
-        unknown
-      >;
-      if (appId === "codex") {
-        const sourceCatalog = initialData?.settingsConfig?.modelCatalog as
-          | Record<string, unknown>
-          | undefined;
-        const savedCatalog = parsedSettings.modelCatalog as
-          | Record<string, unknown>
-          | undefined;
-        if (sourceCatalog && savedCatalog) {
-          for (const [key, value] of Object.entries(sourceCatalog)) {
-            if (key !== "models" && !(key in savedCatalog)) {
-              savedCatalog[key] = value;
-            }
-          }
-        }
-        const sourceModels = sourceCatalog?.models as unknown[] | undefined;
-        const savedModels = savedCatalog?.models as unknown[] | undefined;
-        if (sourceModels && savedModels) {
-          for (const source of sourceModels) {
-            if (!source || typeof source !== "object" || !("role" in source)) {
-              continue;
-            }
-            const entry = source as Record<string, unknown>;
-            const index = savedModels.findIndex(
-              (saved) =>
-                !!saved &&
-                typeof saved === "object" &&
-                (saved as Record<string, unknown>).model === entry.model &&
-                (saved as Record<string, unknown>).role === entry.role,
-            );
-            if (index >= 0) savedModels[index] = source;
-          }
-        }
-      }
-      const keepsManagedSignature =
-        appId === "codex"
-          ? isManagedNexusEndpoint(
-              extractCodexBaseUrl(String(parsedSettings.config ?? "")),
-            ) &&
-            extractCodexModelName(String(parsedSettings.config ?? "")) ===
-              NEXUS_MODEL &&
-            nextMeta.apiFormat === "openai_chat"
-          : (() => {
-              const env = parsedSettings.env as
-                | Record<string, unknown>
-                | undefined;
-              return (
-                isManagedNexusEndpoint(env?.ANTHROPIC_BASE_URL) &&
-                [
-                  "ANTHROPIC_MODEL",
-                  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-                  "ANTHROPIC_DEFAULT_SONNET_MODEL",
-                  "ANTHROPIC_DEFAULT_OPUS_MODEL",
-                  "ANTHROPIC_DEFAULT_FABLE_MODEL",
-                  "ANTHROPIC_CUSTOM_MODEL_OPTION",
-                ].every((field) => env?.[field] === NEXUS_CLAUDE_MODEL) &&
-                nextMeta.apiFormat === "openai_chat"
-              );
-            })();
-      if (!keepsManagedSignature) {
-        delete nextMeta.providerType;
-        delete nextMeta.managedNexusPresetVersion;
-        removeManagedNexusReasoningOverride(nextMeta);
-        removeManagedNexusCatalog(parsedSettings);
-        payload.settingsConfig = JSON.stringify(parsedSettings);
-      }
     }
 
     payload.meta = nextMeta;

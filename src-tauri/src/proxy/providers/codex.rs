@@ -151,6 +151,16 @@ pub fn resolve_codex_chat_reasoning_config(
     provider: &Provider,
     body: &JsonValue,
 ) -> Option<CodexChatReasoningConfig> {
+    // Managed Nexus injects its nested SGLang flag through the generic request-override
+    // layer. Do not also infer or emit a top-level Chat reasoning parameter.
+    if provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("nexus")
+    {
+        return None;
+    }
     if let Some(config) = provider
         .meta
         .as_ref()
@@ -907,6 +917,16 @@ wire_api = "chat"
         assert_eq!(config.supports_thinking, Some(false));
         assert_eq!(config.supports_effort, Some(false));
         assert_eq!(config.thinking_param.as_deref(), Some("none"));
+    }
+
+    #[test]
+    fn managed_nexus_uses_only_local_request_overrides_for_thinking() {
+        let mut provider = create_provider(json!({}));
+        provider.meta = Some(crate::provider::ProviderMeta {
+            provider_type: Some("nexus".into()),
+            ..Default::default()
+        });
+        assert!(resolve_codex_chat_reasoning_config(&provider, &json!({})).is_none());
     }
 
     #[test]

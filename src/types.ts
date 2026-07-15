@@ -139,8 +139,7 @@ export type CodexChatThinkingParam =
   | "none"
   | "thinking"
   | "enable_thinking"
-  | "reasoning_split"
-  | "chat_template_kwargs.enable_thinking";
+  | "reasoning_split";
 
 export type CodexChatEffortParam =
   | "none"

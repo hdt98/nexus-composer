@@ -229,7 +229,7 @@ impl ProxyService {
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
             CLAUDE_TAKEOVER_HAIKU_MODEL,
-            false,
+            true,
             haiku_model,
         );
         Self::push_claude_takeover_role_fields(
@@ -2986,6 +2986,23 @@ mod tests {
         assert_env_str(env, "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", Some("gpt-5.4"));
         assert_env_str(env, "ANTHROPIC_API_KEY", Some(PROXY_TOKEN_PLACEHOLDER));
         assert_env_str(env, "ANTHROPIC_AUTH_TOKEN", Some(PROXY_TOKEN_PLACEHOLDER));
+    }
+
+    #[test]
+    fn claude_takeover_preserves_one_m_capability_for_haiku() {
+        let fields: std::collections::HashMap<_, _> =
+            ProxyService::build_claude_takeover_model_fields(&json!({
+                "env": {"ANTHROPIC_DEFAULT_HAIKU_MODEL": "GLM-5.2-FP8[1m]"}
+            }))
+            .into_iter()
+            .collect();
+
+        assert_eq!(
+            fields
+                .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+                .map(String::as_str),
+            Some("claude-haiku-4-5[1M]")
+        );
     }
 
     #[test]

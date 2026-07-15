@@ -600,19 +600,29 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
-            let normalized_nexus_provider_count = match app_state.db.migrate_legacy_nexus_providers()
+            let current_codex_id = services::provider::ProviderService::current(
+                &app_state,
+                app_config::AppType::Codex,
+            )
+            .ok()
+            .filter(|id| !id.is_empty());
+            let nexus_migration = match app_state
+                .db
+                .migrate_legacy_nexus_providers(current_codex_id.as_deref())
             {
-                Ok(count) => count,
+                Ok(outcome) => outcome,
                 Err(e) => {
                     log::warn!("✗ Failed to normalize Nexus providers: {e}");
-                    0
+                    database::NexusMigrationOutcome::default()
                 }
             };
-            if normalized_nexus_provider_count > 0 {
+            if nexus_migration.migrated > 0 {
                 log::info!(
-                    "✓ Normalized {normalized_nexus_provider_count} Nexus provider(s)"
+                    "✓ Normalized {} Nexus provider(s)",
+                    nexus_migration.migrated
                 );
             }
+            let migrated_current_nexus_codex = nexus_migration.current_codex_changed;
 
             {
                 let db_for_codex_history_migration = app_state.db.clone();
@@ -1071,7 +1081,16 @@ pub fn run() {
                     .await
                     .map(|config| config.enabled)
                     .unwrap_or(false);
-                if normalized_nexus_provider_count > 0 || codex_takeover_enabled {
+                if migrated_current_nexus_codex {
+                    if let Err(e) =
+                        services::provider::ProviderService::sync_current_provider_for_app(
+                            &state,
+                            app_config::AppType::Codex,
+                        )
+                    {
+                        log::warn!("✗ Failed to refresh the migrated current Codex provider: {e}");
+                    }
+                } else if codex_takeover_enabled {
                     if let Err(e) = sync_current_nexus_codex_on_startup(&state) {
                         log::warn!("✗ Failed to refresh the current Nexus Codex provider: {e}");
                     }

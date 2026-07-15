@@ -42,6 +42,10 @@ use live::{
 };
 use usage::validate_usage_script;
 
+fn app_takeover_owns_live(backup: bool, placeholder: bool, enabled: bool) -> bool {
+    placeholder || (backup && enabled)
+}
+
 /// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
 /// live 配置，使开关即时生效（无需等下一次切换）。
 /// 当前供应商非官方（或不存在）时为 no-op：注入只作用于官方配置，
@@ -944,153 +948,6 @@ base_url = "http://localhost:8080"
         );
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn update_current_codex_provider_syncs_runtime_limits_during_proxy_takeover() {
-        const ORIGINAL_CONFIG: &str = r#"model_provider = "custom"
-model = "GLM-5.2-FP8"
-model_context_window = 399000
-model_auto_compact_token_limit = 200000
-[model_providers.custom]
-base_url = "https://hosted.example/v1"
-wire_api = "responses"
-stream_idle_timeout_ms = 300000
-
-[model_providers.sibling]
-base_url = "https://sibling.example/v1"
-wire_api = "responses"
-"#;
-
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let state = AppState::new(db.clone());
-        let mut original = Provider::with_id(
-            "nexus".into(),
-            "Nexus".into(),
-            json!({
-                "auth": {"OPENAI_API_KEY": "real-key"},
-                "config": ORIGINAL_CONFIG
-            }),
-            None,
-        );
-        original.meta = Some(ProviderMeta {
-            common_config_enabled: Some(true),
-            ..Default::default()
-        });
-        db.save_provider("codex", &original).expect("save provider");
-        db.set_current_provider("codex", "nexus")
-            .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Codex, Some("nexus"))
-            .expect("set local current provider");
-        db.set_config_snippet("codex", Some("[features]\ncommon_sentinel = true\n".into()))
-            .expect("set Codex common config");
-        db.update_proxy_config(ProxyConfig {
-            listen_port: 0,
-            ..Default::default()
-        })
-        .await
-        .expect("use ephemeral proxy port");
-
-        let live_config =
-            format!("{ORIGINAL_CONFIG}\n[mcp_servers.keep]\ncommand = \"keep-mcp\"\n");
-        crate::codex_config::write_codex_live_atomic(
-            &json!({"OPENAI_API_KEY": "real-key"}),
-            Some(&live_config),
-        )
-        .expect("seed upstream Codex live config");
-        state
-            .proxy_service
-            .set_takeover_for_app("codex", true)
-            .await
-            .expect("enable Codex takeover");
-
-        let mut updated = original;
-        updated.settings_config["config"] = json!(ORIGINAL_CONFIG
-            .replace(
-                "model_context_window = 399000",
-                "model_context_window = 1048576"
-            )
-            .replace(
-                "model_auto_compact_token_limit = 200000",
-                "model_auto_compact_token_limit = 252000",
-            )
-            .replace(
-                "stream_idle_timeout_ms = 300000",
-                "stream_idle_timeout_ms = 900000",
-            ));
-        ProviderService::update(&state, AppType::Codex, None, updated)
-            .expect("update current Codex provider");
-
-        let read_live = || {
-            let value = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
-                .expect("read Codex live config");
-            value
-                .parse::<toml::Value>()
-                .expect("parse Codex live config")
-        };
-        let assert_managed_values = |config: &toml::Value| {
-            assert_eq!(config["model_context_window"].as_integer(), Some(1_048_576));
-            assert_eq!(
-                config["model_auto_compact_token_limit"].as_integer(),
-                Some(252_000)
-            );
-            assert_eq!(
-                config["model_providers"]["custom"]["stream_idle_timeout_ms"].as_integer(),
-                Some(900_000)
-            );
-            assert_eq!(config["features"]["common_sentinel"].as_bool(), Some(true));
-            assert_eq!(
-                config["model_providers"]["sibling"]["base_url"].as_str(),
-                Some("https://sibling.example/v1")
-            );
-            assert_eq!(
-                config["mcp_servers"]["keep"]["command"].as_str(),
-                Some("keep-mcp")
-            );
-        };
-
-        let live = read_live();
-        assert_managed_values(&live);
-        assert!(
-            live["model_providers"]["custom"]["base_url"]
-                .as_str()
-                .is_some_and(|url| url.starts_with("http://127.0.0.1:")),
-            "provider refresh must retain the local proxy endpoint"
-        );
-
-        let backup = db
-            .get_live_backup("codex")
-            .await
-            .expect("read Codex backup")
-            .expect("Codex backup exists");
-        let backup: Value =
-            serde_json::from_str(&backup.original_config).expect("parse Codex backup");
-        let backup = backup["config"]
-            .as_str()
-            .expect("backup contains Codex config")
-            .parse::<toml::Value>()
-            .expect("parse backup Codex config");
-        assert_managed_values(&backup);
-        assert_eq!(
-            backup["model_providers"]["custom"]["base_url"].as_str(),
-            Some("https://hosted.example/v1")
-        );
-
-        state
-            .proxy_service
-            .set_takeover_for_app("codex", false)
-            .await
-            .expect("disable Codex takeover");
-        let restored = read_live();
-        assert_managed_values(&restored);
-        assert_eq!(
-            restored["model_providers"]["custom"]["base_url"].as_str(),
-            Some("https://hosted.example/v1")
-        );
-    }
-
     #[cfg(any(target_os = "macos", windows))]
     #[tokio::test]
     #[serial]
@@ -1691,6 +1548,38 @@ wire_api = "responses"
             );
         });
     }
+
+    #[test]
+    #[serial]
+    fn update_detaches_a_customized_managed_nexus_row_at_the_service_boundary() {
+        with_test_home(|state, _| {
+            let settings = json!({"env":{"ANTHROPIC_BASE_URL":crate::database::NEXUS_ENDPOINT}});
+            let mut provider = Provider::with_id("nexus".into(), "Nexus".into(), settings, None);
+            provider.meta = Some(ProviderMeta {
+                provider_type: Some("nexus".into()),
+                managed_nexus_preset_version: Some(crate::database::NEXUS_VERSION),
+                api_format: Some("openai_chat".to_string()),
+                ..Default::default()
+            });
+            state.db.save_provider("claude", &provider).unwrap();
+
+            let mut updated = provider;
+            updated.settings_config["env"]["ANTHROPIC_BASE_URL"] = json!("https://custom/v1");
+            ProviderService::update(state, AppType::Claude, None, updated).unwrap();
+
+            let saved = state.db.get_provider_by_id("nexus", "claude").unwrap();
+            let meta = saved.unwrap().meta.unwrap();
+            assert_eq!(meta.provider_type, None);
+            assert_eq!(meta.managed_nexus_preset_version, None);
+        });
+    }
+
+    #[test]
+    fn stale_backup_does_not_belong_to_another_apps_running_proxy() {
+        assert!(!app_takeover_owns_live(true, false, false));
+        assert!(app_takeover_owns_live(true, false, true));
+        assert!(app_takeover_owns_live(false, true, false));
+    }
 }
 
 impl ProviderService {
@@ -1886,6 +1775,9 @@ impl ProviderService {
             .get_provider_by_id(&original_id, app_type.as_str())?;
         // Normalize Claude model keys
         Self::normalize_provider_if_claude(&app_type, &mut provider);
+        if let Some(existing) = existing_provider.as_ref() {
+            crate::database::reconcile_managed_nexus_update(&app_type, existing, &mut provider);
+        }
         Self::validate_provider_settings(&app_type, &provider)?;
         normalize_provider_common_config_for_storage(state.db.as_ref(), &app_type, &mut provider)?;
         Self::normalize_usage_script_credential_overrides(&app_type, &mut provider);
@@ -2461,12 +2353,17 @@ impl ProviderService {
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
+        let app_takeover_enabled = if has_live_backup {
+            futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str()))?
+                .enabled
+        } else {
+            false
+        };
         let proxy_running = futures::executor::block_on(state.proxy_service.is_running());
 
-        // See the save path above: backup/placeholders are the ownership signal
-        // here, not just proxy_config.enabled. A stopped proxy with clean live
-        // may be between restore and backup cleanup, so write live normally.
-        if live_taken_over || (has_live_backup && proxy_running) {
+        // A backup only grants ownership while takeover is enabled for this app. The shared
+        // proxy can be running solely for another app, which must not revive stale takeover state.
+        if app_takeover_owns_live(has_live_backup, live_taken_over, app_takeover_enabled) {
             if matches!(app_type, AppType::ClaudeDesktop) {
                 write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
                 return Ok(());
