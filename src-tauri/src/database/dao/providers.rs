@@ -5,6 +5,7 @@ use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use toml_edit::{value, DocumentMut};
 
@@ -37,6 +38,40 @@ const NEXUS_ENDPOINTS: [&str; 4] = [
     "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
     NEXUS_ENDPOINT,
 ];
+const SHIPPED_KEY_FINGERPRINTS: [&str; 2] = [
+    "305da1291142205e2260675309af8963e2394257e2851f9c58759272c85eab73",
+    "56c3568cabcc36524156db1191c4cd361710ebb88837d8b9457b2f59986465dc",
+];
+
+fn scrub_credentials(app: &AppType, settings: &mut Value, fingerprints: &[&str]) -> bool {
+    let paths: &[&str] = match app {
+        AppType::Codex => &["/auth/OPENAI_API_KEY"],
+        AppType::Claude | AppType::ClaudeDesktop => {
+            &["/env/ANTHROPIC_AUTH_TOKEN", "/env/ANTHROPIC_API_KEY"]
+        }
+        _ => &[],
+    };
+    let mut changed = false;
+    for path in paths {
+        let leaked = settings
+            .pointer(path)
+            .and_then(Value::as_str)
+            .is_some_and(|value| {
+                let digest = format!("{:x}", Sha256::digest(value.trim().as_bytes()));
+                fingerprints.contains(&digest.as_str())
+            });
+        if leaked {
+            *settings.pointer_mut(path).expect("credential path exists") = json!("");
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn scrub_shipped_credentials(app: &AppType, settings: &mut Value) -> bool {
+    scrub_credentials(app, settings, &SHIPPED_KEY_FINGERPRINTS)
+}
+
 fn is_known_nexus_endpoint(value: &str) -> bool {
     let value = value.trim_end_matches('/');
     NEXUS_ENDPOINTS
@@ -117,16 +152,32 @@ fn has_nexus_signature(app: &AppType, settings: &Value, meta: &Value) -> bool {
 
 fn replace_nexus_catalog(settings: &mut Value, app: &AppType) -> Result<(), AppError> {
     let catalog = child_object_mut(object_mut(settings, "settings")?, "modelCatalog")?;
-    let models = match app {
-        AppType::Codex => {
-            json!([{"model":NEXUS_MODEL,"displayName":"GLM-5.2","contextWindow":NEXUS_CONTEXT,"inputModalities":["text"]}])
+    let mut existing = match catalog.remove("models") {
+        Some(Value::Array(models)) => models,
+        Some(_) => {
+            return Err(AppError::Message(
+                "Nexus modelCatalog.models must be an array".into(),
+            ))
         }
-        _ => json!([
-            {"model":NEXUS_MODEL,"inputModalities":["text"]},
-            {"model":"glm-5.2","inputModalities":["text"]}
-        ]),
+        None => Vec::new(),
     };
-    catalog.insert("models".into(), models);
+    existing.retain(|entry| {
+        entry
+            .get("model")
+            .and_then(Value::as_str)
+            .is_none_or(|model| !is_known_nexus_model(model))
+    });
+    let mut models = match app {
+        AppType::Codex => vec![
+            json!({"model":NEXUS_MODEL,"displayName":"GLM-5.2","contextWindow":NEXUS_CONTEXT,"inputModalities":["text"]}),
+        ],
+        _ => vec![
+            json!({"model":NEXUS_MODEL,"inputModalities":["text"]}),
+            json!({"model":"glm-5.2","inputModalities":["text"]}),
+        ],
+    };
+    models.append(&mut existing);
+    catalog.insert("models".into(), Value::Array(models));
     Ok(())
 }
 
@@ -837,7 +888,14 @@ impl Database {
             if !has_nexus_signature(app, &settings, &meta) {
                 continue;
             }
+            let scrubbed = scrub_shipped_credentials(app, &mut settings);
             if version == Some(NEXUS_VERSION) {
+                if scrubbed {
+                    transaction.execute(
+                        "UPDATE providers SET settings_config=?1 WHERE id=?2 AND app_type=?3",
+                        params![settings.to_string(), id, app_name],
+                    )?;
+                }
                 sync_current |= current_id == Some(id.as_str());
                 continue;
             }
@@ -994,11 +1052,12 @@ impl Database {
 
 #[cfg(test)]
 mod ensure_official_seed_tests {
-    use super::NEXUS_MODEL;
+    use super::{scrub_credentials, NEXUS_MODEL, SHIPPED_KEY_FINGERPRINTS};
     use crate::app_config::AppType;
     use crate::database::{Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
     use crate::provider::Provider;
     use serde_json::json;
+    use sha2::Digest;
 
     fn save_nexus(
         db: &Database,
@@ -1099,7 +1158,11 @@ mod ensure_official_seed_tests {
         });
         let codex_settings = json!({
             "auth":{"OPENAI_API_KEY":"rotated-user-key"},
-            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'")
+            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"),
+            "modelCatalog":{"models":[
+                {"model":"glm-5.2","inputModalities":["text","image"]},
+                {"model":"user-model","inputModalities":["text"]}
+            ]}
         });
         save_nexus(&db, "codex", "codex", codex_settings, shared_meta.clone());
         let claude_settings = json!({"env":{
@@ -1145,6 +1208,17 @@ mod ensure_official_seed_tests {
             codex.settings_config["auth"]["OPENAI_API_KEY"],
             "rotated-user-key"
         );
+        let models = codex.settings_config["modelCatalog"]["models"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .filter_map(|model| model["model"].as_str())
+                .collect::<Vec<_>>(),
+            [NEXUS_MODEL, "user-model"]
+        );
+        assert_eq!(models[0]["inputModalities"], json!(["text"]));
         let config = codex.settings_config["config"].as_str().unwrap();
         assert!(config.contains("model_auto_compact_token_limit = 252000"));
         assert!(!config.contains("model_reasoning_effort"));
@@ -1196,5 +1270,26 @@ mod ensure_official_seed_tests {
                 .managed_nexus_preset_version
         };
         assert_eq!((version("custom"), version("good")), (Some(5), Some(6)));
+    }
+
+    #[test]
+    fn credential_scrub_is_exact_and_preserves_rotated_keys() {
+        let synthetic = "synthetic-shipped-key";
+        let fingerprint = format!("{:x}", sha2::Sha256::digest(synthetic.as_bytes()));
+        assert!(SHIPPED_KEY_FINGERPRINTS
+            .iter()
+            .all(|fingerprint| fingerprint.len() == 64));
+
+        let mut settings = json!({"env": {
+            "ANTHROPIC_AUTH_TOKEN": synthetic,
+            "ANTHROPIC_API_KEY": "rotated-user-key"
+        }});
+        assert!(scrub_credentials(
+            &AppType::ClaudeDesktop,
+            &mut settings,
+            &[fingerprint.as_str()]
+        ));
+        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "");
+        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "rotated-user-key");
     }
 }
