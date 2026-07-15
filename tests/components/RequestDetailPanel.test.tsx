@@ -74,4 +74,18 @@ describe("RequestDetailPanel", () => {
     );
     expect(copyTextMock).toHaveBeenCalledWith("server-request-id");
   });
+
+  it.each([
+    ["loaded", { data: request, isLoading: false }],
+    ["loading", { data: undefined, isLoading: true }],
+    ["not found", { data: undefined, isLoading: false }],
+  ])("provides a visible close action when %s", (_state, result) => {
+    useRequestDetailMock.mockReturnValue(result);
+    const onClose = vi.fn();
+
+    render(<RequestDetailPanel requestId="response-id" onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(onClose).toHaveBeenCalledOnce();
+  });
 });
