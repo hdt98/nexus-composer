@@ -59,6 +59,47 @@ describe("Nexus Composer language system", () => {
     expect(vi.settings.languageOptionEnglish).toBe("English");
   });
 
+  it("keeps Request Detail concise and fully Vietnamese", () => {
+    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
+
+    expect(vi.usage).toMatchObject({
+      requestDetail: "Chi tiết lượt gọi",
+      requestNotFound: "Không tìm thấy lượt gọi",
+      basicInfo: "Thông tin chung",
+      requestId: "ID trong Nexus",
+      correlationId: "ID phía máy chủ",
+      copyCorrelationId: "Sao chép ID phía máy chủ",
+      time: "Thời gian",
+      provider: "Nhà cung cấp",
+      unknownProvider: "Không rõ",
+      appType: "Ứng dụng",
+      model: "Mô hình",
+      requestModel: "Mô hình yêu cầu",
+      pricingModel: "Mô hình tính giá",
+      status: "Trạng thái",
+      tokenUsage: "Mức dùng token",
+      inputTokens: "Đầu vào mới",
+      rawInputLabel: "Tổng đầu vào",
+      outputTokens: "Đầu ra",
+      cacheReadTokens: "Đọc cache",
+      cacheCreationTokens: "Ghi cache",
+      totalTokens: "Tổng token mới",
+      costBreakdown: "Chi phí",
+      inputCost: "Chi phí đầu vào",
+      outputCost: "Chi phí đầu ra",
+      cacheReadCost: "Chi phí đọc cache",
+      cacheCreationCost: "Chi phí ghi cache",
+      costMultiplier: "Hệ số tính giá",
+      baseCost: "Gốc",
+      totalCost: "Tổng chi phí",
+      withMultiplier: "đã áp dụng hệ số",
+      unpriced: "Chưa có đơn giá",
+      performance: "Hiệu năng",
+      latency: "Độ trễ",
+      errorMessage: "Lỗi",
+    });
+  });
+
   it("LanguageSettings component only has en and vi buttons", () => {
     const content = readFileSync(
       "src/components/settings/LanguageSettings.tsx",
