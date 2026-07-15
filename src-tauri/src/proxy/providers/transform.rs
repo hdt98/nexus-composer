@@ -120,6 +120,13 @@ pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
     anthropic_to_openai_with_reasoning_content(body, false)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReasoningHistoryPolicy {
+    Drop,
+    Preserve,
+    FillMissing,
+}
+
 /// Anthropic 请求 → OpenAI Chat Completions 请求
 ///
 /// `preserve_reasoning_content` 仅用于明确需要 Moonshot/Kimi/DeepSeek
@@ -128,6 +135,20 @@ pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
 pub fn anthropic_to_openai_with_reasoning_content(
     body: Value,
     preserve_reasoning_content: bool,
+) -> Result<Value, ProxyError> {
+    anthropic_to_openai_with_reasoning_history(
+        body,
+        if preserve_reasoning_content {
+            ReasoningHistoryPolicy::FillMissing
+        } else {
+            ReasoningHistoryPolicy::Drop
+        },
+    )
+}
+
+pub(crate) fn anthropic_to_openai_with_reasoning_history(
+    body: Value,
+    reasoning_history_policy: ReasoningHistoryPolicy,
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
@@ -163,7 +184,7 @@ pub fn anthropic_to_openai_with_reasoning_content(
         for msg in msgs {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
             let content = msg.get("content");
-            let converted = convert_message_to_openai(role, content, preserve_reasoning_content)?;
+            let converted = convert_message_to_openai(role, content, reasoning_history_policy)?;
             messages.extend(converted);
         }
     }
@@ -348,7 +369,7 @@ fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
 fn convert_message_to_openai(
     role: &str,
     content: Option<&Value>,
-    preserve_reasoning_content: bool,
+    reasoning_history_policy: ReasoningHistoryPolicy,
 ) -> Result<Vec<Value>, ProxyError> {
     let mut result = Vec::new();
 
@@ -429,13 +450,21 @@ fn convert_message_to_openai(
                 }
                 "thinking" => {
                     // 提取 thinking 内容，后续可作为 reasoning_content 传给需要它的上游。
-                    if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
-                        if !thinking.is_empty() {
-                            reasoning_parts.push(thinking.to_string());
-                        }
+                    if let Some(thinking) =
+                        block
+                            .get("thinking")
+                            .and_then(|t| t.as_str())
+                            .filter(|text| {
+                                reasoning_history_policy != ReasoningHistoryPolicy::Drop
+                                    && !text.is_empty()
+                            })
+                    {
+                        reasoning_parts.push(thinking.to_string());
                     }
                 }
-                "redacted_thinking" if preserve_reasoning_content => {
+                "redacted_thinking"
+                    if reasoning_history_policy == ReasoningHistoryPolicy::FillMissing =>
+                {
                     // Claude Code encrypts historical thinking into redacted_thinking blocks.
                     // MiMo/DeepSeek require non-empty reasoning_content on assistant tool-call
                     // messages, so inject a minimal placeholder when the real content is
@@ -447,8 +476,12 @@ fn convert_message_to_openai(
             }
         }
 
-        // 添加带内容和/或工具调用的消息
-        if !content_parts.is_empty() || !tool_calls.is_empty() {
+        let preserve_reasoning = role == "assistant"
+            && reasoning_history_policy == ReasoningHistoryPolicy::Preserve
+            && !reasoning_parts.is_empty();
+
+        // Preserve a reasoning-only assistant turn only for exact-history providers.
+        if !content_parts.is_empty() || !tool_calls.is_empty() || preserve_reasoning {
             let mut msg = json!({"role": role});
 
             // 内容处理
@@ -470,13 +503,19 @@ fn convert_message_to_openai(
                 msg["tool_calls"] = json!(tool_calls);
             }
 
-            if preserve_reasoning_content && role == "assistant" && !tool_calls.is_empty() {
+            if role == "assistant"
+                && (!tool_calls.is_empty()
+                    || reasoning_history_policy == ReasoningHistoryPolicy::Preserve)
+            {
                 let reasoning_content = if reasoning_parts.is_empty() {
-                    "tool call".to_string()
+                    (reasoning_history_policy == ReasoningHistoryPolicy::FillMissing)
+                        .then(|| "tool call".to_string())
                 } else {
-                    reasoning_parts.join("\n")
+                    Some(reasoning_parts.join("\n"))
                 };
-                msg["reasoning_content"] = json!(reasoning_content);
+                if let Some(reasoning_content) = reasoning_content {
+                    msg["reasoning_content"] = json!(reasoning_content);
+                }
             }
 
             result.push(msg);
@@ -514,6 +553,13 @@ pub fn clean_schema(mut schema: Value) -> Value {
 
 /// OpenAI 响应 → Anthropic 响应
 pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
+    openai_to_anthropic_with_thinking(body, true)
+}
+
+pub fn openai_to_anthropic_with_thinking(
+    body: Value,
+    emit_thinking: bool,
+) -> Result<Value, ProxyError> {
     let choices = body
         .get("choices")
         .and_then(|c| c.as_array())
@@ -532,7 +578,7 @@ pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
 
     // DeepSeek provider 会把思考内容放在 message.reasoning_content。
     if let Some(reasoning_content) = message.get("reasoning_content").and_then(|r| r.as_str()) {
-        if !reasoning_content.is_empty() {
+        if emit_thinking && !reasoning_content.is_empty() {
             content.push(json!({"type": "thinking", "thinking": reasoning_content}));
         }
     }
@@ -1176,6 +1222,46 @@ mod tests {
         );
         assert_eq!(msg["tool_calls"][0]["id"], "call_date");
         assert_eq!(msg["tool_calls"][0]["function"]["name"], "get_date");
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_can_hide_reasoning_content() {
+        let input = json!({
+            "id": "chatcmpl-hidden-thinking",
+            "object": "chat.completion",
+            "model": "glm-5.2",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "reasoning_content": "This should stay internal.",
+                    "content": "Visible answer.",
+                    "tool_calls": [{
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {"name": "inspect", "arguments": "{\"path\":\"/tmp/a\"}"}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        });
+
+        let result = openai_to_anthropic_with_thinking(input, false).unwrap();
+
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(result["content"][0]["text"], "Visible answer.");
+        assert_eq!(result["content"][1]["type"], "tool_use");
+        assert_eq!(result["content"][1]["name"], "inspect");
+        assert!(
+            result["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|block| block["type"] != "thinking"),
+            "hidden reasoning must not be returned as Anthropic thinking"
+        );
+        assert_eq!(result["stop_reason"], "tool_use");
     }
 
     #[test]

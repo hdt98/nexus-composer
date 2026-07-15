@@ -9,6 +9,7 @@ use super::codex_chat_common::{
     response_function_call_item, response_function_call_item_with_namespace,
     split_leading_think_block,
 };
+use super::transform::ReasoningHistoryPolicy;
 use crate::provider::CodexChatReasoningConfig;
 use crate::proxy::{
     error::ProxyError,
@@ -257,6 +258,15 @@ pub fn responses_to_chat_completions_with_reasoning(
     body: Value,
     reasoning_config: Option<&CodexChatReasoningConfig>,
 ) -> Result<Value, ProxyError> {
+    responses_to_chat_completions_with_reasoning_history(body, reasoning_config, false)
+}
+
+pub(crate) fn responses_to_chat_completions_with_reasoning_history(
+    body: Value,
+    reasoning_config: Option<&CodexChatReasoningConfig>,
+    preserve_exact_history: bool,
+) -> Result<Value, ProxyError> {
+    let policy = reasoning_history_policy(reasoning_config, preserve_exact_history);
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
 
@@ -276,7 +286,7 @@ pub fn responses_to_chat_completions_with_reasoning(
     }
 
     if let Some(input) = body.get("input") {
-        append_responses_input_as_chat_messages(input, &mut messages, &tool_context)?;
+        append_responses_input_as_chat_messages(input, &mut messages, &tool_context, policy)?;
     }
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
@@ -340,6 +350,26 @@ pub fn responses_to_chat_completions_with_reasoning(
     super::transform::inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
+}
+
+fn reasoning_history_policy(
+    config: Option<&CodexChatReasoningConfig>,
+    preserve_exact_history: bool,
+) -> ReasoningHistoryPolicy {
+    let matches = |value: Option<&str>, expected: &str| {
+        value.is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
+    };
+    if preserve_exact_history {
+        ReasoningHistoryPolicy::Preserve
+    } else if config.is_some_and(|config| {
+        config.supports_thinking.unwrap_or(false)
+            && matches(config.output_format.as_deref(), "reasoning_content")
+            && matches(config.thinking_param.as_deref(), "thinking")
+    }) {
+        ReasoningHistoryPolicy::FillMissing
+    } else {
+        ReasoningHistoryPolicy::Drop
+    }
 }
 
 fn apply_reasoning_options(
@@ -539,6 +569,7 @@ fn append_responses_input_as_chat_messages(
     input: &Value,
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
+    policy: ReasoningHistoryPolicy,
 ) -> Result<(), ProxyError> {
     let mut pending_tool_calls = Vec::new();
     let mut pending_reasoning: Option<String> = None;
@@ -582,7 +613,27 @@ fn append_responses_input_as_chat_messages(
         &mut pending_reasoning,
         &mut last_assistant_index,
     );
-    backfill_tool_call_reasoning_placeholders(messages);
+    if policy == ReasoningHistoryPolicy::Preserve {
+        if let Some(reasoning) = pending_reasoning
+            .take()
+            .filter(|reasoning| !reasoning.trim().is_empty())
+        {
+            messages.push(json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": reasoning
+            }));
+        }
+    }
+    match policy {
+        ReasoningHistoryPolicy::Drop => messages.iter_mut().for_each(|message| {
+            if let Some(message) = message.as_object_mut() {
+                message.remove("reasoning_content");
+            }
+        }),
+        ReasoningHistoryPolicy::Preserve => {}
+        ReasoningHistoryPolicy::FillMissing => backfill_tool_call_reasoning_placeholders(messages),
+    }
     Ok(())
 }
 
@@ -785,21 +836,17 @@ fn update_last_assistant_index(
 }
 
 fn append_pending_reasoning(pending_reasoning: &mut Option<String>, reasoning: Option<String>) {
-    let Some(reasoning) = reasoning else {
+    let Some(reasoning) = reasoning.filter(|text| !text.trim().is_empty()) else {
         return;
     };
-    let reasoning = reasoning.trim();
-    if reasoning.is_empty() {
-        return;
-    }
 
     match pending_reasoning {
         Some(existing) if !existing.is_empty() => {
             existing.push_str("\n\n");
-            existing.push_str(reasoning);
+            existing.push_str(&reasoning);
         }
         _ => {
-            *pending_reasoning = Some(reasoning.to_string());
+            *pending_reasoning = Some(reasoning);
         }
     }
 }
@@ -808,24 +855,13 @@ fn append_unique_pending_reasoning(
     pending_reasoning: &mut Option<String>,
     reasoning: Option<String>,
 ) {
-    let Some(reasoning) = reasoning else {
-        return;
-    };
-    let reasoning = reasoning.trim();
-    if reasoning.is_empty() {
+    if reasoning
+        .as_ref()
+        .is_some_and(|reasoning| pending_reasoning.as_ref() == Some(reasoning))
+    {
         return;
     }
-
-    match pending_reasoning {
-        Some(existing) if existing.contains(reasoning) => {}
-        Some(existing) if !existing.is_empty() => {
-            existing.push_str("\n\n");
-            existing.push_str(reasoning);
-        }
-        _ => {
-            *pending_reasoning = Some(reasoning.to_string());
-        }
-    }
+    append_pending_reasoning(pending_reasoning, reasoning);
 }
 
 fn attach_pending_reasoning_to_assistant(
@@ -835,10 +871,6 @@ fn attach_pending_reasoning_to_assistant(
     let Some(reasoning) = pending_reasoning.take() else {
         return;
     };
-    if reasoning.trim().is_empty() {
-        return;
-    }
-
     if let Some(obj) = message.as_object_mut() {
         append_reasoning_content(obj, &reasoning);
     }
@@ -888,11 +920,7 @@ fn attach_reasoning_to_last_assistant(
     last_assistant_index: Option<usize>,
     reasoning: &Option<String>,
 ) -> bool {
-    let Some(reasoning) = reasoning
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(reasoning) = reasoning.as_deref().filter(|text| !text.trim().is_empty()) else {
         return true;
     };
     let Some(index) = last_assistant_index else {
@@ -1633,17 +1661,21 @@ pub(crate) fn chat_usage_to_responses_usage(usage: Option<&Value>) -> Value {
         result["input_tokens_details"] = json!({ "cached_tokens": cached });
     }
 
+    let reasoning_tokens = usage
+        .get("reasoning_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     if let Some(details) = usage
         .get("completion_tokens_details")
         .filter(|v| v.is_object())
     {
         let mut details = details.clone();
         if details.get("reasoning_tokens").is_none() {
-            details["reasoning_tokens"] = json!(0);
+            details["reasoning_tokens"] = json!(reasoning_tokens);
         }
         result["output_tokens_details"] = details;
     } else {
-        result["output_tokens_details"] = json!({ "reasoning_tokens": 0 });
+        result["output_tokens_details"] = json!({ "reasoning_tokens": reasoning_tokens });
     }
 
     if let Some(cache_read) = usage.get("cache_read_input_tokens") {
@@ -1749,6 +1781,74 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn responses_with_fill_missing(input: Value) -> Value {
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            thinking_param: Some("thinking".to_string()),
+            output_format: Some("reasoning_content".to_string()),
+            ..Default::default()
+        };
+        responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap()
+    }
+
+    #[test]
+    fn distinct_substring_reasoning_is_not_deduplicated() {
+        let mut reasoning = Some("Need both files.".to_string());
+        append_unique_pending_reasoning(&mut reasoning, Some("Need both".to_string()));
+        assert_eq!(reasoning.as_deref(), Some("Need both files.\n\nNeed both"));
+    }
+
+    #[test]
+    fn reasoning_history_modes_are_exact() {
+        let tool = "  tool call\n\n[redacted thinking]\nReal.  \n";
+        let ordinary = "  ordinary reasoning\n";
+        let thinking_only = "\n  thinking only  \n";
+        let input = json!({
+            "model": "glm-5.2",
+            "input": [
+                {
+                    "type": "function_call", "call_id": "call_1",
+                    "name": "lookup", "arguments": "{}", "reasoning_content": tool
+                },
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+                {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Visible answer."}],
+                    "reasoning_content": ordinary
+                }
+            ]
+        });
+        let preserved =
+            responses_to_chat_completions_with_reasoning_history(input.clone(), None, true)
+                .unwrap();
+        assert_eq!(preserved["messages"][0]["reasoning_content"], tool);
+        assert_eq!(preserved["messages"][3]["reasoning_content"], ordinary);
+
+        let dropped = responses_to_chat_completions(input).unwrap();
+        assert_eq!(dropped["messages"].as_array().unwrap().len(), 4);
+        assert!(dropped["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message.get("reasoning_content").is_none()));
+
+        let thinking = json!({
+            "model": "glm-5.2",
+            "input": [{"type": "reasoning", "reasoning_content": thinking_only}]
+        });
+        let preserved =
+            responses_to_chat_completions_with_reasoning_history(thinking.clone(), None, true)
+                .unwrap();
+        assert_eq!(preserved["messages"][0]["content"], Value::Null);
+        assert_eq!(preserved["messages"][0]["reasoning_content"], thinking_only);
+        assert!(responses_to_chat_completions(thinking).unwrap()["messages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn responses_request_with_stream_injects_include_usage() {
@@ -1899,7 +1999,7 @@ mod tests {
             }]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "user");
@@ -2399,7 +2499,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -2436,7 +2536,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -2463,7 +2563,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -2497,7 +2597,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -2526,7 +2626,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -2556,7 +2656,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");
@@ -2588,7 +2688,7 @@ mod tests {
             ]
         });
 
-        let result = responses_to_chat_completions(input).unwrap();
+        let result = responses_with_fill_missing(input);
         let messages = result["messages"].as_array().unwrap();
 
         assert_eq!(messages[0]["role"], "assistant");

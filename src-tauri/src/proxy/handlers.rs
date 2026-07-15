@@ -18,12 +18,14 @@ use super::{
     handler_context::RequestContext,
     providers::{
         codex_chat_common::extract_reasoning_field_text,
-        codex_chat_history::record_responses_sse_stream, get_adapter, get_claude_api_format,
-        streaming::create_anthropic_sse_stream,
+        codex_chat_history::record_responses_sse_stream,
+        get_adapter, get_claude_api_format,
+        reasoning_chat::{normalize_chat_json, normalize_chat_sse},
+        streaming::create_anthropic_sse_stream_with_thinking,
         streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
-        streaming_responses::create_anthropic_sse_stream_from_responses, transform,
-        transform_codex_chat, transform_gemini, transform_responses,
+        streaming_responses::create_anthropic_sse_stream_from_responses,
+        transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, process_response, read_decoded_body,
@@ -31,7 +33,7 @@ use super::{
         usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
-    sse::{strip_sse_field, take_sse_block},
+    sse::{error_event_message, strip_sse_field, take_sse_block},
     types::*,
     usage::parser::TokenUsage,
     ProxyError,
@@ -209,6 +211,7 @@ async fn handle_messages_for_app(
     };
 
     let connection_guard = result.connection_guard.take();
+    let reasoning_boundary_enabled = result.reasoning_boundary_enabled;
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let api_format = result
@@ -229,9 +232,9 @@ async fn handle_messages_for_app(
             &ctx,
             &state,
             &body,
-            is_stream,
             &api_format,
             connection_guard,
+            reasoning_boundary_enabled,
         )
         .await;
     }
@@ -277,16 +280,31 @@ fn validate_claude_desktop_gateway_auth(
 /// Claude 格式转换处理（独有逻辑）
 ///
 /// 支持 OpenAI Chat Completions 和 Responses API 两种格式的转换
+fn should_emit_anthropic_thinking(body: &Value) -> bool {
+    let Some(thinking) = body.get("thinking").and_then(Value::as_object) else {
+        return false;
+    };
+
+    let thinking_type = thinking.get("type").and_then(Value::as_str);
+    let display = thinking.get("display").and_then(Value::as_str);
+
+    matches!(thinking_type, Some("enabled" | "adaptive")) && display != Some("omitted")
+}
+
 async fn handle_claude_transform(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
     state: &ProxyState,
     original_body: &Value,
-    is_stream: bool,
     api_format: &str,
     connection_guard: Option<ActiveConnectionGuard>,
+    reasoning_boundary_enabled: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
+    let is_stream = original_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let is_codex_oauth = ctx
         .provider
         .meta
@@ -312,6 +330,7 @@ async fn handle_claude_transform(
     };
     let tool_schema_hints = transform_gemini::extract_anthropic_tool_schema_hints(original_body);
     let tool_schema_hints = (!tool_schema_hints.is_empty()).then_some(tool_schema_hints);
+    let emit_anthropic_thinking = should_emit_anthropic_thinking(original_body);
 
     if use_streaming {
         // 根据 api_format 选择流式转换器
@@ -329,7 +348,10 @@ async fn handle_claude_transform(
                 tool_schema_hints.clone(),
             )))
         } else {
-            Box::new(Box::pin(create_anthropic_sse_stream(stream)))
+            Box::new(Box::pin(create_anthropic_sse_stream_with_thinking(
+                normalize_chat_sse(stream, reasoning_boundary_enabled),
+                emit_anthropic_thinking,
+            )))
         };
 
         // 创建使用量收集器；关闭 usage logging 时不要再解析转换后的 SSE。
@@ -430,7 +452,7 @@ async fn handle_claude_transform(
 
     let body_str = String::from_utf8_lossy(&body_bytes);
 
-    let upstream_response: Value = if aggregate_codex_oauth_responses_sse {
+    let mut upstream_response: Value = if aggregate_codex_oauth_responses_sse {
         responses_sse_to_response_value(&body_str)?
     } else {
         match serde_json::from_slice(&body_bytes) {
@@ -467,6 +489,10 @@ async fn handle_claude_transform(
             }
         }
     };
+    if api_format == "openai_chat" && reasoning_boundary_enabled {
+        normalize_chat_json(&mut upstream_response)
+            .map_err(|error| ProxyError::TransformError(error.to_string()))?;
+    }
 
     // 根据 api_format 选择非流式转换器
     let anthropic_response = if api_format == "openai_responses" {
@@ -480,7 +506,7 @@ async fn handle_claude_transform(
             tool_schema_hints.as_ref(),
         )
     } else {
-        transform::openai_to_anthropic(upstream_response)
+        transform::openai_to_anthropic_with_thinking(upstream_response, emit_anthropic_thinking)
     }
     .map_err(|e| {
         log::error!("[Claude] 转换响应失败: {e}");
@@ -735,6 +761,7 @@ pub async fn handle_responses(
     };
 
     let connection_guard = result.connection_guard.take();
+    let reasoning_boundary_enabled = result.reasoning_boundary_enabled;
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -747,6 +774,7 @@ pub async fn handle_responses(
             is_stream,
             connection_guard,
             codex_tool_context,
+            reasoning_boundary_enabled,
         )
         .await;
     }
@@ -814,6 +842,7 @@ pub async fn handle_responses_compact(
     };
 
     let connection_guard = result.connection_guard.take();
+    let reasoning_boundary_enabled = result.reasoning_boundary_enabled;
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
     let response = result.response;
@@ -826,6 +855,7 @@ pub async fn handle_responses_compact(
             is_stream,
             connection_guard,
             codex_tool_context,
+            reasoning_boundary_enabled,
         )
         .await;
     }
@@ -847,6 +877,7 @@ async fn handle_codex_chat_to_responses_transform(
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     tool_context: transform_codex_chat::CodexToolContext,
+    reasoning_boundary_enabled: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
 
@@ -859,6 +890,7 @@ async fn handle_codex_chat_to_responses_transform(
 
     if is_stream || response.is_sse() {
         let stream = response.bytes_stream();
+        let stream = normalize_chat_sse(stream, reasoning_boundary_enabled);
         let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
@@ -958,7 +990,7 @@ async fn handle_codex_chat_to_responses_transform(
     let (mut response_headers, status, body_bytes) =
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     let body_str = String::from_utf8_lossy(&body_bytes);
-    let chat_response: Value = match serde_json::from_slice(&body_bytes) {
+    let mut chat_response: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) => value,
         // 与 Claude 侧 handle_claude_transform 对称的兜底嗅探（#2234）：
         // 上游对 stream:false 返回未标记 Content-Type 的 SSE 体时按 SSE 聚合。
@@ -980,6 +1012,10 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
+    if reasoning_boundary_enabled {
+        normalize_chat_json(&mut chat_response)
+            .map_err(|error| ProxyError::TransformError(error.to_string()))?;
+    }
     let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
         &tool_context,
@@ -1567,19 +1603,6 @@ fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> Strin
     )
 }
 
-/// 从 SSE chunk 的 error 字段提取可报告的错误消息。占位形状（空对象、空消息、
-/// false、空字符串等，常见于 OpenAI 兼容网关每 chunk 附带的 error 字段）返回
-/// None——不应据此判定整条流失败（否则会把成功流误杀成 422，C12/C2234 目标人群）。
-fn error_event_message(error: &Value) -> Option<String> {
-    if let Some(msg) = error.get("message").and_then(|m| m.as_str()) {
-        return (!msg.is_empty()).then(|| msg.to_string());
-    }
-    if let Some(s) = error.as_str() {
-        return (!s.is_empty()).then(|| s.to_string());
-    }
-    None
-}
-
 /// 取 body 前 `max_chars` 个字符的单行摘要：\r 丢弃、\n 折叠为字面 \n、
 /// 其余控制字符替换为 �，超长加省略号。
 fn body_snippet(body: &str, max_chars: usize) -> String {
@@ -2045,10 +2068,29 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        responses_sse_to_response_value, should_emit_anthropic_thinking,
+        should_use_claude_transform_streaming, transform, upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
+    use serde_json::json;
+
+    #[test]
+    fn anthropic_thinking_visibility_tracks_explicit_request() {
+        let cases = [
+            ("missing", json!({}), false),
+            ("enabled", json!({"thinking": {"type": "enabled"}}), true),
+            ("adaptive", json!({"thinking": {"type": "adaptive"}}), true),
+            (
+                "display omitted",
+                json!({"thinking": {"type": "enabled", "display": "omitted"}}),
+                false,
+            ),
+        ];
+
+        for (label, body, expected) in cases {
+            assert_eq!(should_emit_anthropic_thinking(&body), expected, "{label}");
+        }
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {

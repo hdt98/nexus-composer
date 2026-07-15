@@ -14,7 +14,9 @@
 //! - **OpenRouter**: 已支持 Claude Code 兼容接口，默认透传
 //! - **GitHubCopilot**: GitHub Copilot (OAuth + Copilot Token)
 
-use super::{AuthInfo, AuthStrategy, ProviderAdapter, ProviderType};
+use super::{
+    transform::ReasoningHistoryPolicy, AuthInfo, AuthStrategy, ProviderAdapter, ProviderType,
+};
 use crate::provider::Provider;
 use crate::proxy::error::ProxyError;
 use serde_json::{json, Value};
@@ -304,27 +306,38 @@ fn normalize_anthropic_tool_thinking_history(body: &mut Value) -> bool {
 fn should_preserve_reasoning_content_for_openai_chat(provider: &Provider, body: &Value) -> bool {
     if body
         .get("model")
-        .and_then(|m| m.as_str())
+        .and_then(|model| model.as_str())
         .is_some_and(is_reasoning_vendor_identifier)
     {
         return true;
     }
 
     let settings = &provider.settings_config;
-    let base_urls = [
+    [
         settings
             .get("env")
             .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
-            .and_then(|v| v.as_str()),
-        settings.get("base_url").and_then(|v| v.as_str()),
-        settings.get("baseURL").and_then(|v| v.as_str()),
-        settings.get("apiEndpoint").and_then(|v| v.as_str()),
-    ];
+            .and_then(|value| value.as_str()),
+        settings.get("base_url").and_then(|value| value.as_str()),
+        settings.get("baseURL").and_then(|value| value.as_str()),
+        settings.get("apiEndpoint").and_then(|value| value.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(is_reasoning_vendor_identifier)
+}
 
-    base_urls
-        .into_iter()
-        .flatten()
-        .any(is_reasoning_vendor_identifier)
+fn reasoning_history_policy_for_openai_chat(
+    provider: &Provider,
+    body: &Value,
+) -> ReasoningHistoryPolicy {
+    if should_preserve_reasoning_content_for_openai_chat(provider, body) {
+        ReasoningHistoryPolicy::FillMissing
+    } else if super::reasoning_chat::enabled_for_attempt(provider, body) {
+        ReasoningHistoryPolicy::Preserve
+    } else {
+        ReasoningHistoryPolicy::Drop
+    }
 }
 
 pub fn transform_claude_request_for_api_format(
@@ -401,11 +414,11 @@ pub fn transform_claude_request_for_api_format(
             )
         }
         "openai_chat" => {
-            let preserve_reasoning_content =
-                should_preserve_reasoning_content_for_openai_chat(provider, &body);
-            let mut result = super::transform::anthropic_to_openai_with_reasoning_content(
+            let reasoning_history_policy =
+                reasoning_history_policy_for_openai_chat(provider, &body);
+            let mut result = super::transform::anthropic_to_openai_with_reasoning_history(
                 body,
-                preserve_reasoning_content,
+                reasoning_history_policy,
             )?;
             // Inject prompt_cache_key only if explicitly configured in meta
             if let Some(key) = provider
@@ -1982,6 +1995,50 @@ mod tests {
         let msg = &transformed["messages"][0];
         assert!(msg.get("tool_calls").is_some());
         assert!(msg.get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn nexus_glm_preserves_exact_history_without_synthetic_placeholders() {
+        let provider = create_provider_with_meta(
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+            ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                provider_type: Some("nexus".to_string()),
+                local_proxy_request_overrides: Some(crate::provider::LocalProxyRequestOverrides {
+                    body: Some(json!({
+                        "chat_template_kwargs": {"enable_thinking": true}
+                    })),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        );
+        let reasoning = "  tool call\n\n[redacted thinking]\nReal.  \n";
+        let transformed = transform_claude_request_for_api_format(
+            json!({
+                "model": "glm-5.2",
+                "messages": [
+                    {"role": "assistant", "content": [
+                        {"type": "thinking", "thinking": reasoning},
+                        {"type": "tool_use", "id": "real", "name": "lookup", "input": {}}
+                    ]},
+                    {"role": "assistant", "content": [
+                        {"type": "redacted_thinking", "data": "opaque"},
+                        {"type": "tool_use", "id": "redacted", "name": "lookup", "input": {}}
+                    ]}
+                ]
+            }),
+            &provider,
+            "openai_chat",
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(transformed["messages"][0]["reasoning_content"], reasoning);
+        assert!(transformed["messages"][1]
+            .get("reasoning_content")
+            .is_none());
     }
 
     #[test]

@@ -103,8 +103,7 @@ pub(crate) fn extract_reasoning_summary_text(value: &Value) -> Option<String> {
 }
 
 pub(crate) fn append_reasoning_content(message: &mut Map<String, Value>, reasoning: &str) -> bool {
-    let reasoning = reasoning.trim();
-    if reasoning.is_empty() {
+    if reasoning.trim().is_empty() {
         return false;
     }
 

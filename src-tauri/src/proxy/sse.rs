@@ -22,6 +22,41 @@ pub(crate) fn take_sse_block(buffer: &mut String) -> Option<String> {
     Some(block)
 }
 
+#[inline]
+pub(crate) fn is_sse_comment_block(block: &str) -> bool {
+    let mut lines = block
+        .lines()
+        .map(|line| line.trim_start_matches('\u{feff}').trim_start())
+        .filter(|line| !line.is_empty());
+    lines
+        .next()
+        .is_some_and(|line| line.starts_with(':') && lines.all(|line| line.starts_with(':')))
+}
+
+pub(crate) fn error_event_message(error: &serde_json::Value) -> Option<String> {
+    if let Some(message) = error
+        .get("message")
+        .or_else(|| error.get("detail"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return (!message.is_empty()).then(|| message.to_string());
+    }
+    error
+        .as_str()
+        .filter(|message| !message.is_empty())
+        .map(str::to_string)
+}
+
+pub(crate) fn is_reportable_error(error: &serde_json::Value) -> bool {
+    match error {
+        serde_json::Value::Null | serde_json::Value::Bool(false) => false,
+        serde_json::Value::String(message) => !message.is_empty(),
+        serde_json::Value::Array(values) => values.iter().any(is_reportable_error),
+        serde_json::Value::Object(fields) => fields.values().any(is_reportable_error),
+        serde_json::Value::Bool(true) | serde_json::Value::Number(_) => true,
+    }
+}
+
 /// Append raw bytes to a UTF-8 `String` buffer, correctly handling multi-byte
 /// characters that are split across chunk boundaries.
 ///
@@ -87,7 +122,31 @@ pub(crate) fn append_utf8_safe(buffer: &mut String, remainder: &mut Vec<u8>, new
 
 #[cfg(test)]
 mod tests {
-    use super::{append_utf8_safe, strip_sse_field, take_sse_block};
+    use super::{
+        append_utf8_safe, error_event_message, is_reportable_error, is_sse_comment_block,
+        strip_sse_field, take_sse_block,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn classifies_comments_and_reportable_errors() {
+        assert!(is_sse_comment_block(": keepalive"));
+        assert!(is_sse_comment_block("\u{feff}  : one\n  : two"));
+        assert!(!is_sse_comment_block(": note\ndata: {}"));
+        assert_eq!(
+            error_event_message(&json!({"message": "boom"})).as_deref(),
+            Some("boom")
+        );
+        assert_eq!(
+            error_event_message(&json!({"detail": "quota exhausted"})).as_deref(),
+            Some("quota exhausted")
+        );
+        for placeholder in [json!(null), json!({}), json!(""), json!(false)] {
+            assert!(!is_reportable_error(&placeholder));
+        }
+        assert!(is_reportable_error(&json!({"code": "rate_limit"})));
+        assert!(is_reportable_error(&json!(true)));
+    }
 
     #[test]
     fn strip_sse_field_accepts_optional_space() {

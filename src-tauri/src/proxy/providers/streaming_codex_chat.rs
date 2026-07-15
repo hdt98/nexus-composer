@@ -12,7 +12,9 @@ use super::{
     },
 };
 use crate::proxy::json_canonical::canonicalize_tool_arguments_str;
-use crate::proxy::sse::{strip_sse_field, take_sse_block};
+use crate::proxy::sse::{
+    error_event_message, is_reportable_error, is_sse_comment_block, strip_sse_field, take_sse_block,
+};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
@@ -924,6 +926,10 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                         if block.trim().is_empty() {
                             continue;
                         }
+                        if is_sse_comment_block(&block) {
+                            yield Ok(Bytes::from(format!("{block}\n\n")));
+                            continue;
+                        }
 
                         let mut event_name: Option<String> = None;
                         let mut data_parts: Vec<String> = Vec::new();
@@ -954,7 +960,9 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                             Err(_) => continue,
                         };
 
-                        if event_name.as_deref() == Some("error") || chunk.get("error").is_some() {
+                        let has_reportable_error =
+                            chunk.get("error").is_some_and(is_reportable_error);
+                        if event_name.as_deref() == Some("error") || has_reportable_error {
                             let (message, error_type) = extract_chat_sse_error(&chunk);
                             yield Ok(state.failed_event(message, error_type));
                             stream_failed = true;
@@ -998,17 +1006,7 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
 
 fn extract_chat_sse_error(value: &Value) -> (String, Option<String>) {
     let error = value.get("error").unwrap_or(value);
-    let message = error
-        .as_str()
-        .map(ToString::to_string)
-        .or_else(|| {
-            error
-                .get("message")
-                .or_else(|| error.get("detail"))
-                .and_then(|v| v.as_str())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| error.to_string());
+    let message = error_event_message(error).unwrap_or_else(|| error.to_string());
     let error_type = error
         .get("type")
         .or_else(|| error.get("code"))
@@ -1066,7 +1064,7 @@ mod tests {
         let output = collect(vec![
             "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need context. \"}}]}\n\n",
             "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"reasoning\":\"Now answer. \"}}]}\n\n",
-            "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10,\"completion_tokens_details\":{\"reasoning_tokens\":3}}}\n\n",
+            "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"content\":\"Done\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":6,\"total_tokens\":10,\"reasoning_tokens\":3}}\n\n",
             "data: [DONE]\n\n",
         ])
         .await;
@@ -1340,5 +1338,22 @@ mod tests {
         assert!(output.contains("quota exceeded"));
         assert!(output.contains("rate_limit_exceeded"));
         assert!(!output.contains("event: response.completed"));
+    }
+
+    #[tokio::test]
+    async fn normalized_error_placeholders_do_not_fail_responses_streams() {
+        let upstream = stream::iter(vec![Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b": nexus-boundary-buffered\n\ndata: {\"error\":{},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        ))]);
+        let normalized = super::super::reasoning_chat::normalize_chat_sse(upstream, true);
+        let converted = create_responses_sse_stream_from_chat(normalized);
+        let output = converted
+            .map(|item| String::from_utf8_lossy(&item.unwrap()).into_owned())
+            .collect::<String>()
+            .await;
+        assert!(output.starts_with(": nexus-boundary-buffered\n\n"));
+        assert!(!output.contains("event: response.failed"), "{output}");
+        assert!(output.contains("event: response.completed"), "{output}");
+        assert!(output.contains("\"text\":\"ok\""), "{output}");
     }
 }

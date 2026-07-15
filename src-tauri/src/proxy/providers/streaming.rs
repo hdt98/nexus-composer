@@ -2,7 +2,7 @@
 //!
 //! 实现 OpenAI SSE → Anthropic SSE 格式转换
 
-use crate::proxy::sse::{strip_sse_field, take_sse_block};
+use crate::proxy::sse::{is_sse_comment_block, strip_sse_field, take_sse_block};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -143,9 +143,16 @@ fn build_message_delta_event(stop_reason: Option<String>, usage_json: Option<Val
     })
 }
 
-/// 创建 Anthropic SSE 流
+#[allow(dead_code)] // Backward-compatible entry point for the public provider module.
 pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_anthropic_sse_stream_with_thinking(stream, true)
+}
+
+pub fn create_anthropic_sse_stream_with_thinking<E: std::error::Error + Send + 'static>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    emit_thinking: bool,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
@@ -178,6 +185,10 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
 
                     while let Some(line) = take_sse_block(&mut buffer) {
                         if line.trim().is_empty() {
+                            continue;
+                        }
+                        if is_sse_comment_block(&line) {
+                            yield Ok(Bytes::from(format!("{line}\n\n")));
                             continue;
                         }
 
@@ -266,45 +277,47 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
 
                                         // 处理 reasoning（thinking）
                                         if let Some(reasoning) = &choice.delta.reasoning {
-                                            if current_non_tool_block_type != Some("thinking") {
-                                                if let Some(index) = current_non_tool_block_index.take() {
+                                            if emit_thinking {
+                                                if current_non_tool_block_type != Some("thinking") {
+                                                    if let Some(index) = current_non_tool_block_index.take() {
+                                                        let event = json!({
+                                                            "type": "content_block_stop",
+                                                            "index": index
+                                                        });
+                                                        let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                            serde_json::to_string(&event).unwrap_or_default());
+                                                        yield Ok(Bytes::from(sse_data));
+                                                    }
+                                                    let index = next_content_index;
+                                                    next_content_index += 1;
                                                     let event = json!({
-                                                        "type": "content_block_stop",
-                                                        "index": index
+                                                        "type": "content_block_start",
+                                                        "index": index,
+                                                        "content_block": {
+                                                            "type": "thinking",
+                                                            "thinking": ""
+                                                        }
                                                     });
-                                                    let sse_data = format!("event: content_block_stop\ndata: {}\n\n",
+                                                    let sse_data = format!("event: content_block_start\ndata: {}\n\n",
+                                                        serde_json::to_string(&event).unwrap_or_default());
+                                                    yield Ok(Bytes::from(sse_data));
+                                                    current_non_tool_block_type = Some("thinking");
+                                                    current_non_tool_block_index = Some(index);
+                                                }
+
+                                                if let Some(index) = current_non_tool_block_index {
+                                                    let event = json!({
+                                                        "type": "content_block_delta",
+                                                        "index": index,
+                                                        "delta": {
+                                                            "type": "thinking_delta",
+                                                            "thinking": reasoning
+                                                        }
+                                                    });
+                                                    let sse_data = format!("event: content_block_delta\ndata: {}\n\n",
                                                         serde_json::to_string(&event).unwrap_or_default());
                                                     yield Ok(Bytes::from(sse_data));
                                                 }
-                                                let index = next_content_index;
-                                                next_content_index += 1;
-                                                let event = json!({
-                                                    "type": "content_block_start",
-                                                    "index": index,
-                                                    "content_block": {
-                                                        "type": "thinking",
-                                                        "thinking": ""
-                                                    }
-                                                });
-                                                let sse_data = format!("event: content_block_start\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
-                                                current_non_tool_block_type = Some("thinking");
-                                                current_non_tool_block_index = Some(index);
-                                            }
-
-                                            if let Some(index) = current_non_tool_block_index {
-                                                let event = json!({
-                                                    "type": "content_block_delta",
-                                                    "index": index,
-                                                    "delta": {
-                                                        "type": "thinking_delta",
-                                                        "thinking": reasoning
-                                                    }
-                                                });
-                                                let sse_data = format!("event: content_block_delta\ndata: {}\n\n",
-                                                    serde_json::to_string(&event).unwrap_or_default());
-                                                yield Ok(Bytes::from(sse_data));
                                             }
                                         }
 
@@ -709,10 +722,17 @@ mod tests {
     use std::collections::HashMap;
 
     async fn collect_anthropic_events(input: &str) -> Vec<Value> {
+        collect_anthropic_events_with_thinking(input, true).await
+    }
+
+    async fn collect_anthropic_events_with_thinking(
+        input: &str,
+        emit_thinking: bool,
+    ) -> Vec<Value> {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_thinking(upstream, emit_thinking);
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
             .into_iter()
@@ -728,6 +748,35 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn anthropic_thinking_visibility_follows_request() {
+        let input = concat!(
+            "data: {\"id\":\"chatcmpl_title\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Choose a short title.\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_title\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"content\":\"<title>GLM benchmark</title>\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":4}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        for emit in [false, true] {
+            let events = collect_anthropic_events_with_thinking(input, emit).await;
+            let has_thinking = events.iter().any(|event| {
+                event
+                    .pointer("/content_block/type")
+                    .and_then(|v| v.as_str())
+                    == Some("thinking")
+            });
+            assert_eq!(has_thinking, emit, "events: {events:#?}");
+            assert_eq!(
+                events
+                    .iter()
+                    .any(|event| event.pointer("/delta/thinking").is_some()),
+                emit
+            );
+            assert!(events.iter().any(|event| {
+                event.pointer("/delta/text").and_then(|v| v.as_str())
+                    == Some("<title>GLM benchmark</title>")
+            }));
+        }
     }
 
     fn event_type(event: &Value) -> Option<&str> {
@@ -760,7 +809,7 @@ mod tests {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
         let chunks: Vec<_> = converted.collect().await;
 
         let merged = chunks
@@ -850,7 +899,7 @@ mod tests {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
             .into_iter()
@@ -932,7 +981,7 @@ mod tests {
             Ok::<_, std::io::Error>(chunk1),
             Ok::<_, std::io::Error>(chunk2),
         ]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
         let chunks: Vec<_> = converted.collect().await;
 
         let merged = chunks
@@ -964,7 +1013,7 @@ mod tests {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
         let chunks: Vec<_> = converted.collect().await;
 
         let merged = chunks
@@ -1051,6 +1100,52 @@ mod tests {
                 .pointer("/usage/cache_read_input_tokens")
                 .and_then(|v| v.as_u64()),
             Some(100)
+        );
+    }
+
+    #[tokio::test]
+    async fn boundary_normalizer_preserves_one_terminal_and_final_usage() {
+        let upstream = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b": nexus-boundary-buffered\n\n",
+            )),
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"data: {\"id\":\"chatcmpl_boundary\",\"model\":\"glm-5.2\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":7,\"prompt_tokens_details\":{\"cached_tokens\":20}}}\n\n",
+            )),
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+        ]);
+        let normalized =
+            crate::proxy::providers::reasoning_chat::normalize_chat_sse(upstream, true);
+        let merged = create_anthropic_sse_stream_with_thinking(normalized, true)
+            .map(|item| String::from_utf8_lossy(item.unwrap().as_ref()).to_string())
+            .collect::<String>()
+            .await;
+        assert!(merged.contains(": nexus-boundary-buffered"));
+        let events = merged
+            .split("\n\n")
+            .filter_map(|block| {
+                block
+                    .lines()
+                    .find_map(|line| strip_sse_field(line, "data"))
+                    .and_then(|data| serde_json::from_str::<Value>(data).ok())
+            })
+            .collect::<Vec<_>>();
+        let deltas = events
+            .iter()
+            .filter(|event| event_type(event) == Some("message_delta"))
+            .collect::<Vec<_>>();
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0]["usage"]["input_tokens"], 100);
+        assert_eq!(deltas[0]["usage"]["output_tokens"], 7);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event_type(event) == Some("message_stop"))
+                .count(),
+            1
         );
     }
 
@@ -1203,7 +1298,7 @@ mod tests {
         let upstream = stream::iter(vec![Err::<Bytes, _>(std::io::Error::other(
             "upstream disconnected",
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        let converted = create_anthropic_sse_stream_with_thinking(upstream, true);
         let chunks: Vec<_> = converted.collect().await;
 
         let merged = chunks
