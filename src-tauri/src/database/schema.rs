@@ -198,6 +198,11 @@ impl Database {
             data_source TEXT NOT NULL DEFAULT 'proxy'
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
+        // Repair databases created by a prerelease v12 build before request
+        // correlation was added. Their version is already 12, so the normal
+        // v11 -> v12 migration does not run.
+        Self::add_column_if_missing(conn, "proxy_request_logs", "correlation_id", "TEXT")?;
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
         conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_created_at ON proxy_request_logs(created_at)", [])
