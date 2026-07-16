@@ -1,10 +1,10 @@
 [package]
 name = "nexus-composer"
 version = "3.16.5"
-description = "Nexus Composer - connect Codex and Claude Code to GLM-5.2 SGLang"
+description = "Model endpoint management and routing for coding assistants"
 authors = ["Jason Young"]
 license = "MIT"
-repository = "https://github.com/farion1231/cc-switch"
+repository = "https://github.com/hdt98/nexus-composer"
 edition = "2021"
 rust-version = "1.85.0"
 

@@ -1176,7 +1176,7 @@ function App() {
               <div className="flex items-center gap-2">
                 <div className="relative inline-flex items-center">
                   <a
-                    href="https://github.com/farion1231/cc-switch"
+                    href="https://github.com/hdt98/nexus-composer"
                     target="_blank"
                     rel="noreferrer"
                     className={cn(
