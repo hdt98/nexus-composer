@@ -55,7 +55,8 @@
       "personality_friendly": "",
       "personality_pragmatic": ""
     },
-    "approvals": null
+    "approvals": null,
+    "auto_review": null
   },
   "include_skills_usage_instructions": false,
   "supports_reasoning_summaries": true,
