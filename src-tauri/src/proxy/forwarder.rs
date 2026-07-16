@@ -1356,6 +1356,8 @@ impl RequestForwarder {
         // 转换请求体（如果需要）
         let mut request_body = if codex_responses_to_chat {
             let mut mapped_body = mapped_body;
+            let preserve_reasoning_history =
+                super::providers::chat_reasoning::enabled_for_attempt(provider, &mapped_body);
             let restored = self
                 .codex_chat_history
                 .enrich_request(&mut mapped_body)
@@ -1368,9 +1370,10 @@ impl RequestForwarder {
             super::providers::apply_codex_chat_upstream_model(provider, &mut mapped_body);
             let reasoning_config =
                 super::providers::resolve_codex_chat_reasoning_config(provider, &mapped_body);
-            super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning(
+            super::providers::transform_codex_chat::responses_to_chat_completions_with_reasoning_history(
                 mapped_body,
                 reasoning_config.as_ref(),
+                preserve_reasoning_history,
             )?
         } else if needs_transform {
             if adapter.name() == "Claude" {

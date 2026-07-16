@@ -109,7 +109,7 @@ impl ChatToResponsesState {
         }
     }
 
-    fn handle_chat_chunk(&mut self, chunk: &Value) -> Vec<Bytes> {
+    fn handle_chat_chunk(&mut self, chunk: &Value, normalized: bool) -> Vec<Bytes> {
         let mut events = Vec::new();
 
         if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
@@ -146,7 +146,11 @@ impl ChatToResponsesState {
 
             if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
                 if !content.is_empty() {
-                    events.extend(self.push_content_delta(content));
+                    events.extend(if normalized {
+                        self.push_text_delta(content)
+                    } else {
+                        self.push_content_delta(content)
+                    });
                 }
             }
 
@@ -906,6 +910,16 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
     tool_context: CodexToolContext,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_responses_sse_stream_from_chat_with_mode(stream, tool_context, false)
+}
+
+pub(crate) fn create_responses_sse_stream_from_chat_with_mode<
+    E: std::error::Error + Send + 'static,
+>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    tool_context: CodexToolContext,
+    normalized: bool,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
@@ -940,6 +954,11 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                             continue;
                         }
 
+                        if normalized && event_name.as_deref() == Some("nexus.keepalive") {
+                            yield Ok(sse_event("response.metadata", json!({"type": "response.metadata"})));
+                            continue;
+                        }
+
                         let data = data_parts.join("\n");
                         if data.trim() == "[DONE]" {
                             for event in state.finalize() {
@@ -961,7 +980,7 @@ pub fn create_responses_sse_stream_from_chat_with_context<E: std::error::Error +
                             break;
                         }
 
-                        for event in state.handle_chat_chunk(&chunk) {
+                        for event in state.handle_chat_chunk(&chunk, normalized) {
                             yield Ok(event);
                         }
                     }
@@ -1043,6 +1062,95 @@ mod tests {
         let converted = create_responses_sse_stream_from_chat_with_context(upstream, tool_context);
         let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
         String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    async fn collect_strict(input: &str) -> String {
+        let upstream = stream::iter([Ok::<_, std::io::Error>(Bytes::copy_from_slice(
+            input.as_bytes(),
+        ))]);
+        let normalized = super::super::chat_reasoning::normalize_sse_stream(upstream, true, true);
+        let converted = create_responses_sse_stream_from_chat_with_mode(
+            normalized,
+            CodexToolContext::default(),
+            true,
+        );
+        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
+        String::from_utf8(bytes.concat()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn normalized_keepalive_becomes_metadata_without_output() {
+        let upstream = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
+            concat!(
+                "event: nexus.keepalive\ndata: {}\n\n",
+                "data: {\"id\":\"chatcmpl_keepalive\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            )
+            .as_bytes(),
+        ))]);
+        let converted = create_responses_sse_stream_from_chat_with_mode(
+            upstream,
+            CodexToolContext::default(),
+            true,
+        );
+        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
+        let output = String::from_utf8(bytes.concat()).unwrap();
+
+        assert_eq!(output.matches("event: response.metadata").count(), 1);
+        assert!(output.contains("data: {\"type\":\"response.metadata\"}"));
+        assert_eq!(output.matches("event: response.completed").count(), 1);
+        assert!(
+            output.find("event: response.metadata").unwrap()
+                < output.find("event: response.completed").unwrap()
+        );
+        assert!(!output.contains("event: response.failed"));
+        assert!(!output.contains("response.output_text"));
+        assert!(!output.contains("response.reasoning"));
+    }
+
+    #[tokio::test]
+    async fn strict_path_splits_reasoning() {
+        let output = collect_strict("data: {\"choices\":[{\"delta\":{\"content\":\"plan</think>answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").await;
+        assert!(output.contains("response.reasoning_summary_text.delta"));
+        assert!(output.contains("\"delta\":\"answer\""));
+        assert!(!output.contains("</think>"));
+
+        for error in ["{}", "false", r#"{"message":"","code":"0"}"#] {
+            let input = format!("\u{feff}data: {{\"error\":{error},\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+            let output = collect_strict(&input).await;
+            assert!(output.contains("event: response.completed"), "{output}");
+            assert!(!output.contains("event: response.failed"), "{output}");
+        }
+
+        for (input, code, leaked) in [
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"broken\\\":\"}}]}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\" leaked tail\"},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "upstream_tool_protocol_error",
+                "leaked tail",
+            ),
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n"
+                ),
+                "stream_protocol_error",
+                "late",
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "upstream_tool_protocol_error",
+                "not-present",
+            ),
+        ] {
+            let output = collect_strict(input).await;
+            assert!(output.contains("event: response.failed"));
+            assert!(output.contains(&format!("\"type\":\"{code}\"")));
+            assert!(!output.contains("event: response.completed"));
+            assert!(!output.contains(leaked));
+        }
     }
 
     #[tokio::test]

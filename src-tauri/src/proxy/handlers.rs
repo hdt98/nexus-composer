@@ -17,13 +17,18 @@ use super::{
     },
     handler_context::RequestContext,
     providers::{
+        chat_reasoning::{
+            enabled_for_attempt, enabled_for_request, error_event_message, normalize_first_choice,
+            normalize_sse_response, normalize_sse_stream, ProtocolError,
+        },
         codex_chat_common::extract_reasoning_field_text,
-        codex_chat_history::record_responses_sse_stream, get_adapter, get_claude_api_format,
-        streaming::create_anthropic_sse_stream,
-        streaming_codex_chat::create_responses_sse_stream_from_chat_with_context,
+        codex_chat_history::record_responses_sse_stream,
+        get_adapter, get_claude_api_format,
+        streaming::{create_anthropic_sse_stream, create_anthropic_sse_stream_with_mode},
+        streaming_codex_chat::create_responses_sse_stream_from_chat_with_mode,
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
-        streaming_responses::create_anthropic_sse_stream_from_responses, transform,
-        transform_codex_chat, transform_gemini, transform_responses,
+        streaming_responses::create_anthropic_sse_stream_from_responses,
+        transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
         create_logged_passthrough_stream, process_response, read_decoded_body,
@@ -274,9 +279,31 @@ fn validate_claude_desktop_gateway_auth(
     Ok(())
 }
 
+fn chat_protocol_error(error: ProtocolError, anthropic: bool) -> ProxyError {
+    let detail = json!({"type": error.code(), "code": error.code(),
+        "message": error.to_string(), "param": null});
+    let body = if anthropic {
+        json!({"type": "error", "error": detail})
+    } else {
+        json!({"error": detail})
+    };
+    ProxyError::UpstreamError {
+        status: StatusCode::BAD_GATEWAY.as_u16(),
+        body: Some(body.to_string()),
+    }
+}
+
 /// Claude 格式转换处理（独有逻辑）
 ///
 /// 支持 OpenAI Chat Completions 和 Responses API 两种格式的转换
+fn should_emit_anthropic_reasoning(body: &Value, normalize_chat: bool) -> bool {
+    !normalize_chat
+        || matches!(
+            body.pointer("/thinking/type").and_then(Value::as_str),
+            Some("enabled" | "adaptive")
+        ) && body.pointer("/thinking/display").and_then(Value::as_str) != Some("omitted")
+}
+
 async fn handle_claude_transform(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
@@ -286,6 +313,9 @@ async fn handle_claude_transform(
     api_format: &str,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> Result<axum::response::Response, ProxyError> {
+    let normalize = enabled_for_attempt(&ctx.provider, original_body);
+    let normalize_chat = normalize && api_format == "openai_chat";
+    let emit_reasoning = should_emit_anthropic_reasoning(original_body, normalize_chat);
     let status = response.status();
     let is_codex_oauth = ctx
         .provider
@@ -315,7 +345,7 @@ async fn handle_claude_transform(
 
     if use_streaming {
         // 根据 api_format 选择流式转换器
-        let stream = response.bytes_stream();
+        let stream = normalize_sse_stream(response.bytes_stream(), normalize_chat, emit_reasoning);
         let sse_stream: Box<
             dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
         > = if api_format == "openai_responses" {
@@ -327,6 +357,10 @@ async fn handle_claude_transform(
                 Some(ctx.provider.id.clone()),
                 Some(ctx.session_id.clone()),
                 tool_schema_hints.clone(),
+            )))
+        } else if normalize_chat {
+            Box::new(Box::pin(create_anthropic_sse_stream_with_mode(
+                stream, true,
             )))
         } else {
             Box::new(Box::pin(create_anthropic_sse_stream(stream)))
@@ -434,6 +468,9 @@ async fn handle_claude_transform(
         responses_sse_to_response_value(&body_str)?
     } else {
         match serde_json::from_slice(&body_bytes) {
+            Ok(value) if normalize && api_format == "openai_chat" => {
+                normalize_chat_value(value, true)?
+            }
             Ok(value) => value,
             // 兜底嗅探（#2234）：部分网关对 stream:false 强制返回 SSE 体，却把
             // Content-Type 标成 application/json 等，is_sse() 的 header 检查失效。
@@ -443,18 +480,21 @@ async fn handle_claude_transform(
                 log::warn!(
                     "[Claude] 上游对非流请求返回未标记的 SSE 体（api_format={api_format}），按 SSE 聚合兜底"
                 );
-                let aggregated = if api_format == "openai_responses" {
-                    responses_sse_to_response_value(&body_str)
-                } else {
-                    chat_sse_to_response_value(&body_str)
-                };
                 // 聚合也失败时：保留全量 body 服务端日志，并给客户端错误附带同款
                 // 现场诊断（content-type/body 摘要），否则命中嗅探臂的用户只拿到
                 // 裸聚合错误、丢失非嗅探臂已有的诊断增强（C7）
-                aggregated.map_err(|e| {
-                    log::error!("[Claude] SSE 聚合兜底失败: {e}, body: {body_str}");
-                    aggregate_fallback_error(e, &response_headers, &body_str)
-                })?
+                let value = if api_format == "openai_chat" {
+                    normalize_chat_fallback(&body_str, &response_headers, normalize, true)
+                } else {
+                    responses_sse_to_response_value(&body_str).map_err(|error| {
+                        aggregate_fallback_error(error, &response_headers, &body_str)
+                    })
+                }
+                .map_err(|error| {
+                    log::error!("[Claude] SSE fallback failed: {error}, body: {body_str}");
+                    error
+                })?;
+                value
             }
             Err(e) => {
                 log::error!("[Claude] 解析上游响应失败: {e}, body: {body_str}");
@@ -467,7 +507,6 @@ async fn handle_claude_transform(
             }
         }
     };
-
     // 根据 api_format 选择非流式转换器
     let anthropic_response = if api_format == "openai_responses" {
         transform_responses::responses_to_anthropic(upstream_response)
@@ -480,7 +519,7 @@ async fn handle_claude_transform(
             tool_schema_hints.as_ref(),
         )
     } else {
-        transform::openai_to_anthropic(upstream_response)
+        transform::openai_to_anthropic_with_thinking(upstream_response, emit_reasoning)
     }
     .map_err(|e| {
         log::error!("[Claude] 转换响应失败: {e}");
@@ -710,6 +749,8 @@ pub async fn handle_responses(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let request_enables_reasoning =
+        body.pointer("/chat_template_kwargs/enable_thinking") == Some(&Value::Bool(true));
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -737,6 +778,7 @@ pub async fn handle_responses(
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
+    let normalize = enabled_for_request(&ctx.provider, request_enables_reasoning);
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
@@ -747,6 +789,7 @@ pub async fn handle_responses(
             is_stream,
             connection_guard,
             codex_tool_context,
+            normalize,
         )
         .await;
     }
@@ -789,6 +832,8 @@ pub async fn handle_responses_compact(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let codex_tool_context = transform_codex_chat::build_codex_tool_context_from_request(&body);
+    let request_enables_reasoning =
+        body.pointer("/chat_template_kwargs/enable_thinking") == Some(&Value::Bool(true));
 
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
@@ -816,6 +861,7 @@ pub async fn handle_responses_compact(
     let connection_guard = result.connection_guard.take();
     ctx.outbound_model = result.outbound_model.take();
     ctx.provider = result.provider;
+    let normalize = enabled_for_request(&ctx.provider, request_enables_reasoning);
     let response = result.response;
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
@@ -826,6 +872,7 @@ pub async fn handle_responses_compact(
             is_stream,
             connection_guard,
             codex_tool_context,
+            normalize,
         )
         .await;
     }
@@ -847,6 +894,7 @@ async fn handle_codex_chat_to_responses_transform(
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     tool_context: transform_codex_chat::CodexToolContext,
+    normalize: bool,
 ) -> Result<axum::response::Response, ProxyError> {
     let status = response.status();
 
@@ -858,8 +906,9 @@ async fn handle_codex_chat_to_responses_transform(
     }
 
     if is_stream || response.is_sse() {
-        let stream = response.bytes_stream();
-        let sse_stream = create_responses_sse_stream_from_chat_with_context(stream, tool_context);
+        let stream = normalize_sse_stream(response.bytes_stream(), normalize, true);
+        let sse_stream =
+            create_responses_sse_stream_from_chat_with_mode(stream, tool_context, normalize);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
 
         let usage_collector = if usage_logging_enabled(state) {
@@ -959,16 +1008,21 @@ async fn handle_codex_chat_to_responses_transform(
         read_decoded_body(response, ctx.tag, body_timeout).await?;
     let body_str = String::from_utf8_lossy(&body_bytes);
     let chat_response: Value = match serde_json::from_slice(&body_bytes) {
+        Ok(value) if normalize => normalize_chat_value(value, false)?,
         Ok(value) => value,
         // 与 Claude 侧 handle_claude_transform 对称的兜底嗅探（#2234）：
         // 上游对 stream:false 返回未标记 Content-Type 的 SSE 体时按 SSE 聚合。
         Err(_) if body_looks_like_sse(&body_str) => {
             log::warn!("[Codex] 上游对非流请求返回未标记的 SSE 体，按 Chat SSE 聚合兜底");
             // 聚合也失败时：保留全量 body 服务端日志，并给客户端错误附带现场诊断（C7）
-            chat_sse_to_response_value(&body_str).map_err(|e| {
-                log::error!("[Codex] SSE 聚合兜底失败: {e}, body: {body_str}");
-                aggregate_fallback_error(e, &response_headers, &body_str)
-            })?
+            let value = normalize_chat_fallback(&body_str, &response_headers, normalize, false)
+                .map_err(|error| {
+                    log::error!(
+                        "[Codex] SSE fallback aggregation failed: {error}, body: {body_str}"
+                    );
+                    error
+                })?;
+            value
         }
         Err(e) => {
             log::error!("[Codex] 解析 Chat 上游响应失败: {e}, body: {body_str}");
@@ -1551,6 +1605,29 @@ fn aggregate_fallback_error(
     ProxyError::TransformError(format!("{base} {}", body_diagnostics_suffix(headers, body)))
 }
 
+fn normalize_chat_fallback(
+    body: &str,
+    headers: &axum::http::HeaderMap,
+    normalize: bool,
+    anthropic: bool,
+) -> Result<Value, ProxyError> {
+    let value = chat_sse_to_response_value(body)
+        .map_err(|error| aggregate_fallback_error(error, headers, body))?;
+    if normalize {
+        let mut value = value;
+        normalize_sse_response(body, &mut value)
+            .map_err(|error| chat_protocol_error(error, anthropic))?;
+        Ok(value)
+    } else {
+        Ok(value)
+    }
+}
+
+fn normalize_chat_value(mut value: Value, anthropic: bool) -> Result<Value, ProxyError> {
+    normalize_first_choice(&mut value).map_err(|error| chat_protocol_error(error, anthropic))?;
+    Ok(value)
+}
+
 /// 现场诊断后缀：content-type、content-encoding 与 body 前 120 字符摘要。
 fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> String {
     let header_str = |name: &str| {
@@ -1565,19 +1642,6 @@ fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> Strin
         header_str("content-encoding"),
         body_snippet(body, 120),
     )
-}
-
-/// 从 SSE chunk 的 error 字段提取可报告的错误消息。占位形状（空对象、空消息、
-/// false、空字符串等，常见于 OpenAI 兼容网关每 chunk 附带的 error 字段）返回
-/// None——不应据此判定整条流失败（否则会把成功流误杀成 422，C12/C2234 目标人群）。
-fn error_event_message(error: &Value) -> Option<String> {
-    if let Some(msg) = error.get("message").and_then(|m| m.as_str()) {
-        return (!msg.is_empty()).then(|| msg.to_string());
-    }
-    if let Some(s) = error.as_str() {
-        return (!s.is_empty()).then(|| s.to_string());
-    }
-    None
 }
 
 /// 取 body 前 `max_chars` 个字符的单行摘要：\r 丢弃、\n 折叠为字面 \n、
@@ -1601,11 +1665,16 @@ fn body_snippet(body: &str, max_chars: usize) -> String {
 /// 解析单个 SSE 块的 event 名与 data 负载（多行 data 按规范以 \n 连接）。
 /// 行首允许前导空白后再匹配字段名——与 body_looks_like_sse 的 trim 宽容度对齐，
 /// 否则缩进的 `  data:` 行被嗅探接受却在此静默丢失（C4）。返回 None 表示无 data 行。
-fn sse_block_parts(block: &str) -> Option<(String, String)> {
+pub(crate) fn sse_block_parts(block: &str, strip_bom: bool) -> Option<(String, String)> {
     let mut event_name = String::new();
     let mut data_lines: Vec<&str> = Vec::new();
     for line in block.lines() {
         let line = line.trim_start();
+        let line = if strip_bom {
+            line.strip_prefix('\u{feff}').unwrap_or(line).trim_start()
+        } else {
+            line
+        };
         if let Some(evt) = strip_sse_field(line, "event") {
             event_name = evt.trim().to_string();
         } else if let Some(d) = strip_sse_field(line, "data") {
@@ -1627,6 +1696,16 @@ fn sse_block_parts(block: &str) -> Option<(String, String)> {
 /// finish_reason 首个非 null 即锁定（kimi-k2.6 会在 tool_use 后再发带
 /// finish_reason 的尾块，见 streaming.rs）。
 fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
+    chat_sse_to_response_value_with_mode(body, false)
+}
+
+pub(crate) fn chat_sse_to_response_value_for_normalization(
+    body: &str,
+) -> Result<Value, ProxyError> {
+    chat_sse_to_response_value_with_mode(body, true)
+}
+
+fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<Value, ProxyError> {
     // 剥 BOM：嗅探器接受 BOM 开头，但 strip_sse_field 按行首精确匹配，
     // 不剥会让首个 data 行静默丢失
     let mut buffer = body.trim_start_matches('\u{feff}').to_string();
@@ -1641,6 +1720,7 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     // 进程（C1）。BTreeMap 既免去无界分配，又天然保持 index 有序输出。
     let mut tool_calls: std::collections::BTreeMap<usize, Value> =
         std::collections::BTreeMap::new();
+    let mut legacy_calls = std::collections::BTreeMap::new();
     let mut finish_reason = Value::Null;
     let mut usage = Value::Null;
     let mut saw_choice = false;
@@ -1709,13 +1789,17 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
                 usage = u.clone();
             }
 
-            // 代理上下文只存在单选择（n=1），仅聚合 index==0 的 choice
+            // Fallback mode selects index 0; strict normalization preserves first-choice behavior.
             let Some(choice) = chunk
                 .get("choices")
                 .and_then(|c| c.as_array())
                 .and_then(|arr| {
-                    arr.iter()
-                        .find(|ch| ch.get("index").and_then(|i| i.as_u64()).unwrap_or(0) == 0)
+                    if normalize {
+                        arr.first()
+                    } else {
+                        arr.iter()
+                            .find(|ch| ch.get("index").and_then(|i| i.as_u64()).unwrap_or(0) == 0)
+                    }
                 })
             else {
                 return Ok(());
@@ -1737,19 +1821,30 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
             // 包成单事件（message 而非 delta），有的还附带空 delta:{}。delta 为空对象
             // 且存在 message 时改用 message 快照（覆盖此前累计的增量，防混合形态双计），
             // 否则内容被静默丢弃、完成性守卫又被其 finish_reason 击穿 → 空内容假成功（C3）。
-            let delta_nonempty = choice
-                .get("delta")
-                .and_then(|d| d.as_object())
-                .is_some_and(|o| !o.is_empty());
-            let (payload, is_full_message) = if delta_nonempty {
-                (choice.get("delta").unwrap(), false)
-            } else if let Some(message) = choice.get("message") {
-                (message, true)
-            } else if let Some(delta) = choice.get("delta") {
-                // 空 delta 且无 message：正常的纯 finish_reason 收尾块
-                (delta, false)
+            let (payload, is_full_message) = if normalize {
+                let payload = choice
+                    .get("delta")
+                    .filter(|value| value.is_object())
+                    .or_else(|| choice.get("message").filter(|value| value.is_object()));
+                let Some(payload) = payload else {
+                    return Ok(());
+                };
+                (payload, false)
             } else {
-                return Ok(());
+                let delta_nonempty = choice
+                    .get("delta")
+                    .and_then(|d| d.as_object())
+                    .is_some_and(|o| !o.is_empty());
+                if delta_nonempty {
+                    (choice.get("delta").unwrap(), false)
+                } else if let Some(message) = choice.get("message") {
+                    (message, true)
+                } else if let Some(delta) = choice.get("delta") {
+                    // An empty delta without a message is a normal finish_reason-only chunk.
+                    (delta, false)
+                } else {
+                    return Ok(());
+                }
             };
             if is_full_message {
                 content.clear();
@@ -1758,7 +1853,7 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
             }
             match payload.get("content") {
                 Some(Value::String(text)) => content.push_str(text),
-                Some(Value::Array(parts)) => {
+                Some(Value::Array(parts)) if !normalize => {
                     for part in parts {
                         if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
                             content.push_str(text);
@@ -1771,8 +1866,10 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
             }
             // refusal：OpenAI 官方拒绝形态（delta.refusal / message.refusal 字符串）。
             // 两个下游转换器都把 refusal 当可见内容，漏读会让拒绝响应变空消息假成功（C15）。
-            if let Some(refusal) = payload.get("refusal").and_then(|r| r.as_str()) {
-                content.push_str(refusal);
+            if !normalize {
+                if let Some(refusal) = payload.get("refusal").and_then(|r| r.as_str()) {
+                    content.push_str(refusal);
+                }
             }
             // reasoning 字段穷举提取直接复用 codex_chat_common（reasoning_content >
             // reasoning 字符串/对象 > reasoning_details），避免第三份手写实现漏档：
@@ -1780,11 +1877,16 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
             if let Some(text) = extract_reasoning_field_text(payload) {
                 reasoning_content.push_str(&text);
             }
-            if let Some(deltas) = payload.get("tool_calls").and_then(|t| t.as_array()) {
+            let modern_tools = payload.get("tool_calls").and_then(|t| t.as_array());
+            if let Some(deltas) = modern_tools {
                 for (pos, tc) in deltas.iter().enumerate() {
                     merge_tool_call_delta(&mut tool_calls, tc, pos);
                 }
-            } else if let Some(fc) = payload.get("function_call").filter(|v| !v.is_null()) {
+            }
+            let legacy = (normalize || modern_tools.is_none())
+                .then(|| payload.get("function_call").filter(|v| !v.is_null()))
+                .flatten();
+            if let Some(fc) = legacy {
                 // legacy function_call（2023 弃用但仍有中转回传）→ 当单个 tool_call。
                 // 两个下游转换器都支持 function_call，漏读会让 finish_reason
                 // "function_call"→stop_reason "tool_use" 却零工具块、卡死 agent 循环（C17）。
@@ -1794,19 +1896,23 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
                     "type": "function",
                     "function": fc,
                 });
-                merge_tool_call_delta(&mut tool_calls, &synthetic, 0);
+                if normalize {
+                    merge_tool_call_delta(&mut legacy_calls, &synthetic, 0);
+                } else {
+                    merge_tool_call_delta(&mut tool_calls, &synthetic, 0);
+                }
             }
             Ok(())
         };
 
     while let Some(block) = take_sse_block(&mut buffer) {
-        if let Some((event, data)) = sse_block_parts(&block) {
+        if let Some((event, data)) = sse_block_parts(&block, false) {
             process_event(&event, &data, true)?;
         }
     }
     // 最后一个事件后可能没有空行分隔（半截流/非规范上游）：残余 buffer 当最后一块
     // 处理，strict=false 容忍被掐断的尾块（C2）。
-    if let Some((event, data)) = sse_block_parts(&buffer) {
+    if let Some((event, data)) = sse_block_parts(&buffer, false) {
         process_event(&event, &data, false)?;
     }
 
@@ -1830,23 +1936,28 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     // tool_result 回程
     let tool_calls: Vec<Value> = tool_calls
         .into_iter()
-        .filter(|(_, tc)| {
-            tc["id"].as_str().is_some_and(|s| !s.is_empty())
-                || tc["function"]["name"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())
-                || tc["function"]["arguments"]
-                    .as_str()
-                    .is_some_and(|s| !s.is_empty())
-        })
-        .map(|(index, mut tc)| {
-            if tc["id"].as_str().is_none_or(str::is_empty) {
-                tc["id"] = json!(format!("tool_call_{index}"));
+        .filter_map(|(index, mut tool)| {
+            if normalize {
+                tool["index"] = json!(index);
+                if tool["id"].as_str().is_none_or(str::is_empty) {
+                    tool.as_object_mut()?.remove("id");
+                }
+            } else {
+                let function = &tool["function"];
+                let empty = [&tool["id"], &function["name"], &function["arguments"]]
+                    .into_iter()
+                    .all(|value| value.as_str().is_none_or(str::is_empty));
+                if empty {
+                    return None;
+                }
+                if tool["id"].as_str().is_none_or(str::is_empty) {
+                    tool["id"] = json!(format!("tool_call_{index}"));
+                }
+                if tool["function"]["name"].as_str().is_none_or(str::is_empty) {
+                    tool["function"]["name"] = json!("unknown_tool");
+                }
             }
-            if tc["function"]["name"].as_str().is_none_or(str::is_empty) {
-                tc["function"]["name"] = json!("unknown_tool");
-            }
-            tc
+            Some(tool)
         })
         .collect();
 
@@ -1858,6 +1969,14 @@ fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     }
     if !tool_calls.is_empty() {
         message.insert("tool_calls".to_string(), Value::Array(tool_calls));
+    }
+    if normalize {
+        if let Some(function) = legacy_calls
+            .remove(&0)
+            .and_then(|call| call.get("function").cloned())
+        {
+            message.insert("function_call".to_string(), function);
+        }
     }
 
     // 上游未回传有效 id 时合成 UUID：留 null/"" 会让下游 dedup_request_id 退化为
@@ -2044,11 +2163,73 @@ async fn log_usage(
 #[cfg(test)]
 mod tests {
     use super::{
-        body_looks_like_sse, body_snippet, chat_sse_to_response_value, codex_proxy_error_json,
-        responses_sse_to_response_value, should_use_claude_transform_streaming, transform,
+        body_looks_like_sse, body_snippet, chat_sse_to_response_value,
+        chat_sse_to_response_value_for_normalization, codex_proxy_error_json,
+        normalize_chat_fallback, normalize_chat_value, responses_sse_to_response_value,
+        should_emit_anthropic_reasoning, should_use_claude_transform_streaming, transform,
         upstream_body_parse_error,
     };
     use crate::proxy::ProxyError;
+
+    #[test]
+    fn anthropic_reasoning_visibility_honors_omitted_display() {
+        for (thinking, expected) in [
+            (serde_json::json!({}), false),
+            (serde_json::json!({"thinking": {"type": "enabled"}}), true),
+            (
+                serde_json::json!({
+                    "thinking": {"type": "adaptive", "display": "omitted"}
+                }),
+                false,
+            ),
+        ] {
+            assert_eq!(should_emit_anthropic_reasoning(&thinking, true), expected);
+            assert!(should_emit_anthropic_reasoning(&thinking, false));
+        }
+    }
+
+    const LATE_CHAT_SSE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"late\"},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n";
+
+    fn fallback_error(anthropic: bool) -> serde_json::Value {
+        let error = normalize_chat_fallback(
+            LATE_CHAT_SSE,
+            &axum::http::HeaderMap::new(),
+            true,
+            anthropic,
+        )
+        .unwrap_err();
+        let ProxyError::UpstreamError { status, body } = error else {
+            panic!("expected typed upstream error")
+        };
+        assert_eq!(status, 502);
+        serde_json::from_str(&body.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn fallback_maps_late_output_to_protocol_error() {
+        for anthropic in [true, false] {
+            assert_eq!(
+                fallback_error(anthropic)["error"]["code"],
+                "stream_protocol_error"
+            );
+        }
+    }
+
+    #[test]
+    fn nonstream_rejects_tool_finish_without_a_tool() {
+        for anthropic in [true, false] {
+            assert!(matches!(
+                normalize_chat_value(
+                    serde_json::json!({"choices": [{
+                        "message": {"content": null},
+                        "finish_reason": "tool_calls"
+                    }]}),
+                    anthropic,
+                ),
+                Err(ProxyError::UpstreamError { status: 502, .. })
+            ));
+        }
+    }
 
     #[test]
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {
@@ -2425,6 +2606,24 @@ data: [DONE]\n\n";
         let response = chat_sse_to_response_value(sse).unwrap();
         assert_eq!(response["choices"][0]["message"]["content"], "full answer");
         assert_eq!(response["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[test]
+    fn chat_sse_normalization_mode_preserves_strict_stream_selection() {
+        let empty_delta = "data: {\"choices\":[{\"delta\":{},\"message\":{\"content\":\"ignored\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let response = chat_sse_to_response_value_for_normalization(empty_delta).unwrap();
+        assert_eq!(response["choices"][0]["message"]["content"], "");
+
+        let snapshots = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n",
+            "data: {\"choices\":[{\"message\":{\"content\":\"b\"},\"finish_reason\":\"stop\"}]}\n\n"
+        );
+        let response = chat_sse_to_response_value_for_normalization(snapshots).unwrap();
+        assert_eq!(response["choices"][0]["message"]["content"], "ab");
+
+        let choices = "data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"first\"},\"finish_reason\":\"stop\"},{\"index\":0,\"delta\":{\"content\":\"second\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let response = chat_sse_to_response_value_for_normalization(choices).unwrap();
+        assert_eq!(response["choices"][0]["message"]["content"], "first");
     }
 
     #[test]
