@@ -169,6 +169,24 @@ fn remove_owned_reasoning(meta: &mut Map<String, Value>) {
     }
 }
 
+fn remove_codex_catalog_pointer(settings: &mut Value) -> Result<bool, AppError> {
+    let config = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::Message("Nexus Codex config is missing".into()))?;
+    let mut document = config
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid Nexus Codex config: {error}")))?;
+    let removed = document
+        .as_table_mut()
+        .remove("model_catalog_json")
+        .is_some();
+    if removed {
+        settings["config"] = json!(document.to_string());
+    }
+    Ok(removed)
+}
+
 fn remove_thinking(meta: &mut Map<String, Value>) {
     let Some(overrides) = meta
         .get_mut("localProxyRequestOverrides")
@@ -542,6 +560,7 @@ fn upgrade(app: &str, settings: &mut Value, meta: &mut Value) -> bool {
                 doc["model"] = value(MODEL);
                 doc["model_context_window"] = value(CONTEXT);
                 doc["model_auto_compact_token_limit"] = value(COMPACT);
+                doc.as_table_mut().remove("model_catalog_json");
                 doc.as_table_mut().remove("model_reasoning_effort");
                 doc["model_providers"][&active]["base_url"] = value(ENDPOINT);
                 doc["model_providers"][&active]["stream_idle_timeout_ms"] = value(STREAM_IDLE_MS);
@@ -622,9 +641,22 @@ impl Database {
             let app_type = app.parse::<AppType>()?;
             let leaked = scrub_credentials_if(&app_type, &mut settings, credential_predicate)?;
             let ownership = classify(&app, &name, &settings, &meta);
+            let catalog_pointer_removed = if ownership == Ownership::Current
+                && app == "codex"
+                && meta
+                    .get("managedNexusPresetVersion")
+                    .and_then(Value::as_u64)
+                    == Some(u64::from(VERSION))
+            {
+                remove_codex_catalog_pointer(&mut settings).map_err(|error| {
+                    AppError::Message(format!("Cannot clean {app} Nexus provider '{id}': {error}"))
+                })?
+            } else {
+                false
+            };
             match ownership {
                 Ownership::Current | Ownership::Unrelated => {
-                    if leaked {
+                    if leaked || catalog_pointer_removed {
                         tx.execute(
                             "UPDATE providers SET settings_config=?1 WHERE id=?2 AND app_type=?3",
                             params![settings.to_string(), id, app],
@@ -826,7 +858,7 @@ mod tests {
             json!({
                 "auth":{"OPENAI_API_KEY":"rotated-user-key"},
                 "config":format!(
-                    "model_provider='nexus'\nmodel='{MODEL}'\nmodel_context_window={CONTEXT}\nmodel_auto_compact_token_limit={COMPACT}\n[model_providers.nexus]\nbase_url='{ENDPOINT}'\nstream_idle_timeout_ms={STREAM_IDLE_MS}"
+                    "model_provider='nexus'\nmodel='{MODEL}'\nmodel_context_window={CONTEXT}\nmodel_auto_compact_token_limit={COMPACT}\nmodel_catalog_json='/Users/sonln4/.codex/glm-catalog.json'\n[model_providers.nexus]\nbase_url='{ENDPOINT}'\nstream_idle_timeout_ms={STREAM_IDLE_MS}"
                 ),
                 "modelCatalog":{"owner":"user","models":[
                     {"model":MODEL,"displayName":"GLM-5.2","contextWindow":CONTEXT,"inputModalities":["text"]},
@@ -914,6 +946,10 @@ mod tests {
             meta.pointer("/localProxyRequestOverrides/body/chat_template_kwargs/clear_thinking"),
             Some(&json!(false))
         );
+        assert!(!provider.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .contains("model_catalog_json"));
         let after = snapshot();
 
         for _ in 0..2 {
@@ -924,6 +960,50 @@ mod tests {
             );
             assert_eq!(snapshot(), after);
         }
+    }
+
+    #[test]
+    fn migration_cleans_current_managed_codex_catalog_pointer_only() {
+        let db = Database::memory().unwrap();
+        let settings = json!({
+            "config":format!(
+                "model_provider='nexus'\nmodel='{MODEL}'\nmodel_catalog_json='/Users/sonln4/.codex/glm-catalog.json'\n[model_providers.nexus]\nbase_url='{ENDPOINT}'"
+            ),
+            "modelCatalog":{"models":[{"model":MODEL,"inputModalities":["text"]}]}
+        });
+        save(
+            &db,
+            "codex",
+            "managed",
+            NAME,
+            settings.clone(),
+            json!({"providerType":"nexus","managedNexusPresetVersion":VERSION}),
+        );
+        save(&db, "codex", "user", "User GLM", settings, json!({}));
+
+        let outcome = db
+            .migrate_legacy_nexus_providers(None, None, Some("managed"))
+            .unwrap();
+        assert!(outcome.current_codex_changed);
+
+        let managed = db.get_all_providers("codex").unwrap()["managed"].clone();
+        let managed_config = managed.settings_config["config"].as_str().unwrap();
+        assert!(!managed_config.contains("model_catalog_json"));
+        let user = db.get_all_providers("codex").unwrap()["user"].clone();
+        assert!(user.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .contains("model_catalog_json='/Users/sonln4/.codex/glm-catalog.json'"));
+
+        assert_eq!(
+            db.migrate_legacy_nexus_providers(None, None, Some("managed"))
+                .unwrap(),
+            NexusMigrationOutcome::default()
+        );
+        assert_eq!(
+            db.get_all_providers("codex").unwrap()["managed"].settings_config["config"],
+            managed_config
+        );
     }
 
     #[test]
