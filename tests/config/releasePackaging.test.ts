@@ -12,6 +12,7 @@ const productDescription =
   "Model endpoint management and routing for coding assistants";
 
 const releaseWorkflow = read(".github/workflows/release.yml");
+const panicHook = read("src-tauri/src/panic_hook.rs");
 const cargoManifest = read("src-tauri/Cargo.toml");
 const packageManifest = JSON.parse(read("package.json")) as {
   description: string;
@@ -39,11 +40,6 @@ const flatpakFiles = [
 const repositoryLinkFiles = [
   releaseWorkflow,
   flatpakMetainfo,
-  read(".github/ISSUE_TEMPLATE/bug_report.yml"),
-  read(".github/ISSUE_TEMPLATE/config.yml"),
-  read(".github/ISSUE_TEMPLATE/doc_issue.yml"),
-  read(".github/ISSUE_TEMPLATE/feature_request.yml"),
-  read(".github/ISSUE_TEMPLATE/question.yml"),
   read("src/App.tsx"),
   read("src/components/DatabaseUpgrade.tsx"),
   read("src/components/settings/AboutSection.tsx"),
@@ -52,6 +48,11 @@ const repositoryLinkFiles = [
 ];
 
 describe("release packaging metadata", () => {
+  it("uses Nexus Composer in crash-log output", () => {
+    expect(panicHook).toContain("[Nexus Composer] Crash log saved");
+    expect(panicHook).not.toContain("[CC-Switch] Crash log saved");
+  });
+
   it("packages Nexus Composer artifacts with the configured executable", () => {
     const cargoPackageName = cargoManifest.match(
       /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m,
