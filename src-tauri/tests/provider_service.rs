@@ -1292,6 +1292,14 @@ wire_api = "responses"
     )
     .expect("seed Codex live backup");
 
+    let mut proxy_config = futures::executor::block_on(
+        state.db.get_proxy_config_for_app(AppType::Codex.as_str()),
+    )
+    .expect("read Codex proxy config");
+    proxy_config.enabled = true;
+    futures::executor::block_on(state.db.update_proxy_config_for_app(proxy_config))
+        .expect("mark Codex takeover enabled");
+
     assert!(
         !futures::executor::block_on(state.proxy_service.is_running()),
         "fixture keeps the proxy server stopped"
