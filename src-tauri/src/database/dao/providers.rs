@@ -197,6 +197,24 @@ fn merge_nexus_overrides(meta: &mut Value) -> Result<(), AppError> {
     Ok(())
 }
 
+fn remove_managed_codex_catalog_pointer(settings: &mut Value) -> Result<bool, AppError> {
+    let config = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::Message("Nexus Codex config is missing".into()))?;
+    let mut document = config
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid Nexus Codex config: {error}")))?;
+    let removed = document
+        .as_table_mut()
+        .remove("model_catalog_json")
+        .is_some();
+    if removed {
+        settings["config"] = json!(document.to_string());
+    }
+    Ok(removed)
+}
+
 fn upgrade_nexus_provider(
     app: &AppType,
     settings: &mut Value,
@@ -889,8 +907,14 @@ impl Database {
                 continue;
             }
             let scrubbed = scrub_shipped_credentials(app, &mut settings);
+            let catalog_pointer_removed = matches!(app, AppType::Codex)
+                && remove_managed_codex_catalog_pointer(&mut settings).map_err(|error| {
+                    AppError::Message(format!(
+                        "Cannot clean {app_name} Nexus provider '{id}': {error}"
+                    ))
+                })?;
             if version == Some(NEXUS_VERSION) {
-                if scrubbed {
+                if scrubbed || catalog_pointer_removed {
                     transaction.execute(
                         "UPDATE providers SET settings_config=?1 WHERE id=?2 AND app_type=?3",
                         params![settings.to_string(), id, app_name],
@@ -1052,7 +1076,9 @@ impl Database {
 
 #[cfg(test)]
 mod ensure_official_seed_tests {
-    use super::{scrub_credentials, NEXUS_MODEL, SHIPPED_KEY_FINGERPRINTS};
+    use super::{
+        scrub_credentials, NEXUS_MODEL, NEXUS_VERSION, SHIPPED_KEY_FINGERPRINTS,
+    };
     use crate::app_config::AppType;
     use crate::database::{Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
     use crate::provider::Provider;
@@ -1158,7 +1184,7 @@ mod ensure_official_seed_tests {
         });
         let codex_settings = json!({
             "auth":{"OPENAI_API_KEY":"rotated-user-key"},
-            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"),
+            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_catalog_json='/Users/sonln4/.codex/glm-catalog.json'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"),
             "modelCatalog":{"models":[
                 {"model":"glm-5.2","inputModalities":["text","image"]},
                 {"model":"user-model","inputModalities":["text"]}
@@ -1221,6 +1247,7 @@ mod ensure_official_seed_tests {
         assert_eq!(models[0]["inputModalities"], json!(["text"]));
         let config = codex.settings_config["config"].as_str().unwrap();
         assert!(config.contains("model_auto_compact_token_limit = 252000"));
+        assert!(!config.contains("model_catalog_json"));
         assert!(!config.contains("model_reasoning_effort"));
         let claude = nexus(&db, "claude", "claude");
         assert_eq!(claude.meta.unwrap().managed_nexus_preset_version, Some(6));
@@ -1234,6 +1261,57 @@ mod ensure_official_seed_tests {
         assert!(db
             .migrate_managed_nexus_for_app(&AppType::Codex, Some("codex"))
             .unwrap());
+    }
+
+    #[test]
+    fn migration_cleans_current_managed_codex_catalog_pointer_only() {
+        let db = Database::memory().unwrap();
+        let endpoint = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
+        let config = format!(
+            "model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_catalog_json='/Users/sonln4/.codex/glm-catalog.json'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"
+        );
+        let settings = json!({
+            "auth":{"OPENAI_API_KEY":"rotated-user-key"},
+            "config":config,
+            "modelCatalog":{"models":[{"model":"GLM-5.2-FP8","inputModalities":["text"]}]}
+        });
+        save_nexus(
+            &db,
+            "codex",
+            "managed",
+            settings.clone(),
+            json!({
+                "providerType":"nexus",
+                "managedNexusPresetVersion":NEXUS_VERSION,
+                "apiFormat":"openai_chat"
+            }),
+        );
+
+        let mut user_provider = Provider::with_id("user".into(), "User GLM".into(), settings, None);
+        user_provider.meta =
+            Some(serde_json::from_value(json!({"apiFormat":"openai_chat"})).unwrap());
+        db.save_provider("codex", &user_provider).unwrap();
+
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::Codex, Some("managed"))
+            .unwrap());
+
+        let managed = nexus(&db, "codex", "managed");
+        let managed_config = managed.settings_config["config"].as_str().unwrap();
+        assert!(!managed_config.contains("model_catalog_json"));
+        let user = nexus(&db, "codex", "user");
+        assert!(user.settings_config["config"]
+            .as_str()
+            .unwrap()
+            .contains("model_catalog_json='/Users/sonln4/.codex/glm-catalog.json'"));
+
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::Codex, Some("managed"))
+            .unwrap());
+        assert_eq!(
+            nexus(&db, "codex", "managed").settings_config["config"],
+            managed_config
+        );
     }
 
     #[test]
