@@ -232,7 +232,7 @@ pub async fn send_request(
     headers: http::HeaderMap,
     original_extensions: http::Extensions,
     body: Vec<u8>,
-    timeout: std::time::Duration,
+    response_header_timeout: Option<std::time::Duration>,
     proxy_url: Option<&str>,
 ) -> Result<ProxyResponse, ProxyError> {
     // Extract our own OriginalHeaderCases if available
@@ -255,12 +255,17 @@ pub async fn send_request(
         .filter(|cases| !cases.cases.is_empty())
     {
         // Primary path: use raw write + hyper handshake for exact header casing
-        let result = tokio::time::timeout(
-            timeout,
-            send_raw_request(&uri, &method, &headers, original_cases, &body, proxy_url),
-        )
-        .await
-        .map_err(|_| ProxyError::Timeout(format!("请求超时: {}s", timeout.as_secs())))?;
+        let send = send_raw_request(&uri, &method, &headers, original_cases, &body, proxy_url);
+        let result = if let Some(timeout) = response_header_timeout {
+            tokio::time::timeout(timeout, send).await.map_err(|_| {
+                ProxyError::Timeout(format!(
+                    "Upstream returned no response headers within {}s",
+                    timeout.as_secs()
+                ))
+            })?
+        } else {
+            send.await
+        };
 
         match result {
             Ok(resp) => return Ok(resp),
@@ -286,10 +291,19 @@ pub async fn send_request(
     *req.extensions_mut() = original_extensions;
 
     let client = global_hyper_client();
-    let resp = tokio::time::timeout(timeout, client.request(req))
-        .await
-        .map_err(|_| ProxyError::Timeout(format!("请求超时: {}s", timeout.as_secs())))?
-        .map_err(|e| ProxyError::ForwardFailed(format!("上游请求失败: {e}")))?;
+    let send = client.request(req);
+    let response = if let Some(timeout) = response_header_timeout {
+        tokio::time::timeout(timeout, send).await.map_err(|_| {
+            ProxyError::Timeout(format!(
+                "Upstream returned no response headers within {}s",
+                timeout.as_secs()
+            ))
+        })?
+    } else {
+        send.await
+    };
+    let resp =
+        response.map_err(|e| ProxyError::ForwardFailed(format!("Upstream request failed: {e}")))?;
 
     Ok(ProxyResponse::Hyper(resp))
 }
