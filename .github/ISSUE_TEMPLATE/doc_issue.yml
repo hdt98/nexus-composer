@@ -10,8 +10,8 @@ body:
       label: Self Checks / 自检
       options:
         - label: |
-            I have searched for [existing issues](https://github.com/farion1231/cc-switch/issues), including closed ones.
-            我已搜索过[已有的 Issue](https://github.com/farion1231/cc-switch/issues)，包括已关闭的。
+            I have searched for [existing issues](https://github.com/hdt98/nexus-composer/issues), including closed ones.
+            我已搜索过[已有的 Issue](https://github.com/hdt98/nexus-composer/issues)，包括已关闭的。
           required: true
 
   - type: dropdown
@@ -34,7 +34,7 @@ body:
       description: |
         Which file or section is affected? Provide a link or file path.
         涉及哪个文件或章节？请提供链接或文件路径。
-      placeholder: "e.g. README.md#faq or docs/user-manual/zh/..."
+      placeholder: "e.g. README.md#getting-started or docs/user-manual/zh/..."
     validations:
       required: true
 

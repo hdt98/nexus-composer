@@ -2,14 +2,25 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFileSync(path, "utf8");
+const expectContainsAll = (contents: string, snippets: string[]) => {
+  for (const snippet of snippets) expect(contents).toContain(snippet);
+};
+
+const repositoryUrl = "https://github.com/hdt98/nexus-composer";
+const updaterManifestUrl = `${repositoryUrl}/releases/latest/download/latest.json`;
+const productDescription =
+  "Model endpoint management and routing for coding assistants";
 
 const releaseWorkflow = read(".github/workflows/release.yml");
 const cargoManifest = read("src-tauri/Cargo.toml");
+const packageManifest = JSON.parse(read("package.json")) as {
+  description: string;
+};
 const tauriConfig = JSON.parse(read("src-tauri/tauri.conf.json")) as {
   identifier: string;
   mainBinaryName?: string;
   bundle: { createUpdaterArtifacts: boolean };
-  plugins: { updater?: unknown };
+  plugins: { updater: { endpoints: string[]; pubkey: string } };
 };
 const windowsConfig = JSON.parse(read("src-tauri/tauri.windows.conf.json")) as {
   app: { windows: Array<{ title: string }> };
@@ -25,10 +36,29 @@ const flatpakFiles = [
   flatpakMetainfo,
   flatpakManifest,
 ];
+const repositoryLinkFiles = [
+  releaseWorkflow,
+  flatpakMetainfo,
+  read(".github/ISSUE_TEMPLATE/bug_report.yml"),
+  read(".github/ISSUE_TEMPLATE/config.yml"),
+  read(".github/ISSUE_TEMPLATE/doc_issue.yml"),
+  read(".github/ISSUE_TEMPLATE/feature_request.yml"),
+  read(".github/ISSUE_TEMPLATE/question.yml"),
+  read("src/App.tsx"),
+  read("src/components/DatabaseUpgrade.tsx"),
+  read("src/components/settings/AboutSection.tsx"),
+  read("src-tauri/src/commands/misc.rs"),
+  read("src-tauri/src/tray.rs"),
+];
 
 describe("release packaging metadata", () => {
-  it("packages Nexus Composer artifacts and the Nexus executable", () => {
-    for (const artifact of [
+  it("packages Nexus Composer artifacts with the configured executable", () => {
+    const cargoPackageName = cargoManifest.match(
+      /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m,
+    )?.[1];
+    const binaryName = tauriConfig.mainBinaryName ?? cargoPackageName;
+
+    expectContainsAll(releaseWorkflow, [
       "Nexus-Composer-${VERSION}-macOS.tar.gz",
       "Nexus-Composer-${VERSION}-macOS.zip",
       "Nexus-Composer-${VERSION}-macOS.dmg",
@@ -37,64 +67,46 @@ describe("release packaging metadata", () => {
       "Nexus-Composer-${VERSION}-Linux-${ARCH}.AppImage",
       "Nexus-Composer-${VERSION}-Linux-${ARCH}.deb",
       "Nexus-Composer-${VERSION}-Linux-${ARCH}.rpm",
-    ]) {
-      expect(releaseWorkflow).toContain(artifact);
-    }
-
-    expect(releaseWorkflow).toContain("Nexus Composer.app");
-    expect(releaseWorkflow).toContain("nexus-composer.exe");
+      "Nexus Composer.app",
+      `${binaryName}.exe`,
+    ]);
+    expect(cargoPackageName).toBe("nexus-composer");
+    expect(binaryName).toBe("nexus-composer");
+    expect(windowsConfig.app.windows[0]?.title).toBe("Nexus Composer");
     expect(releaseWorkflow).not.toMatch(/CC[ -]Switch/);
     expect(releaseWorkflow).not.toContain("cc-switch.exe");
   });
 
-  it("uses the Cargo binary name for Windows portable builds", () => {
-    const cargoPackageName = cargoManifest.match(
-      /^\[package\][\s\S]*?^name\s*=\s*"([^"]+)"/m,
-    )?.[1];
-    const binaryName = tauriConfig.mainBinaryName ?? cargoPackageName;
-
-    expect(cargoPackageName).toBe("nexus-composer");
-    expect(binaryName).toBe("nexus-composer");
-    expect(releaseWorkflow).toContain(`${binaryName}.exe`);
-  });
-
-  it("keeps updater signing and latest.json assembly enabled", () => {
+  it("connects updater artifacts and signatures to the release manifest", () => {
     expect(tauriConfig.bundle.createUpdaterArtifacts).toBe(true);
-    expect(tauriConfig.plugins.updater).toBeDefined();
-    for (const required of [
+    expect(tauriConfig.plugins.updater.endpoints).toEqual([updaterManifestUrl]);
+    expect(
+      Buffer.from(tauriConfig.plugins.updater.pubkey, "base64").toString(
+        "utf8",
+      ),
+    ).toMatch(/^untrusted comment: minisign public key:/);
+    expectContainsAll(releaseWorkflow, [
       "Prepare Tauri signing key",
       "TAURI_SIGNING_PRIVATE_KEY",
-      'cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"',
-      'cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig"',
-      "Collect Signatures",
-      "assemble-latest-json:",
-      "Generate latest.json",
-      "dl/*.sig",
-      "latest.json --clobber",
-    ]) {
-      expect(releaseWorkflow).toContain(required);
-    }
-  });
-
-  it("joins renamed updater artifacts with their signatures in latest.json", () => {
-    for (const required of [
       'NEW_TAR_GZ="Nexus-Composer-${VERSION}-macOS.tar.gz"',
+      'cp "$TAR_GZ" "release-assets/$NEW_TAR_GZ"',
       'cp "$TAR_GZ.sig" "release-assets/$NEW_TAR_GZ.sig"',
       '$dest = "Nexus-Composer-$VERSION-Windows$assetSuffix.msi"',
       'Copy-Item $sigPath (Join-Path release-assets ("$dest.sig"))',
       'NEW_APPIMAGE="Nexus-Composer-${VERSION}-Linux-${ARCH}.AppImage"',
       'cp "$APPIMAGE.sig" "release-assets/$NEW_APPIMAGE.sig"',
+      "Collect Signatures",
+      "assemble-latest-json:",
+      "Generate latest.json",
+      "dl/*.sig",
       "base=${sig%.sig}",
       'fname=$(basename "$base")',
       'url="$base_url/$fname"',
       'sig_content=$(cat "$sig")',
-    ]) {
-      expect(releaseWorkflow).toContain(required);
-    }
-  });
-
-  it("uses the Nexus title in the Windows bundle", () => {
-    expect(windowsConfig.app.windows[0]?.title).toBe("Nexus Composer");
+      "prerelease: ${{ contains(github.ref_name, '-') }}",
+      "latest.json --clobber",
+    ]);
+    expect(releaseWorkflow).not.toContain("prerelease: true");
   });
 
   it("uses the Tauri application ID throughout Flatpak metadata", () => {
@@ -105,15 +117,30 @@ describe("release packaging metadata", () => {
     }
     expect(flatpakReadme).toContain(`${tauriConfig.identifier}.yml`);
     expect(flatpakDesktop).toContain(`Icon=${tauriConfig.identifier}`);
-    expect(flatpakMetainfo).toContain(`<id>${tauriConfig.identifier}</id>`);
-    expect(flatpakMetainfo).toContain(
+    expectContainsAll(flatpakMetainfo, [
+      `<id>${tauriConfig.identifier}</id>`,
       `<launchable type="desktop-id">${tauriConfig.identifier}.desktop</launchable>`,
-    );
-    expect(flatpakManifest).toContain(`id: ${tauriConfig.identifier}`);
-    expect(flatpakManifest).toContain(`${tauriConfig.identifier}.desktop`);
-    expect(flatpakManifest).toContain(`${tauriConfig.identifier}.metainfo.xml`);
+    ]);
+    expectContainsAll(flatpakManifest, [
+      `id: ${tauriConfig.identifier}`,
+      `${tauriConfig.identifier}.desktop`,
+      `${tauriConfig.identifier}.metainfo.xml`,
+    ]);
+    expect(flatpakMetainfo).toContain(repositoryUrl);
+  });
+
+  it("uses the Nexus repository and generic product description", () => {
+    expect(cargoManifest).toContain(`repository = "${repositoryUrl}"`);
+    expect(cargoManifest).toContain(`description = "${productDescription}"`);
+    expect(packageManifest.description).toBe(productDescription);
     expect(flatpakMetainfo).toContain(
-      "https://github.com/hdt98/nexus-composer",
+      `<summary>${productDescription}</summary>`,
     );
+    expect(flatpakDesktop).toContain(`Comment=${productDescription}`);
+
+    for (const contents of repositoryLinkFiles) {
+      expect(contents).toContain(repositoryUrl);
+      expect(contents).not.toContain("github.com/farion1231/cc-switch");
+    }
   });
 });

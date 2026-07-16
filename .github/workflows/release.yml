@@ -608,7 +608,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Nexus Composer ${{ github.ref_name }}
-          prerelease: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           body: |
             ## Nexus Composer ${{ github.ref_name }}
 

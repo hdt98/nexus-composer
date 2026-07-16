@@ -1,7 +1,7 @@
 {
   "name": "nexus-composer",
   "version": "3.16.5",
-  "description": "Nexus Composer - connect Codex and Claude Code to GLM-5.2 SGLang",
+  "description": "Model endpoint management and routing for coding assistants",
   "type": "module",
   "scripts": {
     "dev": "pnpm tauri dev",
