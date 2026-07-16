@@ -1,12 +1,14 @@
 use crate::app_config::AppType;
+use crate::codex_config::CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME;
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::params;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use toml_edit::{value, DocumentMut};
 
 type OmoProviderRow = (
@@ -22,20 +24,18 @@ type OmoProviderRow = (
 
 const NEXUS_ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
 const NEXUS_MODEL: &str = "GLM-5.2-FP8";
+const NEXUS_CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
 const NEXUS_VERSION: u64 = 6;
 const NEXUS_CONTEXT: i64 = 1_048_576;
 const NEXUS_COMPACT: i64 = 252_000;
 const NEXUS_MAX_TOKENS: u64 = 65_536;
-const NEXUS_LEGACY_NAMES: [&str; 4] = [
-    "Nexus",
-    "Nexus Local",
-    "Nexus GLM-5.2 Hosted",
-    "Nexus GLM-5.2",
-];
+const LEGACY_NEXUS_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
+const LEGACY_NEXUS_MODEL: &str = "glm-5.2";
+const LEGACY_NEXUS_NAMES: [&str; 2] = ["Nexus", "Nexus GLM-5.2"];
 const NEXUS_ENDPOINTS: [&str; 4] = [
     "http://127.0.0.1:30000/v1",
     "http://127.0.0.1:30001/v1",
-    "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
+    LEGACY_NEXUS_ENDPOINT,
     NEXUS_ENDPOINT,
 ];
 const SHIPPED_KEY_FINGERPRINTS: [&str; 2] = [
@@ -68,10 +68,6 @@ fn scrub_credentials(app: &AppType, settings: &mut Value, fingerprints: &[&str])
     changed
 }
 
-fn scrub_shipped_credentials(app: &AppType, settings: &mut Value) -> bool {
-    scrub_credentials(app, settings, &SHIPPED_KEY_FINGERPRINTS)
-}
-
 fn is_known_nexus_endpoint(value: &str) -> bool {
     let value = value.trim_end_matches('/');
     NEXUS_ENDPOINTS
@@ -88,22 +84,6 @@ fn is_known_nexus_model(value: &str) -> bool {
 
 fn known_nexus_pair(endpoint: Option<&str>, model: Option<&str>) -> bool {
     endpoint.is_some_and(is_known_nexus_endpoint) && model.is_some_and(is_known_nexus_model)
-}
-
-fn object_mut<'a>(
-    value: &'a mut Value,
-    label: &str,
-) -> Result<&'a mut Map<String, Value>, AppError> {
-    value
-        .as_object_mut()
-        .ok_or_else(|| AppError::Message(format!("Nexus {label} must be an object")))
-}
-
-fn child_object_mut<'a>(
-    parent: &'a mut Map<String, Value>,
-    key: &str,
-) -> Result<&'a mut Map<String, Value>, AppError> {
-    object_mut(parent.entry(key).or_insert_with(|| json!({})), key)
 }
 
 fn has_nexus_signature(app: &AppType, settings: &Value, meta: &Value) -> bool {
@@ -150,8 +130,66 @@ fn has_nexus_signature(app: &AppType, settings: &Value, meta: &Value) -> bool {
     }
 }
 
+fn is_shipped_legacy_nexus(app: &AppType, name: &str, settings: &Value, meta: &Value) -> bool {
+    if !LEGACY_NEXUS_NAMES.contains(&name)
+        || meta.get("providerType").is_some()
+        || meta.get("managedNexusPresetVersion").is_some()
+        || meta.get("apiFormat").and_then(Value::as_str) != Some("openai_chat")
+    {
+        return false;
+    }
+    match app {
+        AppType::Codex => {
+            let Some(config) = settings.get("config").and_then(Value::as_str) else {
+                return false;
+            };
+            let Ok(document) = config.parse::<DocumentMut>() else {
+                return false;
+            };
+            let Some(active) = document
+                .get("model_provider")
+                .and_then(|item| item.as_str())
+            else {
+                return false;
+            };
+            let provider = &document["model_providers"][active];
+            document.get("model").and_then(|item| item.as_str()) == Some(LEGACY_NEXUS_MODEL)
+                && crate::codex_config::extract_codex_base_url(config).as_deref()
+                    == Some(LEGACY_NEXUS_ENDPOINT)
+                && provider.get("name").and_then(|item| item.as_str()) == Some("nexus_glm")
+                && provider.get("wire_api").and_then(|item| item.as_str()) == Some("responses")
+                && provider
+                    .get("requires_openai_auth")
+                    .and_then(|item| item.as_bool())
+                    == Some(true)
+        }
+        AppType::Claude => {
+            let Some(env) = settings.get("env").and_then(Value::as_object) else {
+                return false;
+            };
+            env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str) == Some(LEGACY_NEXUS_ENDPOINT)
+                && [
+                    "ANTHROPIC_MODEL",
+                    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+                ]
+                .into_iter()
+                .all(|key| env.get(key).and_then(Value::as_str) == Some(LEGACY_NEXUS_MODEL))
+        }
+        _ => false,
+    }
+}
+
 fn replace_nexus_catalog(settings: &mut Value, app: &AppType) -> Result<(), AppError> {
-    let catalog = child_object_mut(object_mut(settings, "settings")?, "modelCatalog")?;
+    let settings = settings
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus settings must be an object".into()))?;
+    let catalog = settings
+        .entry("modelCatalog")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus modelCatalog must be an object".into()))?;
     let mut existing = match catalog.remove("models") {
         Some(Value::Array(models)) => models,
         Some(_) => {
@@ -182,12 +220,28 @@ fn replace_nexus_catalog(settings: &mut Value, app: &AppType) -> Result<(), AppE
 }
 
 fn merge_nexus_overrides(meta: &mut Value) -> Result<(), AppError> {
-    let meta = object_mut(meta, "metadata")?;
-    let overrides = child_object_mut(meta, "localProxyRequestOverrides")?;
-    let body = child_object_mut(overrides, "request override body")?;
+    let meta = meta
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus metadata must be an object".into()))?;
+    let overrides = meta
+        .entry("localProxyRequestOverrides")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus request overrides must be an object".into()))?;
+    let body = overrides
+        .entry("body")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus request body override must be an object".into()))?;
     body.entry("max_tokens")
         .or_insert_with(|| json!(NEXUS_MAX_TOKENS));
-    let template = child_object_mut(body, "chat_template_kwargs")?;
+    let template = body
+        .entry("chat_template_kwargs")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| {
+            AppError::Message("Nexus chat template override must be an object".into())
+        })?;
     template.insert("enable_thinking".into(), json!(true));
     template.insert("clear_thinking".into(), json!(false));
     meta.insert("providerType".into(), json!("nexus"));
@@ -205,10 +259,16 @@ fn remove_managed_codex_catalog_pointer(settings: &mut Value) -> Result<bool, Ap
     let mut document = config
         .parse::<DocumentMut>()
         .map_err(|error| AppError::Message(format!("Invalid Nexus Codex config: {error}")))?;
-    let removed = document
-        .as_table_mut()
-        .remove("model_catalog_json")
-        .is_some();
+    let owned = crate::codex_config::resolve_nexus_catalog_path(
+        config,
+        Path::new(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+    )
+    .is_some();
+    let removed = owned
+        && document
+            .as_table_mut()
+            .remove("model_catalog_json")
+            .is_some();
     if removed {
         settings["config"] = json!(document.to_string());
     }
@@ -245,7 +305,10 @@ fn upgrade_nexus_provider(
             settings["config"] = json!(document.to_string());
         }
         AppType::Claude => {
-            let env = object_mut(&mut settings["env"], "Claude env")?;
+            let env = settings
+                .get_mut("env")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| AppError::Message("Nexus Claude env must be an object".into()))?;
             env.insert("ANTHROPIC_BASE_URL".into(), json!(NEXUS_ENDPOINT));
             for key in [
                 "ANTHROPIC_MODEL",
@@ -255,7 +318,7 @@ fn upgrade_nexus_provider(
                 "ANTHROPIC_DEFAULT_FABLE_MODEL",
                 "ANTHROPIC_CUSTOM_MODEL_OPTION",
             ] {
-                env.insert(key.into(), json!(format!("{NEXUS_MODEL}[1m]")));
+                env.insert(key.into(), json!(NEXUS_CLAUDE_MODEL));
             }
             for (key, value) in [
                 ("API_TIMEOUT_MS", "3000000"),
@@ -273,12 +336,16 @@ fn upgrade_nexus_provider(
                     AppError::Message("Nexus Claude Desktop base URL is missing".into())
                 })?
                 .clone_from(&json!(NEXUS_ENDPOINT));
-            let routes = object_mut(
-                &mut meta["claudeDesktopModelRoutes"],
-                "Claude Desktop routes",
-            )?;
+            let routes = meta
+                .get_mut("claudeDesktopModelRoutes")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AppError::Message("Nexus Claude Desktop routes must be an object".into())
+                })?;
             for route in routes.values_mut() {
-                let route = object_mut(route, "Claude Desktop route")?;
+                let route = route.as_object_mut().ok_or_else(|| {
+                    AppError::Message("Nexus Claude Desktop route must be an object".into())
+                })?;
                 route.insert("model".into(), json!(NEXUS_MODEL));
                 route.insert("supports1m".into(), json!(true));
             }
@@ -847,6 +914,60 @@ impl Database {
         Ok(false)
     }
 
+    pub(crate) fn scrub_shipped_nexus_credentials_for_app(
+        &self,
+        app: &AppType,
+        current_id: Option<&str>,
+    ) -> Result<bool, AppError> {
+        self.scrub_nexus_credentials_for_app_with_fingerprints(
+            app,
+            current_id,
+            &SHIPPED_KEY_FINGERPRINTS,
+        )
+    }
+
+    fn scrub_nexus_credentials_for_app_with_fingerprints(
+        &self,
+        app: &AppType,
+        current_id: Option<&str>,
+        credential_fingerprints: &[&str],
+    ) -> Result<bool, AppError> {
+        if !matches!(
+            app,
+            AppType::Claude | AppType::ClaudeDesktop | AppType::Codex
+        ) {
+            return Ok(false);
+        }
+        let app_name = app.as_str();
+        let mut conn = lock_conn!(self.conn);
+        let transaction = conn.transaction()?;
+        let rows = {
+            let mut statement = transaction
+                .prepare("SELECT id,settings_config FROM providers WHERE app_type=?1")?;
+            let rows = statement
+                .query_map([app_name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows
+        };
+        let mut sync_current = false;
+        for (id, raw_settings) in rows {
+            let Ok(mut settings) = serde_json::from_str::<Value>(&raw_settings) else {
+                continue;
+            };
+            if scrub_credentials(app, &mut settings, credential_fingerprints) {
+                transaction.execute(
+                    "UPDATE providers SET settings_config=?1 WHERE id=?2 AND app_type=?3",
+                    params![settings.to_string(), id, app_name],
+                )?;
+                sync_current |= current_id == Some(id.as_str());
+            }
+        }
+        transaction.commit()?;
+        Ok(sync_current)
+    }
+
     pub(crate) fn migrate_managed_nexus_for_app(
         &self,
         app: &AppType,
@@ -878,62 +999,65 @@ impl Database {
         };
         let mut sync_current = false;
         for (id, name, raw_settings, raw_meta) in rows {
-            let legacy_name = NEXUS_LEGACY_NAMES.contains(&name.as_str());
-            let mut meta: Value = match serde_json::from_str(&raw_meta) {
-                Ok(meta) => meta,
-                Err(_) if !legacy_name => continue,
-                Err(error) => {
+            let parsed_meta = serde_json::from_str::<Value>(&raw_meta);
+            let explicitly_owned = parsed_meta
+                .as_ref()
+                .ok()
+                .and_then(|meta| meta.get("providerType"))
+                .and_then(Value::as_str)
+                == Some("nexus");
+            let mut settings: Value = match serde_json::from_str(&raw_settings) {
+                Ok(settings) => settings,
+                Err(error) if explicitly_owned => {
                     return Err(AppError::Message(format!(
-                        "Invalid {app_name} Nexus provider '{id}' metadata: {error}"
+                        "Invalid {app_name} Nexus provider '{id}' settings: {error}"
                     )))
                 }
+                Err(_) => continue,
             };
-            let provider_type = meta.get("providerType").and_then(Value::as_str);
-            if provider_type != Some("nexus") && !(provider_type.is_none() && legacy_name) {
+            let Ok(mut meta) = parsed_meta else {
                 continue;
-            }
+            };
+            let original_settings = settings.clone();
+            let original_meta = meta.clone();
             let version = meta
                 .get("managedNexusPresetVersion")
                 .and_then(Value::as_u64);
-            if version.is_some_and(|version| version > NEXUS_VERSION) {
-                continue;
-            }
-            let mut settings: Value = serde_json::from_str(&raw_settings).map_err(|error| {
-                AppError::Message(format!(
-                    "Invalid {app_name} Nexus provider '{id}' settings: {error}"
-                ))
-            })?;
-            if !has_nexus_signature(app, &settings, &meta) {
-                continue;
-            }
-            let scrubbed = scrub_shipped_credentials(app, &mut settings);
-            let catalog_pointer_removed = matches!(app, AppType::Codex)
-                && remove_managed_codex_catalog_pointer(&mut settings).map_err(|error| {
-                    AppError::Message(format!(
-                        "Cannot clean {app_name} Nexus provider '{id}': {error}"
-                    ))
-                })?;
-            if version == Some(NEXUS_VERSION) {
-                if scrubbed || catalog_pointer_removed {
-                    transaction.execute(
-                        "UPDATE providers SET settings_config=?1 WHERE id=?2 AND app_type=?3",
-                        params![settings.to_string(), id, app_name],
-                    )?;
+            let owned = explicitly_owned || is_shipped_legacy_nexus(app, &name, &settings, &meta);
+            let supported_version = version.is_none_or(|version| version <= NEXUS_VERSION);
+            let valid_signature = has_nexus_signature(app, &settings, &meta);
+            if explicitly_owned
+                && matches!(app, AppType::ClaudeDesktop)
+                && supported_version
+                && !valid_signature
+            {
+                if let Some(meta) = meta.as_object_mut() {
+                    meta.remove("providerType");
+                    meta.remove("managedNexusPresetVersion");
                 }
-                sync_current |= current_id == Some(id.as_str());
-                continue;
+            } else if owned && supported_version && valid_signature {
+                if matches!(app, AppType::Codex) {
+                    remove_managed_codex_catalog_pointer(&mut settings).map_err(|error| {
+                        AppError::Message(format!(
+                            "Cannot clean {app_name} Nexus provider '{id}': {error}"
+                        ))
+                    })?;
+                }
+                if version != Some(NEXUS_VERSION) {
+                    upgrade_nexus_provider(app, &mut settings, &mut meta).map_err(|error| {
+                        AppError::Message(format!(
+                            "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
+                        ))
+                    })?;
+                }
             }
-            upgrade_nexus_provider(app, &mut settings, &mut meta).map_err(|error| {
-                AppError::Message(format!(
-                    "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
-                ))
-            })?;
-            transaction.execute(
-                "UPDATE providers SET settings_config=?1,meta=?2 WHERE id=?3 AND app_type=?4",
-                params![settings.to_string(), meta.to_string(), id, app_name],
-            )?;
-            if current_id == Some(id.as_str()) {
-                sync_current = true;
+
+            if settings != original_settings || meta != original_meta {
+                transaction.execute(
+                    "UPDATE providers SET settings_config=?1,meta=?2 WHERE id=?3 AND app_type=?4",
+                    params![settings.to_string(), meta.to_string(), id, app_name],
+                )?;
+                sync_current |= current_id == Some(id.as_str());
             }
         }
         transaction.commit()?;
@@ -1077,7 +1201,8 @@ impl Database {
 #[cfg(test)]
 mod ensure_official_seed_tests {
     use super::{
-        scrub_credentials, NEXUS_MODEL, NEXUS_VERSION, SHIPPED_KEY_FINGERPRINTS,
+        has_nexus_signature, is_shipped_legacy_nexus, remove_managed_codex_catalog_pointer,
+        LEGACY_NEXUS_ENDPOINT, LEGACY_NEXUS_MODEL, NEXUS_ENDPOINT, NEXUS_MODEL, NEXUS_VERSION,
     };
     use crate::app_config::AppType;
     use crate::database::{Database, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
@@ -1184,7 +1309,7 @@ mod ensure_official_seed_tests {
         });
         let codex_settings = json!({
             "auth":{"OPENAI_API_KEY":"rotated-user-key"},
-            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_catalog_json='/Users/sonln4/.codex/glm-catalog.json'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"),
+            "config":format!("model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_catalog_json='cc-switch-model-catalog.json'\nmodel_reasoning_effort='high'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"),
             "modelCatalog":{"models":[
                 {"model":"glm-5.2","inputModalities":["text","image"]},
                 {"model":"user-model","inputModalities":["text"]}
@@ -1258,116 +1383,217 @@ mod ensure_official_seed_tests {
             (route.model.as_str(), route.supports_1m),
             (NEXUS_MODEL, Some(true))
         );
-        assert!(db
+        assert!(!db
             .migrate_managed_nexus_for_app(&AppType::Codex, Some("codex"))
             .unwrap());
     }
 
     #[test]
-    fn migration_cleans_current_managed_codex_catalog_pointer_only() {
+    fn migration_removes_only_owned_codex_catalog_pointer() {
+        let config = |path| {
+            json!({"config":format!(
+                "model_catalog_json='{path}'\nmodel_provider='p'\n[model_providers.p]\nbase_url='{NEXUS_ENDPOINT}'"
+            )})
+        };
+        let mut user = config("/Users/me/.codex/glm-catalog.json");
+        assert!(!remove_managed_codex_catalog_pointer(&mut user).unwrap());
+        assert!(user["config"].as_str().unwrap().contains("glm-catalog"));
+
+        let mut owned = config("cc-switch-model-catalog.json");
+        assert!(remove_managed_codex_catalog_pointer(&mut owned).unwrap());
+        assert!(!owned["config"]
+            .as_str()
+            .unwrap()
+            .contains("model_catalog_json"));
+        assert!(!remove_managed_codex_catalog_pointer(&mut owned).unwrap());
+    }
+
+    #[test]
+    fn migration_scrubs_exact_leak_from_unowned_current_rows() {
+        let synthetic = "synthetic-shipped-key";
+        let fingerprint = format!("{:x}", sha2::Sha256::digest(synthetic.as_bytes()));
+        for (app, settings, pointer) in [
+            (
+                AppType::Codex,
+                json!({
+                    "auth":{"OPENAI_API_KEY":synthetic},
+                    "config":"model_provider='custom'\nmodel='other'\n[model_providers.custom]\nbase_url='https://custom.example/v1'"
+                }),
+                "/auth/OPENAI_API_KEY",
+            ),
+            (
+                AppType::Claude,
+                json!({"env":{
+                    "ANTHROPIC_BASE_URL":"https://custom.example/v1",
+                    "ANTHROPIC_AUTH_TOKEN":synthetic
+                }}),
+                "/env/ANTHROPIC_AUTH_TOKEN",
+            ),
+            (
+                AppType::ClaudeDesktop,
+                json!({"env":{
+                    "ANTHROPIC_BASE_URL":"https://custom.example/v1",
+                    "ANTHROPIC_API_KEY":synthetic,
+                    "ANTHROPIC_AUTH_TOKEN":"rotated-user-key"
+                }}),
+                "/env/ANTHROPIC_API_KEY",
+            ),
+        ] {
+            let db = Database::memory().unwrap();
+            let mut provider = Provider::with_id(
+                "custom".into(),
+                "Unrelated custom provider".into(),
+                settings,
+                None,
+            );
+            provider.meta = Some(Default::default());
+            db.save_provider(app.as_str(), &provider).unwrap();
+
+            assert!(db
+                .scrub_nexus_credentials_for_app_with_fingerprints(
+                    &app,
+                    Some("custom"),
+                    &[fingerprint.as_str()],
+                )
+                .unwrap());
+            assert_eq!(
+                nexus(&db, app.as_str(), "custom")
+                    .settings_config
+                    .pointer(pointer),
+                Some(&json!(""))
+            );
+            if matches!(app, AppType::ClaudeDesktop) {
+                assert_eq!(
+                    nexus(&db, app.as_str(), "custom")
+                        .settings_config
+                        .pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+                    Some(&json!("rotated-user-key"))
+                );
+            }
+            assert!(!db
+                .scrub_nexus_credentials_for_app_with_fingerprints(
+                    &app,
+                    Some("custom"),
+                    &[fingerprint.as_str()],
+                )
+                .unwrap());
+        }
+    }
+
+    #[test]
+    fn credential_scrub_survives_an_unrelated_managed_migration_error() {
         let db = Database::memory().unwrap();
-        let endpoint = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
-        let config = format!(
-            "model_provider='custom'\nmodel='GLM-5.2-FP8'\nmodel_catalog_json='/Users/sonln4/.codex/glm-catalog.json'\n[model_providers.custom]\nbase_url='{endpoint}'\nwire_api='responses'"
-        );
-        let settings = json!({
-            "auth":{"OPENAI_API_KEY":"rotated-user-key"},
-            "config":config,
-            "modelCatalog":{"models":[{"model":"GLM-5.2-FP8","inputModalities":["text"]}]}
-        });
+        let leaked = "synthetic-shipped-key";
+        let fingerprint = format!("{:x}", sha2::Sha256::digest(leaked.as_bytes()));
         save_nexus(
             &db,
-            "codex",
-            "managed",
-            settings.clone(),
+            "claude",
+            "leaked",
+            json!({"env":{"ANTHROPIC_AUTH_TOKEN":leaked}}),
+            json!({}),
+        );
+        save_nexus(
+            &db,
+            "claude",
+            "broken",
+            json!({
+                "env":{"ANTHROPIC_BASE_URL":NEXUS_ENDPOINT,"ANTHROPIC_MODEL":NEXUS_MODEL},
+                "modelCatalog":"invalid"
+            }),
             json!({
                 "providerType":"nexus",
-                "managedNexusPresetVersion":NEXUS_VERSION,
+                "managedNexusPresetVersion":NEXUS_VERSION - 1,
                 "apiFormat":"openai_chat"
             }),
         );
 
-        let mut user_provider = Provider::with_id("user".into(), "User GLM".into(), settings, None);
-        user_provider.meta =
-            Some(serde_json::from_value(json!({"apiFormat":"openai_chat"})).unwrap());
-        db.save_provider("codex", &user_provider).unwrap();
-
         assert!(db
-            .migrate_managed_nexus_for_app(&AppType::Codex, Some("managed"))
+            .scrub_nexus_credentials_for_app_with_fingerprints(
+                &AppType::Claude,
+                Some("leaked"),
+                &[fingerprint.as_str()],
+            )
             .unwrap());
-
-        let managed = nexus(&db, "codex", "managed");
-        let managed_config = managed.settings_config["config"].as_str().unwrap();
-        assert!(!managed_config.contains("model_catalog_json"));
-        let user = nexus(&db, "codex", "user");
-        assert!(user.settings_config["config"]
-            .as_str()
-            .unwrap()
-            .contains("model_catalog_json='/Users/sonln4/.codex/glm-catalog.json'"));
-
         assert!(db
-            .migrate_managed_nexus_for_app(&AppType::Codex, Some("managed"))
-            .unwrap());
+            .migrate_managed_nexus_for_app(&AppType::Claude, Some("leaked"))
+            .is_err());
         assert_eq!(
-            nexus(&db, "codex", "managed").settings_config["config"],
-            managed_config
+            nexus(&db, "claude", "leaked")
+                .settings_config
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN"),
+            Some(&json!(""))
         );
     }
 
     #[test]
-    fn migration_skips_unowned_rows_and_isolates_app_errors() {
+    fn implicit_local_debug_provider_is_not_claimed() {
+        let local = json!({"env":{
+            "ANTHROPIC_BASE_URL":"http://127.0.0.1:30001/v1",
+            "ANTHROPIC_MODEL":"glm-5.2[1m]"
+        }});
+        let meta = json!({"apiFormat":"openai_chat"});
+        assert!(!is_shipped_legacy_nexus(
+            &AppType::Claude,
+            "Nexus Local",
+            &local,
+            &meta
+        ));
+        assert!(has_nexus_signature(&AppType::Claude, &local, &meta));
+        let shipped = json!({"env":{
+            "ANTHROPIC_BASE_URL":LEGACY_NEXUS_ENDPOINT,
+            "ANTHROPIC_MODEL":LEGACY_NEXUS_MODEL,
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL":LEGACY_NEXUS_MODEL,
+            "ANTHROPIC_DEFAULT_SONNET_MODEL":LEGACY_NEXUS_MODEL,
+            "ANTHROPIC_DEFAULT_OPUS_MODEL":LEGACY_NEXUS_MODEL
+        }});
+        assert!(is_shipped_legacy_nexus(
+            &AppType::Claude,
+            "Nexus GLM-5.2",
+            &shipped,
+            &meta
+        ));
+
         let db = Database::memory().unwrap();
-        let meta =
-            json!({"providerType":"nexus","managedNexusPresetVersion":5,"apiFormat":"openai_chat"});
-        let custom = json!({"env":{"ANTHROPIC_BASE_URL":"https://custom.example/v1"}});
-        save_nexus(&db, "claude", "custom", custom, meta.clone());
-        let good = json!({"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:30001/v1","ANTHROPIC_MODEL":"glm-5.2[1m]"}});
-        save_nexus(&db, "claude", "good", good, meta);
+        save_nexus(&db, "claude", "legacy", shipped, meta);
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::Claude, Some("legacy"))
+            .unwrap());
+        let legacy = nexus(&db, "claude", "legacy");
+        assert_eq!(
+            legacy.meta.unwrap().managed_nexus_preset_version,
+            Some(NEXUS_VERSION as u32)
+        );
+        assert_eq!(
+            legacy.settings_config["env"]["ANTHROPIC_BASE_URL"],
+            NEXUS_ENDPOINT
+        );
+    }
+
+    #[test]
+    fn migration_detaches_customized_managed_claude_desktop() {
+        let db = Database::memory().unwrap();
         save_nexus(
             &db,
-            "codex",
-            "broken",
-            json!({}),
-            json!({"apiFormat":"openai_chat"}),
+            "claude-desktop",
+            "customized",
+            json!({"env":{"ANTHROPIC_BASE_URL":"https://custom.example/v1"}}),
+            json!({
+                "providerType":"nexus",
+                "managedNexusPresetVersion":NEXUS_VERSION - 1,
+                "apiFormat":"openai_chat",
+                "claudeDesktopMode":"proxy",
+                "claudeDesktopModelRoutes":{"claude-sonnet-5":{"model":"custom-model"}}
+            }),
         );
-        {
-            let conn = db.conn.lock().unwrap();
-            conn.execute("UPDATE providers SET settings_config='{bad' WHERE id='broken' AND app_type='codex'", []).unwrap();
-        }
 
         assert!(db
-            .migrate_managed_nexus_for_app(&AppType::Codex, None)
-            .is_err());
-        assert!(db
-            .migrate_managed_nexus_for_app(&AppType::Claude, Some("good"))
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("customized"))
             .unwrap());
-        let version = |id| {
-            nexus(&db, "claude", id)
-                .meta
-                .unwrap()
-                .managed_nexus_preset_version
-        };
-        assert_eq!((version("custom"), version("good")), (Some(5), Some(6)));
-    }
-
-    #[test]
-    fn credential_scrub_is_exact_and_preserves_rotated_keys() {
-        let synthetic = "synthetic-shipped-key";
-        let fingerprint = format!("{:x}", sha2::Sha256::digest(synthetic.as_bytes()));
-        assert!(SHIPPED_KEY_FINGERPRINTS
-            .iter()
-            .all(|fingerprint| fingerprint.len() == 64));
-
-        let mut settings = json!({"env": {
-            "ANTHROPIC_AUTH_TOKEN": synthetic,
-            "ANTHROPIC_API_KEY": "rotated-user-key"
-        }});
-        assert!(scrub_credentials(
-            &AppType::ClaudeDesktop,
-            &mut settings,
-            &[fingerprint.as_str()]
-        ));
-        assert_eq!(settings["env"]["ANTHROPIC_AUTH_TOKEN"], "");
-        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "rotated-user-key");
+        let meta = nexus(&db, "claude-desktop", "customized").meta.unwrap();
+        assert!(meta.provider_type.is_none());
+        assert!(meta.managed_nexus_preset_version.is_none());
+        assert!(!db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("customized"))
+            .unwrap());
     }
 }

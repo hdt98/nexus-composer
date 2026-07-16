@@ -1129,25 +1129,6 @@ impl RequestForwarder {
             .and_then(|m| m.provider_type.as_deref())
             == Some("github_copilot")
             || base_url.contains("githubcopilot.com");
-        let (endpoint_path, _) = split_endpoint_and_query(endpoint);
-        let claude_count_tokens =
-            adapter.name() == "Claude" && is_claude_count_tokens_path(endpoint_path);
-        let supports_anthropic_count_tokens = provider
-            .meta
-            .as_ref()
-            .and_then(|meta| meta.provider_type.as_deref())
-            == Some("nexus")
-            || super::providers::get_claude_api_format(provider) == "anthropic";
-        if claude_count_tokens
-            && (is_full_url
-                || is_copilot
-                || provider.is_codex_oauth()
-                || !supports_anthropic_count_tokens)
-        {
-            return Err(ProxyError::ConfigError(
-                "count_tokens requires an Anthropic-compatible base URL".to_string(),
-            ));
-        }
 
         // 应用模型映射（独立于格式转换）
         // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
@@ -1306,12 +1287,10 @@ impl RequestForwarder {
             }
         }
         let resolved_claude_api_format = if adapter.name() == "Claude" {
-            Some(if claude_count_tokens {
-                "anthropic".to_string()
-            } else {
+            Some(
                 self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
-                    .await
-            })
+                    .await,
+            )
         } else {
             None
         };
@@ -1333,8 +1312,6 @@ impl RequestForwarder {
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
         let (effective_endpoint, passthrough_query) = if codex_responses_to_chat {
             rewrite_codex_responses_endpoint_to_chat(endpoint)
-        } else if claude_count_tokens {
-            rewrite_claude_count_tokens_endpoint(endpoint)
         } else if needs_transform && adapter.name() == "Claude" {
             let api_format = resolved_claude_api_format
                 .as_deref()
@@ -1422,7 +1399,7 @@ impl RequestForwarder {
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
         let mut filtered_body = prepare_upstream_request_body(request_body);
-        if should_apply_local_proxy_body_overrides(is_copilot, claude_count_tokens) {
+        if !is_copilot {
             if let Some(overrides) = provider
                 .meta
                 .as_ref()
@@ -2380,29 +2357,6 @@ fn strip_beta_query(query: Option<&str>) -> Option<String> {
 
 fn is_claude_messages_path(path: &str) -> bool {
     matches!(path, "/v1/messages" | "/claude/v1/messages")
-}
-
-pub(crate) fn is_claude_count_tokens_path(path: &str) -> bool {
-    matches!(
-        path,
-        "/v1/messages/count_tokens" | "/claude/v1/messages/count_tokens"
-    )
-}
-
-fn should_apply_local_proxy_body_overrides(is_copilot: bool, claude_count_tokens: bool) -> bool {
-    !is_copilot && !claude_count_tokens
-}
-
-fn rewrite_claude_count_tokens_endpoint(endpoint: &str) -> (String, Option<String>) {
-    let query = split_endpoint_and_query(endpoint)
-        .1
-        .filter(|query| !query.is_empty())
-        .map(ToString::to_string);
-    let rewritten = query.as_deref().map_or_else(
-        || "/v1/messages/count_tokens".to_string(),
-        |query| format!("/v1/messages/count_tokens?{query}"),
-    );
-    (rewritten, query)
 }
 
 fn rewrite_codex_responses_endpoint_to_chat(endpoint: &str) -> (String, Option<String>) {
@@ -3499,44 +3453,6 @@ mod tests {
 
         assert_eq!(endpoint, "/v1/responses?x-id=1");
         assert_eq!(passthrough_query.as_deref(), Some("x-id=1"));
-    }
-
-    #[test]
-    fn claude_count_tokens_uses_authenticated_native_anthropic_path() {
-        for path in [
-            "/v1/messages/count_tokens",
-            "/claude/v1/messages/count_tokens",
-        ] {
-            assert!(is_claude_count_tokens_path(path));
-        }
-        let (endpoint, query) = rewrite_claude_count_tokens_endpoint(
-            "/claude/v1/messages/count_tokens?beta=true&x-id=1",
-        );
-        assert_eq!(endpoint, "/v1/messages/count_tokens?beta=true&x-id=1");
-        assert_eq!(query.as_deref(), Some("beta=true&x-id=1"));
-        assert_eq!(
-            crate::proxy::providers::ClaudeAdapter::new()
-                .build_url("https://relay.example/v1", &endpoint),
-            "https://relay.example/v1/messages/count_tokens?beta=true&x-id=1"
-        );
-
-        let provider = Provider::with_id(
-            "nexus".to_string(),
-            "Nexus".to_string(),
-            json!({"env": {
-                "ANTHROPIC_BASE_URL": "https://relay.example/v1",
-                "ANTHROPIC_AUTH_TOKEN": "test-token"
-            }}),
-            None,
-        );
-        let adapter = crate::proxy::providers::ClaudeAdapter::new();
-        let auth = adapter.extract_auth(&provider).unwrap();
-        let headers = adapter.get_auth_headers(&auth).unwrap();
-        assert_eq!(headers[0].0.as_str(), "authorization");
-        assert_eq!(headers[0].1, "Bearer test-token");
-        assert!(!should_apply_local_proxy_body_overrides(false, true));
-        assert!(!should_apply_local_proxy_body_overrides(true, false));
-        assert!(should_apply_local_proxy_body_overrides(false, false));
     }
 
     #[test]

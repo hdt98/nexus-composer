@@ -73,6 +73,7 @@ import {
   buildLocalProxyRequestOverrides,
   formatRequestOverrideObject,
 } from "@/lib/requestOverrides";
+import { NEXUS_ENDPOINT, NEXUS_MODEL } from "@/config/nexus";
 
 export type ClaudeDesktopProviderFormValues = ProviderFormData & {
   presetId?: string;
@@ -712,12 +713,28 @@ export function ClaudeDesktopProviderForm({
       claudeDesktopMode: mode,
       apiFormat: mode === "proxy" ? apiFormat : "anthropic",
     };
+    const remainsManagedNexus =
+      activeProviderType === "nexus" &&
+      mode === "proxy" &&
+      apiFormat === "openai_chat" &&
+      baseUrl.trim().replace(/\/+$/, "") === NEXUS_ENDPOINT &&
+      routeEntries.length > 0 &&
+      routeEntries.every((route) => route.model === NEXUS_MODEL);
 
     meta.claudeDesktopModelRoutes = routeMap;
-    meta.providerType = activeProviderType;
-    meta.managedNexusPresetVersion = activePreset
-      ? activePreset.managedNexusPresetVersion
-      : initialData?.meta?.managedNexusPresetVersion;
+    if (remainsManagedNexus) {
+      meta.providerType = "nexus";
+      meta.managedNexusPresetVersion =
+        activePreset?.managedNexusPresetVersion ??
+        initialData?.meta?.managedNexusPresetVersion;
+    } else {
+      if (activeProviderType === "nexus" || activeProviderType === undefined) {
+        delete meta.providerType;
+      } else {
+        meta.providerType = activeProviderType;
+      }
+      delete meta.managedNexusPresetVersion;
+    }
     meta.localProxyRequestOverrides = overridesResult.overrides;
     meta.authBinding =
       activeProviderType === "github_copilot"

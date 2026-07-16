@@ -296,11 +296,6 @@ impl ProxyServer {
             // Claude API (支持带前缀和不带前缀两种格式)
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
-            .route("/v1/messages/count_tokens", post(handlers::handle_messages))
-            .route(
-                "/claude/v1/messages/count_tokens",
-                post(handlers::handle_messages),
-            )
             // Claude Desktop 3P 本地 gateway（独立 provider namespace）
             .route(
                 "/claude-desktop/v1/models",
@@ -308,10 +303,6 @@ impl ProxyServer {
             )
             .route(
                 "/claude-desktop/v1/messages",
-                post(handlers::handle_claude_desktop_messages),
-            )
-            .route(
-                "/claude-desktop/v1/messages/count_tokens",
                 post(handlers::handle_claude_desktop_messages),
             )
             // OpenAI Chat Completions API (Codex CLI，支持带前缀和不带前缀)

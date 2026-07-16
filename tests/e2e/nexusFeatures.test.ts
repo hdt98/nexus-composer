@@ -42,21 +42,12 @@ describe("Nexus Composer preset arrays", () => {
     const codexNames = codexProviderPresets.map((p) => p.name);
 
     const removed = [
-      "Longcat",
-      "DeepSeek",
-      "Kimi",
-      "Kimi For Coding",
-      "AWS Bedrock (AKSK)",
-      "AWS Bedrock (API Key)",
-      "OpenRouter",
-      "TheRouter",
-      "SubRouter",
-      "Baidu Qianfan Coding Plan",
-      "Bailian",
-      "Xiaomi MiMo",
-      "Zhipu GLM",
-      "Shengsuanyun",
-      "PatewayAI",
+      "Longcat", "DeepSeek", "Kimi", "Kimi For Coding",
+      "AWS Bedrock (AKSK)", "AWS Bedrock (API Key)",
+      "OpenRouter", "TheRouter", "SubRouter",
+      "Baidu Qianfan Coding Plan", "Bailian",
+      "Xiaomi MiMo", "Zhipu GLM",
+      "Shengsuanyun", "PatewayAI",
     ];
     for (const name of removed) {
       expect(claudeNames).not.toContain(name);
@@ -180,11 +171,7 @@ describe("Sponsor filter", () => {
     const isSponsorPreset = (preset: any): boolean => {
       if (preset.isOfficial || preset.category === "official") return false;
       if (preset.name === "Nexus GLM-5.2") return false;
-      return !!(
-        preset.isPartner ||
-        preset.primePartner ||
-        preset.partnerPromotionKey
-      );
+      return !!(preset.isPartner || preset.primePartner || preset.partnerPromotionKey);
     };
 
     for (const p of providerPresets) {
@@ -194,11 +181,7 @@ describe("Sponsor filter", () => {
       expect(isSponsorPreset(p)).toBe(false);
     }
 
-    const fakeSponsor = {
-      name: "FakeProvider",
-      isPartner: true,
-      category: "aggregator",
-    };
+    const fakeSponsor = { name: "FakeProvider", isPartner: true, category: "aggregator" };
     expect(isSponsorPreset(fakeSponsor)).toBe(true);
   });
 

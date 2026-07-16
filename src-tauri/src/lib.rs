@@ -605,27 +605,39 @@ pub fn run() {
                 app_config::AppType::ClaudeDesktop,
                 app_config::AppType::Codex,
             ] {
-                // Current-provider lookup stays before the per-app transaction.
-                let migration = services::provider::ProviderService::current(
+                let current_id = match services::provider::ProviderService::current(
                     &app_state,
                     app_type.clone(),
-                )
-                .and_then(|id| {
-                    app_state.db.migrate_managed_nexus_for_app(
-                        &app_type,
-                        (!id.is_empty()).then_some(id).as_deref(),
-                    )
-                });
-                let sync_current = match migration {
-                    Ok(sync_current) => sync_current,
+                ) {
+                    Ok(id) => (!id.is_empty()).then_some(id),
                     Err(error) => {
-                        log::warn!("Skipped {} Nexus migration: {error}", app_type.as_str());
-                        continue;
+                        log::warn!("Cannot identify current {} provider: {error}", app_type.as_str());
+                        None
                     }
                 };
-                if sync_current {
+                let mut sync_required = false;
+                match app_state.db.scrub_shipped_nexus_credentials_for_app(
+                    &app_type,
+                    current_id.as_deref(),
+                ) {
+                    Ok(changed) => sync_required |= changed,
+                    Err(error) => log::warn!(
+                        "Failed to scrub shipped {} credentials: {error}",
+                        app_type.as_str()
+                    ),
+                }
+                match app_state
+                    .db
+                    .migrate_managed_nexus_for_app(&app_type, current_id.as_deref())
+                {
+                    Ok(changed) => sync_required |= changed,
+                    Err(error) => {
+                        log::warn!("Skipped {} Nexus migration: {error}", app_type.as_str())
+                    }
+                }
+                if sync_required {
                     if let Err(error) = services::provider::ProviderService::sync_current_provider_for_app(&app_state, app_type.clone()) {
-                        log::warn!("Failed to apply migrated {} Nexus provider: {error}", app_type.as_str());
+                        log::warn!("Failed to apply updated {} provider: {error}", app_type.as_str());
                     }
                 }
             }

@@ -100,14 +100,34 @@ describe("ClaudeDesktopProviderForm", () => {
     });
   });
 
-  it("detaches managed metadata when Official replaces Nexus", async () => {
+  it("detaches managed metadata when an existing Nexus provider becomes custom", async () => {
     const onSubmit = vi.fn();
-    renderForm(undefined, onSubmit);
-
-    fireEvent.click(screen.getByRole("button", { name: /Nexus GLM-5\.2/i }));
-    fireEvent.click(
-      screen.getByRole("button", { name: /Claude Desktop Official/i }),
+    const { container } = renderForm(
+      {
+        name: "Nexus GLM-5.2",
+        settingsConfig: {
+          env: {
+            ANTHROPIC_BASE_URL:
+              "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1",
+            ANTHROPIC_AUTH_TOKEN: "test-key",
+          },
+        },
+        meta: {
+          claudeDesktopMode: "proxy",
+          apiFormat: "openai_chat",
+          providerType: "nexus",
+          managedNexusPresetVersion: 6,
+          claudeDesktopModelRoutes: {
+            "claude-sonnet-5": { model: "GLM-5.2-FP8" },
+          },
+        },
+      },
+      onSubmit,
     );
+
+    fireEvent.change(container.querySelector("#baseUrl")!, {
+      target: { value: "https://custom.example/v1" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -115,8 +135,31 @@ describe("ClaudeDesktopProviderForm", () => {
     expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
       "managedNexusPresetVersion",
     );
+  });
+
+  it("does not retain managed metadata after Nexus is replaced by Custom", async () => {
+    const onSubmit = vi.fn();
+    const { container } = renderForm(undefined, onSubmit);
+
+    fireEvent.click(screen.getByRole("button", { name: /Nexus GLM-5\.2/i }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /providerPreset\.custom|Custom/i }),
+    );
+    fireEvent.change(container.querySelector('input[name="name"]')!, {
+      target: { value: "Custom provider" },
+    });
+    fireEvent.change(container.querySelector("#baseUrl")!, {
+      target: { value: "https://custom.example/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty("providerType");
     expect(onSubmit.mock.calls[0][0].meta).not.toHaveProperty(
-      "localProxyRequestOverrides",
+      "managedNexusPresetVersion",
     );
   });
 
