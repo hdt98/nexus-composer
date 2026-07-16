@@ -2992,10 +2992,13 @@ web_search = "disabled"
             Some("gpt-5.6-sol"),
             "static template slug must be gpt-5.6-sol"
         );
-        assert_eq!(template["default_reasoning_level"], "medium");
+        assert_eq!(template["default_reasoning_level"], "low");
         assert_eq!(reasoning_efforts(&template), SOL_REASONING_EFFORTS);
         assert_eq!(template["multi_agent_version"], "v2");
         assert_eq!(template["tool_mode"], "code_mode_only");
+        assert_eq!(template["context_window"], 372_000);
+        assert_eq!(template["max_context_window"], 372_000);
+        assert!(template.get("default_service_tier").is_none());
     }
 
     #[test]

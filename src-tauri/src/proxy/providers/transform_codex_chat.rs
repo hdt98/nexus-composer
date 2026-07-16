@@ -2560,37 +2560,57 @@ mod tests {
 
     #[test]
     fn responses_request_to_chat_forwards_only_agent_message_encrypted_content() {
-        let input = json!({
-            "model": "GLM-5.2-FP8",
-            "input": [
-                {"type": "reasoning", "encrypted_content": "opaque-reasoning", "summary": []},
-                {"type": "compaction", "encrypted_content": "opaque-compaction"},
-                {
-                    "type": "agent_message",
-                    "author": "/root",
-                    "recipient": "/root/worker",
-                    "content": [
-                        {"type": "input_text", "text": "Message Type: NEW_TASK\nPayload:\n"},
-                        {"type": "encrypted_content", "encrypted_content": "Solve P2"}
-                    ]
-                }
-            ]
-        });
-
-        let result =
-            responses_to_chat_completions_with_reasoning_history(input, None, true).unwrap();
-        let messages = result["messages"].as_array().unwrap();
-        let serialized = serde_json::to_string(&result).unwrap();
-
-        assert_eq!(
-            messages,
-            &[json!({
-                "role": "user",
-                "content": "Message Type: NEW_TASK\nPayload:\n\nSolve P2"
-            })]
+        let header = "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n";
+        let large_payload = format!(
+            "BEGIN-LARGE\n{}\nEND-LARGE",
+            "0123456789abcdef".repeat(8192)
         );
-        for absent in ["opaque-reasoning", "opaque-compaction", "encrypted_content"] {
-            assert!(!serialized.contains(absent));
+
+        for payload in ["Solve P2".to_string(), large_payload] {
+            let input = json!({
+                "model": "GLM-5.2-FP8",
+                "input": [
+                    {"type": "reasoning", "encrypted_content": "opaque-reasoning", "summary": []},
+                    {"type": "compaction", "encrypted_content": "opaque-compaction"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Visible history"},
+                            {"type": "encrypted_content", "encrypted_content": "opaque-message"}
+                        ]
+                    },
+                    {
+                        "type": "agent_message",
+                        "author": "/root",
+                        "recipient": "/root/worker",
+                        "content": [
+                            {"type": "input_text", "text": header},
+                            {"type": "encrypted_content", "encrypted_content": payload}
+                        ]
+                    }
+                ]
+            });
+
+            let result =
+                responses_to_chat_completions_with_reasoning_history(input, None, true).unwrap();
+            assert_eq!(
+                result["messages"],
+                json!([
+                    {"role": "user", "content": "Visible history"},
+                    {"role": "user", "content": format!("{header}\n{payload}")},
+                ])
+            );
+
+            let serialized = serde_json::to_string(&result).unwrap();
+            for absent in [
+                "opaque-reasoning",
+                "opaque-compaction",
+                "opaque-message",
+                "encrypted_content",
+            ] {
+                assert!(!serialized.contains(absent));
+            }
         }
     }
 
