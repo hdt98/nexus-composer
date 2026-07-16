@@ -1895,12 +1895,7 @@ impl RequestForwarder {
             }
         }
 
-        // 确定超时
-        let timeout = if self.non_streaming_timeout.is_zero() {
-            std::time::Duration::from_secs(600) // 默认 600 秒
-        } else {
-            self.non_streaming_timeout
-        };
+        let response_header_timeout = self.response_header_timeout(request_is_streaming);
 
         // 获取全局代理 URL
         let upstream_proxy_url: Option<String> = super::http_client::get_current_proxy_url();
@@ -1925,30 +1920,21 @@ impl RequestForwarder {
             log::debug!(
                 "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
             );
-            let client = super::http_client::get();
+            let client = super::http_client::get_for_forwarding();
             let mut request = client.request(method.clone(), &url);
-            if request_is_streaming {
-                // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
-                // 的首包/静默期超时控制，避免长流被总时长误杀。
-                request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
-            } else if !self.non_streaming_timeout.is_zero() {
+            if !request_is_streaming && !self.non_streaming_timeout.is_zero() {
                 request = request.timeout(self.non_streaming_timeout);
             }
             for (key, value) in &ordered_headers {
                 request = request.header(key, value);
             }
             let send = request.body(body_bytes).send();
-            let send_result = if request_is_streaming {
-                let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
-                    timeout
-                } else {
-                    self.streaming_first_byte_timeout
-                };
+            let send_result = if let Some(header_timeout) = response_header_timeout {
                 tokio::time::timeout(header_timeout, send)
                     .await
                     .map_err(|_| {
                         ProxyError::Timeout(format!(
-                            "流式响应首包超时: {}s（上游未返回响应头）",
+                            "Upstream returned no response headers within {}s",
                             header_timeout.as_secs()
                         ))
                     })?
@@ -1969,7 +1955,7 @@ impl RequestForwarder {
                 ordered_headers,
                 extensions.clone(),
                 body_bytes,
-                timeout,
+                response_header_timeout,
                 upstream_proxy_url.as_deref(),
             )
             .await?
@@ -2037,6 +2023,15 @@ impl RequestForwarder {
             })??;
 
         Ok(ProxyResponse::buffered(status, headers, body))
+    }
+
+    fn response_header_timeout(&self, request_is_streaming: bool) -> Option<std::time::Duration> {
+        let timeout = if request_is_streaming {
+            self.streaming_first_byte_timeout
+        } else {
+            self.non_streaming_timeout
+        };
+        (!timeout.is_zero()).then_some(timeout)
     }
 
     async fn prime_streaming_response(
@@ -2905,6 +2900,28 @@ mod tests {
             streaming_first_byte_timeout,
             max_attempts: 1,
         }
+    }
+
+    #[test]
+    fn zero_timeouts_disable_response_header_deadlines() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(forwarder.response_header_timeout(false), None);
+        assert_eq!(forwarder.response_header_timeout(true), None);
+    }
+
+    #[test]
+    fn response_header_deadline_uses_the_matching_request_mode() {
+        let forwarder = test_forwarder(Duration::from_secs(17), Duration::from_secs(29));
+
+        assert_eq!(
+            forwarder.response_header_timeout(false),
+            Some(Duration::from_secs(17))
+        );
+        assert_eq!(
+            forwarder.response_header_timeout(true),
+            Some(Duration::from_secs(29))
+        );
     }
 
     #[test]
