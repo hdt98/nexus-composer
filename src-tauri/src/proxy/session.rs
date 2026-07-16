@@ -233,7 +233,7 @@ pub(crate) fn extract_harness_identity(
         "codex" | "openai" => first_bounded_header(headers, &["x-codex-thread-id", "thread-id"])
             .or_else(|| bounded_json_pointer(body, "/client_metadata/thread_id"))
             .map(HarnessIdentity::CodexThread),
-        "claude" => ["x-claude-code-session-id", "claude-code-session-id"]
+        "claude" | "claude-desktop" => ["x-claude-code-session-id", "claude-code-session-id"]
             .into_iter()
             .find_map(|name| bounded_header(headers, name))
             .or_else(|| {
@@ -776,6 +776,10 @@ mod tests {
         claude_headers.insert("x-claude-code-session-id", "header-123".parse().unwrap());
         assert_eq!(
             extract_harness_identity(&claude_headers, &json!({}), "claude"),
+            Some(HarnessIdentity::ClaudeCodeSession("header-123".to_string()))
+        );
+        assert_eq!(
+            extract_harness_identity(&claude_headers, &json!({}), "claude-desktop"),
             Some(HarnessIdentity::ClaudeCodeSession("header-123".to_string()))
         );
         assert_eq!(
