@@ -5644,7 +5644,7 @@ requires_openai_auth = true
         let catalog_path = crate::codex_config::get_codex_model_catalog_path();
         assert!(
             catalog_path.exists(),
-            "cc-switch-model-catalog.json must be created on provider switch"
+            "nexus-model-catalog.json must be created on provider switch"
         );
         let catalog_text = std::fs::read_to_string(&catalog_path).expect("read catalog json");
         let catalog: serde_json::Value =
@@ -5807,7 +5807,8 @@ requires_openai_auth = true
 
         // Pre-takeover Live state: config.toml points at the Nexus Composer generated
         // catalog file, and that file exists on disk (takeover never touches it).
-        let catalog_path = crate::codex_config::get_codex_model_catalog_path();
+        let catalog_path =
+            crate::codex_config::get_codex_config_dir().join("cc-switch-model-catalog.json");
         if let Some(parent) = catalog_path.parent() {
             std::fs::create_dir_all(parent).expect("create codex dir");
         }
@@ -5852,6 +5853,10 @@ requires_openai_auth = true
             restored.contains(pointer.as_str()),
             "restored pointer must still reference the Nexus Composer generated catalog file"
         );
+        assert!(
+            catalog_path.exists(),
+            "raw snapshot restore must leave the legacy catalog file intact"
+        );
     }
 
     /// Regression: a hot-switch during takeover rebuilds the backup from the DB
@@ -5872,6 +5877,13 @@ requires_openai_auth = true
         // Catalog projection needs a valid Sol template; seed the bundled copy
         // so the test does not depend on an installed `codex` CLI.
         seed_codex_model_template();
+
+        let config_dir = crate::codex_config::get_codex_config_dir();
+        std::fs::create_dir_all(&config_dir).expect("create codex dir");
+        let legacy_catalog = config_dir.join("cc-switch-model-catalog.json");
+        let user_catalog = config_dir.join("glm-catalog.json");
+        std::fs::write(&legacy_catalog, "legacy catalog").expect("seed legacy catalog");
+        std::fs::write(&user_catalog, "user catalog").expect("seed user catalog");
 
         // Provider-rebuilt backup shape: inline modelCatalog, pointer-less config.
         let backup_json = serde_json::to_string(&json!({
@@ -5918,6 +5930,16 @@ requires_openai_auth = true
         assert!(
             slugs.contains(&"deepseek-v4-flash"),
             "generated catalog must contain the inline model, got slugs: {slugs:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&legacy_catalog).expect("read legacy catalog"),
+            "legacy catalog",
+            "canonical projection must not overwrite the legacy catalog"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&user_catalog).expect("read user catalog"),
+            "user catalog",
+            "canonical projection must not overwrite a user-managed catalog"
         );
     }
 

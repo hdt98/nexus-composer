@@ -12,7 +12,8 @@ use std::process::Command;
 use toml_edit::DocumentMut;
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
-pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+pub const NEXUS_CODEX_MODEL_CATALOG_FILENAME: &str = "nexus-model-catalog.json";
+const LEGACY_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
 const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
@@ -154,7 +155,7 @@ pub fn get_codex_config_path() -> PathBuf {
 }
 
 pub fn get_codex_model_catalog_path() -> PathBuf {
-    get_codex_config_dir().join(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+    get_codex_config_dir().join(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
 }
 
 /// 获取 Codex 供应商配置文件路径
@@ -935,16 +936,13 @@ fn set_codex_model_catalog_json_field(
 
     match catalog_path {
         Some(_) => {
-            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+            doc["model_catalog_json"] = toml_edit::value(NEXUS_CODEX_MODEL_CATALOG_FILENAME);
         }
         None => {
             let should_remove = doc
                 .get("model_catalog_json")
                 .and_then(|item| item.as_str())
-                .map(|path| {
-                    Path::new(path).file_name().and_then(|name| name.to_str())
-                        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
-                })
+                .map(|path| is_nexus_model_catalog_path(Path::new(path)))
                 .unwrap_or(false);
             if should_remove {
                 doc.as_table_mut().remove("model_catalog_json");
@@ -1019,7 +1017,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
 ///
 /// We only reverse-parse catalogs whose `model_catalog_json` path is the
 /// Nexus Composer–generated file (identified by filename
-/// `cc-switch-model-catalog.json`). A user-managed external catalog file is
+/// `nexus-model-catalog.json`, or its legacy `cc-switch-model-catalog.json`
+/// name). A user-managed external catalog file is
 /// left alone — surfacing its richer structure as the simplified table would
 /// be a downgrade we can't safely round-trip.
 ///
@@ -1055,7 +1054,8 @@ pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, 
 
 /// Given `config.toml` text, resolve the on-disk path of the nexus-composer–owned
 /// catalog file (returns `None` if `model_catalog_json` is absent or points at
-/// a file we don't own). Relative paths fall back to `generated_path`.
+/// a file we don't own). Relative paths resolve beside `generated_path` while
+/// preserving the referenced new or legacy filename.
 pub(crate) fn resolve_nexus_catalog_path(
     config_text: &str,
     generated_path: &Path,
@@ -1071,17 +1071,24 @@ pub(crate) fn resolve_nexus_catalog_path(
         .filter(|s| !s.is_empty())?;
 
     let referenced_path = Path::new(catalog_path_str);
-    let is_cc_switch_owned = referenced_path.file_name().and_then(|name| name.to_str())
-        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
-    if !is_cc_switch_owned {
+    if !is_nexus_model_catalog_path(referenced_path) {
         return None;
     }
 
     if referenced_path.is_absolute() {
         Some(referenced_path.to_path_buf())
     } else {
-        Some(generated_path.to_path_buf())
+        generated_path
+            .parent()
+            .map(|parent| parent.join(referenced_path))
     }
+}
+
+fn is_nexus_model_catalog_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME | LEGACY_CODEX_MODEL_CATALOG_FILENAME)
+    )
 }
 
 /// Pure reverse-parsing core: convert Codex catalog JSON text back into the
@@ -2650,7 +2657,7 @@ base_url = "https://production.api/v1"
 [model_providers.any]
 name = "any"
 "#;
-        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+        let catalog_path = Path::new("/tmp/nexus-model-catalog.json");
 
         let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
@@ -2658,7 +2665,7 @@ name = "any"
             parsed
                 .get("model_catalog_json")
                 .and_then(|value| value.as_str()),
-            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+            Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
         );
         assert!(
             parsed
@@ -2797,7 +2804,7 @@ web_search = "disabled"
 
     #[test]
     fn resolve_catalog_path_returns_none_when_config_missing_field() {
-        let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
         assert!(resolve_nexus_catalog_path("", &generated).is_none());
         assert!(
             resolve_nexus_catalog_path("model = \"gpt-5\"", &generated).is_none(),
@@ -2806,9 +2813,19 @@ web_search = "disabled"
     }
 
     #[test]
-    fn resolve_catalog_path_accepts_cc_switch_owned_file() {
-        let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
+    fn resolve_catalog_path_accepts_legacy_absolute_file_at_its_actual_path() {
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
+        let legacy = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
         let config = r#"model_catalog_json = "/tmp/.codex/cc-switch-model-catalog.json"
+"#;
+        let resolved = resolve_nexus_catalog_path(config, &generated).expect("path resolves");
+        assert_eq!(resolved, legacy);
+    }
+
+    #[test]
+    fn resolve_catalog_path_accepts_new_absolute_file() {
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
+        let config = r#"model_catalog_json = "/tmp/.codex/nexus-model-catalog.json"
 "#;
         let resolved = resolve_nexus_catalog_path(config, &generated).expect("path resolves");
         assert_eq!(resolved, generated);
@@ -2816,12 +2833,12 @@ web_search = "disabled"
 
     #[test]
     fn resolve_catalog_path_rejects_user_owned_external_file() {
-        let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
-        let config = r#"model_catalog_json = "/Users/me/.codex/my-handwritten-catalog.json"
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
+        let config = r#"model_catalog_json = "/Users/me/.codex/glm-catalog.json"
 "#;
         assert!(
             resolve_nexus_catalog_path(config, &generated).is_none(),
-            "external catalog files should be left alone"
+            "glm-catalog.json must remain user-owned"
         );
     }
 
@@ -3077,7 +3094,7 @@ model = "glm-5"
             .and_then(|v| v.as_str())
             .expect("model_catalog_json should be set");
         assert_eq!(
-            written_path, CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME,
+            written_path, NEXUS_CODEX_MODEL_CATALOG_FILENAME,
             "should write only the relative filename, not the UNC path"
         );
     }
@@ -3087,56 +3104,71 @@ model = "glm-5"
         let input = r#"model_provider = "custom"
 model = "glm-5"
 "#;
-        let regular_path = Path::new("/home/user/.codex/cc-switch-model-catalog.json");
+        let regular_path = Path::new("/home/user/.codex/nexus-model-catalog.json");
 
         let result = set_codex_model_catalog_json_field(input, Some(regular_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
 
         assert_eq!(
             parsed.get("model_catalog_json").and_then(|v| v.as_str()),
-            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+            Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME),
             "should write only the relative filename, not the full path"
         );
     }
 
     #[test]
-    fn set_catalog_json_none_removes_cc_switch_owned_by_filename() {
+    fn set_catalog_json_none_removes_new_and_legacy_owned_filenames() {
         // After the WSL fix, TOML may contain a Linux-style path.
         // The None arm must still remove it (file_name match catches any format).
-        let input = r#"model_catalog_json = "/home/user/.codex/cc-switch-model-catalog.json"
-"#;
-        let result = set_codex_model_catalog_json_field(input, None).unwrap();
-        let parsed: toml::Value = toml::from_str(&result).unwrap();
-        assert!(
-            parsed.get("model_catalog_json").is_none(),
-            "None arm should remove Nexus Composer-owned field regardless of path format"
-        );
+        for filename in ["nexus-model-catalog.json", "cc-switch-model-catalog.json"] {
+            let input = format!("model_catalog_json = \"/home/user/.codex/{filename}\"\n");
+            let result = set_codex_model_catalog_json_field(&input, None).unwrap();
+            let parsed: toml::Value = toml::from_str(&result).unwrap();
+            assert!(
+                parsed.get("model_catalog_json").is_none(),
+                "None arm should remove Nexus Composer-owned {filename}"
+            );
+        }
     }
 
     #[test]
     fn set_catalog_json_none_preserves_user_owned_catalog() {
-        let input = r#"model_catalog_json = "/Users/me/.codex/my-custom-catalog.json"
+        let input = r#"model_catalog_json = "/Users/me/.codex/glm-catalog.json"
 "#;
         let result = set_codex_model_catalog_json_field(input, None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert_eq!(
             parsed.get("model_catalog_json").and_then(|v| v.as_str()),
-            Some("/Users/me/.codex/my-custom-catalog.json"),
-            "None arm should NOT remove user-owned catalog"
+            Some("/Users/me/.codex/glm-catalog.json"),
+            "None arm must not remove glm-catalog.json"
         );
     }
 
     #[test]
-    fn resolve_catalog_finds_relative_filename() {
-        let config_text = r#"model_provider = "custom"
-model_catalog_json = "cc-switch-model-catalog.json"
+    fn resolve_catalog_finds_new_relative_filename() {
+        let config_text = r#"model_catalog_json = "nexus-model-catalog.json"
 "#;
-        let generated_path = PathBuf::from("/home/user/.codex/cc-switch-model-catalog.json");
+        let generated_path = PathBuf::from("/home/user/.codex/nexus-model-catalog.json");
         let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result,
             Some(generated_path),
-            "relative filename should resolve to generated_path for file I/O"
+            "new relative filename should resolve to the generated path"
+        );
+    }
+
+    #[test]
+    fn resolve_catalog_finds_legacy_relative_filename_at_its_actual_path() {
+        let config_text = r#"model_catalog_json = "cc-switch-model-catalog.json"
+"#;
+        let generated_path = PathBuf::from("/home/user/.codex/nexus-model-catalog.json");
+        let result = resolve_nexus_catalog_path(config_text, &generated_path);
+        assert_eq!(
+            result,
+            Some(PathBuf::from(
+                "/home/user/.codex/cc-switch-model-catalog.json"
+            )),
+            "legacy relative filename must resolve to the legacy file"
         );
     }
 
@@ -3144,7 +3176,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
     fn resolve_catalog_ignores_user_owned_relative() {
         let config_text = r#"model_catalog_json = "my-custom-catalog.json"
 "#;
-        let generated_path = PathBuf::from("/home/user/.codex/cc-switch-model-catalog.json");
+        let generated_path = PathBuf::from("/home/user/.codex/nexus-model-catalog.json");
         let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result, None,
@@ -3153,14 +3185,14 @@ model_catalog_json = "cc-switch-model-catalog.json"
     }
 
     #[test]
-    fn set_catalog_json_none_removes_relative_path() {
+    fn set_catalog_json_none_removes_legacy_relative_path() {
         let input = r#"model_catalog_json = "cc-switch-model-catalog.json"
 "#;
         let result = set_codex_model_catalog_json_field(input, None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert!(
             parsed.get("model_catalog_json").is_none(),
-            "None arm should remove relative Nexus Composer-owned field"
+            "None arm should remove the legacy relative path"
         );
     }
 }
