@@ -241,6 +241,159 @@ mod tests {
         })
     }
 
+    #[test]
+    #[serial]
+    fn list_hides_stale_catalog_pointer_only_for_inline_codex_catalogs() {
+        with_test_home(|state, home| {
+            let catalog_path = home.join(".codex/glm-catalog.json");
+            fs::create_dir_all(catalog_path.parent().expect("catalog parent"))
+                .expect("create catalog directory");
+            let catalog_bytes = b"{\n  \"user\": \"owned\"\n}\n";
+            fs::write(&catalog_path, catalog_bytes).expect("seed user catalog");
+            let pointer = catalog_path.to_string_lossy();
+
+            let cases = [
+                (
+                    "managed",
+                    Some(json!({ "models": [{ "model": "glm-5.2" }] })),
+                    false,
+                ),
+                ("user", None, true),
+                ("null", Some(Value::Null), true),
+                ("empty", Some(json!({ "models": [] })), true),
+                (
+                    "invalid",
+                    Some(json!({ "models": [{ "model": "  " }] })),
+                    true,
+                ),
+            ];
+            for (id, inline_catalog, _) in &cases {
+                let mut settings = codex_settings("https://api.example/v1", "sk-test");
+                settings["config"] = Value::String(format!(
+                    "model_catalog_json = {pointer:?}\n{}",
+                    settings["config"].as_str().expect("config text")
+                ));
+                if let Some(inline_catalog) = inline_catalog {
+                    settings["modelCatalog"] = inline_catalog.clone();
+                }
+                state
+                    .db
+                    .save_provider(
+                        AppType::Codex.as_str(),
+                        &Provider::with_id((*id).into(), (*id).into(), settings, None),
+                    )
+                    .expect("seed provider");
+            }
+
+            let listed = ProviderService::list(state, AppType::Codex).expect("list providers");
+            let listed_pointer = |id: &str| {
+                listed[id].settings_config["config"]
+                    .as_str()
+                    .expect("listed config")
+                    .parse::<toml::Value>()
+                    .expect("parse listed config")
+                    .get("model_catalog_json")
+                    .and_then(toml::Value::as_str)
+                    .map(str::to_string)
+            };
+            for (id, _, should_keep_pointer) in cases {
+                assert_eq!(
+                    listed_pointer(id).is_some(),
+                    should_keep_pointer,
+                    "unexpected list projection for {id}"
+                );
+            }
+
+            let stored = state
+                .db
+                .get_provider_by_id("managed", AppType::Codex.as_str())
+                .expect("read stored provider")
+                .expect("stored provider");
+            assert_eq!(
+                stored.settings_config["config"]
+                    .as_str()
+                    .expect("stored config")
+                    .parse::<toml::Value>()
+                    .expect("parse stored config")["model_catalog_json"]
+                    .as_str(),
+                Some(pointer.as_ref())
+            );
+            assert_eq!(
+                fs::read(catalog_path).expect("read user catalog"),
+                catalog_bytes
+            );
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn live_editor_uses_stored_catalog_without_exposing_live_pointer() {
+        with_test_home(|state, home| {
+            let codex_dir = home.join(".codex");
+            fs::create_dir_all(&codex_dir).expect("create codex directory");
+            let catalog_path = codex_dir.join("glm-catalog.json");
+            let catalog_bytes = b"{\n  \"user\": \"owned\"\n}\n";
+            fs::write(&catalog_path, catalog_bytes).expect("seed user catalog");
+            let auth_path = crate::codex_config::get_codex_auth_path();
+            let auth_bytes = br#"{"OPENAI_API_KEY":"sk-live"}"#;
+            fs::write(&auth_path, auth_bytes).expect("seed live auth");
+            let config_path = crate::codex_config::get_codex_config_path();
+            let config_text = format!(
+                "model_catalog_json = {:?}\nmodel_provider = \"custom\"\nmodel = \"live-model\"\n",
+                catalog_path.to_string_lossy()
+            );
+            fs::write(&config_path, &config_text).expect("seed live config");
+
+            let provider = Provider::with_id(
+                "managed".into(),
+                "Managed".into(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-stored" },
+                    "config": "model_provider = \"custom\"\nmodel = \"stored-model\"\n",
+                    "modelCatalog": { "models": [{ "model": "glm-5.2" }] }
+                }),
+                None,
+            );
+            state
+                .db
+                .save_provider(AppType::Codex.as_str(), &provider)
+                .expect("seed provider");
+            state
+                .db
+                .set_current_provider(AppType::Codex.as_str(), &provider.id)
+                .expect("select provider");
+
+            let settings = ProviderService::read_live_settings_for_editor(state, AppType::Codex)
+                .expect("read editor settings");
+            assert_eq!(
+                settings["modelCatalog"],
+                provider.settings_config["modelCatalog"]
+            );
+            let config = settings["config"]
+                .as_str()
+                .expect("editor config")
+                .parse::<toml::Value>()
+                .expect("parse editor config");
+            assert!(config.get("model_catalog_json").is_none());
+            assert_eq!(config["model"].as_str(), Some("live-model"));
+            let stored = state
+                .db
+                .get_provider_by_id(&provider.id, AppType::Codex.as_str())
+                .expect("read stored provider")
+                .expect("stored provider");
+            assert_eq!(stored.settings_config, provider.settings_config);
+            assert_eq!(fs::read(auth_path).expect("read live auth"), auth_bytes);
+            assert_eq!(
+                fs::read_to_string(config_path).expect("read live config"),
+                config_text
+            );
+            assert_eq!(
+                fs::read(catalog_path).expect("read user catalog"),
+                catalog_bytes
+            );
+        });
+    }
+
     fn usage_script_with_credentials(
         api_key: Option<&str>,
         base_url: Option<&str>,
@@ -1556,6 +1709,38 @@ impl ProviderService {
         }
     }
 
+    fn strip_codex_catalog_pointer_from_settings(settings: &mut Value) {
+        let has_inline_model = settings
+            .get("modelCatalog")
+            .and_then(|catalog| catalog.get("models"))
+            .and_then(Value::as_array)
+            .is_some_and(|models| {
+                models.iter().any(|model| {
+                    model
+                        .get("model")
+                        .and_then(Value::as_str)
+                        .is_some_and(|model| !model.trim().is_empty())
+                })
+            });
+        if !has_inline_model {
+            return;
+        }
+
+        let Some(config) = settings.get("config").and_then(Value::as_str) else {
+            return;
+        };
+        let Ok(mut document) = config.parse::<toml_edit::DocumentMut>() else {
+            return;
+        };
+        if document
+            .as_table_mut()
+            .remove("model_catalog_json")
+            .is_some()
+        {
+            settings["config"] = Value::String(document.to_string());
+        }
+    }
+
     /// Check whether a provider exists in live config, tolerating parse errors
     /// only for providers that are explicitly marked as DB-only.
     fn check_live_config_exists(
@@ -1655,7 +1840,13 @@ impl ProviderService {
         state: &AppState,
         app_type: AppType,
     ) -> Result<IndexMap<String, Provider>, AppError> {
-        state.db.get_all_providers(app_type.as_str())
+        let mut providers = state.db.get_all_providers(app_type.as_str())?;
+        if matches!(app_type, AppType::Codex) {
+            for provider in providers.values_mut() {
+                Self::strip_codex_catalog_pointer_from_settings(&mut provider.settings_config);
+            }
+        }
+        Ok(providers)
     }
 
     /// Get current provider ID
@@ -2836,6 +3027,26 @@ impl ProviderService {
     /// Read current live settings (re-export)
     pub fn read_live_settings(app_type: AppType) -> Result<Value, AppError> {
         read_live_settings(app_type)
+    }
+
+    pub fn read_live_settings_for_editor(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<Value, AppError> {
+        let mut settings = Self::read_live_settings(app_type.clone())?;
+        if matches!(app_type, AppType::Codex) {
+            let current_id = Self::current(state, AppType::Codex)?;
+            if let Some(provider) = state
+                .db
+                .get_provider_by_id(&current_id, AppType::Codex.as_str())?
+            {
+                if let Some(model_catalog) = provider.settings_config.get("modelCatalog") {
+                    settings["modelCatalog"] = model_catalog.clone();
+                }
+            }
+            Self::strip_codex_catalog_pointer_from_settings(&mut settings);
+        }
+        Ok(settings)
     }
 
     /// Get custom endpoints list (re-export)
