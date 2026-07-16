@@ -31,8 +31,6 @@ pub struct UsageParserConfig {
     pub model_extractor: StreamModelExtractor,
     /// 流式 usage 事件预过滤器
     pub stream_event_filter: Option<StreamUsageEventFilter>,
-    /// 应用类型字符串（用于日志记录）
-    pub app_type_str: &'static str,
 }
 
 // ============================================================================
@@ -97,11 +95,14 @@ fn codex_auto_model_extractor(events: &[Value], fallback_model: &str) -> String 
             return model;
         }
     }
-    // 回退：从 response.completed 事件中提取
+    // 回退：从 Responses 终止事件中提取
     events
         .iter()
         .find_map(|e| {
-            if e.get("type")?.as_str()? == "response.completed" {
+            if matches!(
+                e.get("type")?.as_str()?,
+                "response.completed" | "response.failed" | "response.incomplete"
+            ) {
                 e.get("response")?
                     .get("model")?
                     .as_str()
@@ -141,7 +142,6 @@ pub const CLAUDE_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     response_parser: TokenUsage::from_claude_response,
     model_extractor: claude_model_extractor,
     stream_event_filter: Some(claude_stream_usage_event_filter),
-    app_type_str: "claude",
 };
 
 /// OpenAI Chat Completions API 解析配置（用于 Codex /v1/chat/completions）
@@ -150,7 +150,6 @@ pub const OPENAI_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     response_parser: TokenUsage::from_openai_response,
     model_extractor: openai_model_extractor,
     stream_event_filter: Some(openai_stream_usage_event_filter),
-    app_type_str: "codex",
 };
 
 /// Codex 智能解析配置（自动检测 OpenAI 或 Codex 格式）
@@ -159,7 +158,6 @@ pub const CODEX_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     response_parser: TokenUsage::from_codex_response_auto,
     model_extractor: codex_auto_model_extractor,
     stream_event_filter: Some(codex_stream_usage_event_filter),
-    app_type_str: "codex",
 };
 
 /// Gemini API 解析配置
@@ -168,7 +166,6 @@ pub const GEMINI_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     response_parser: TokenUsage::from_gemini_response,
     model_extractor: gemini_model_extractor,
     stream_event_filter: Some(gemini_stream_usage_event_filter),
-    app_type_str: "gemini",
 };
 
 // ============================================================================

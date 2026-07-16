@@ -5,12 +5,36 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { copyText } from "@/lib/clipboard";
 import { useRequestDetail } from "@/lib/query/usage";
 import { getFreshInputTokens, isUnpricedUsage } from "@/types/usage";
+import { Button } from "@/components/ui/button";
+import { Copy, X } from "lucide-react";
 
 interface RequestDetailPanelProps {
   requestId: string;
   onClose: () => void;
+}
+
+function RequestDetailCloseButton({
+  label,
+  onClose,
+}: {
+  label: string;
+  onClose: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="icon"
+      variant="ghost"
+      className="absolute right-3 top-3 rounded-full p-1.5 transition-colors hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+      aria-label={label}
+      onClick={onClose}
+    >
+      <X className="size-4 text-muted-foreground" />
+    </Button>
+  );
 }
 
 export function RequestDetailPanel({
@@ -19,13 +43,14 @@ export function RequestDetailPanel({
 }: RequestDetailPanelProps) {
   const { t, i18n } = useTranslation();
   const { data: request, isLoading } = useRequestDetail(requestId);
-  const dateLocale =
-    i18n.language === "vi" ? "vi-VN" : "en-US";
+  const dateLocale = i18n.language === "vi" ? "vi-VN" : "en-US";
+  const closeLabel = t("common.close", "Close");
 
   if (isLoading) {
     return (
       <Dialog open onOpenChange={onClose}>
         <DialogContent className="max-w-2xl">
+          <RequestDetailCloseButton label={closeLabel} onClose={onClose} />
           <div className="h-[400px] animate-pulse rounded bg-gray-100" />
         </DialogContent>
       </Dialog>
@@ -36,6 +61,7 @@ export function RequestDetailPanel({
     return (
       <Dialog open onOpenChange={onClose}>
         <DialogContent className="max-w-2xl">
+          <RequestDetailCloseButton label={closeLabel} onClose={onClose} />
           <DialogHeader>
             <DialogTitle>{t("usage.requestDetail", "请求详情")}</DialogTitle>
           </DialogHeader>
@@ -50,10 +76,12 @@ export function RequestDetailPanel({
   const freshInput = getFreshInputTokens(request);
   const isCacheInclusive = request.inputTokens !== freshInput;
   const unpriced = isUnpricedUsage(request);
+  const correlationId = request.correlationId;
 
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <RequestDetailCloseButton label={closeLabel} onClose={onClose} />
         <DialogHeader>
           <DialogTitle>{t("usage.requestDetail", "请求详情")}</DialogTitle>
         </DialogHeader>
@@ -71,6 +99,31 @@ export function RequestDetailPanel({
                 </dt>
                 <dd className="font-mono">{request.requestId}</dd>
               </div>
+              {correlationId && (
+                <div className="col-span-2">
+                  <dt className="text-muted-foreground">
+                    {t("usage.correlationId", "Server request ID")}
+                  </dt>
+                  <dd className="flex items-center gap-2">
+                    <span className="break-all font-mono">{correlationId}</span>
+                    <Button
+                      type="button"
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7 shrink-0"
+                      aria-label={t(
+                        "usage.copyCorrelationId",
+                        "Copy server request ID",
+                      )}
+                      onClick={() => {
+                        void copyText(correlationId);
+                      }}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </Button>
+                  </dd>
+                </div>
+              )}
               <div>
                 <dt className="text-muted-foreground">
                   {t("usage.time", "时间")}

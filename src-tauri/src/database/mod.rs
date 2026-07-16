@@ -49,7 +49,7 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 11;
+pub(crate) const SCHEMA_VERSION: i32 = 12;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -118,24 +118,12 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
         };
-        db.create_tables()?;
-
-        // Pre-migration backup: only when upgrading from an existing database
-        {
-            let conn = lock_conn!(db.conn);
-            let version = Self::get_user_version(&conn)?;
-            drop(conn);
-            if version > 0 && version < SCHEMA_VERSION {
-                log::info!(
-                    "Creating pre-migration database backup (v{version} → v{SCHEMA_VERSION})"
-                );
-                if let Err(e) = db.backup_database_file() {
-                    log::warn!("Pre-migration backup failed, continuing migration: {e}");
-                }
+        db.prepare_schema_with_backup(db_exists, |database| {
+            if let Err(error) = database.backup_database_file() {
+                log::warn!("Pre-migration backup failed, continuing migration: {error}");
             }
-        }
-
-        db.apply_schema_migrations()?;
+            Ok(())
+        })?;
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
         }
@@ -157,6 +145,33 @@ impl Database {
         }
 
         Ok(db)
+    }
+
+    fn prepare_schema_with_backup(
+        &self,
+        db_exists: bool,
+        backup: impl FnOnce(&Self) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        let (version, has_user_tables, needs_v12_repair) = {
+            let conn = lock_conn!(self.conn);
+            let version = Self::get_user_version(&conn)?;
+            if version > SCHEMA_VERSION {
+                return Err(AppError::Database(format!(
+                    "Database version {version} is newer than supported version {SCHEMA_VERSION}"
+                )));
+            }
+            let has_user_tables = Self::has_user_tables(&conn)?;
+            let needs_v12_repair = version == SCHEMA_VERSION
+                && Self::table_exists(&conn, "proxy_request_logs")?
+                && !Self::has_column(&conn, "proxy_request_logs", "correlation_id")?;
+            (version, has_user_tables, needs_v12_repair)
+        };
+
+        if db_exists && has_user_tables && (version < SCHEMA_VERSION || needs_v12_repair) {
+            backup(self)?;
+        }
+        self.create_tables()?;
+        self.apply_schema_migrations()
     }
 
     /// 读取磁盘上数据库的 `user_version`；仅当它比应用支持的 [`SCHEMA_VERSION`]

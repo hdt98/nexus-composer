@@ -289,6 +289,100 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
+    assert_eq!(correlation_id.r#type, "TEXT");
+    assert_eq!(correlation_id.notnull, 0);
+}
+
+#[test]
+fn migration_v11_to_v12_adds_correlation_id_without_changing_rows() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL
+        );
+        INSERT INTO proxy_request_logs (request_id, model)
+        VALUES ('response-1', 'glm-5.2'), ('response-2', 'glm-5.2');
+        "#,
+    )
+    .expect("seed v11 request logs");
+    Database::set_user_version(&conn, 11).expect("set user_version=11");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply v12 migration");
+
+    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
+    assert_eq!(correlation_id.r#type, "TEXT");
+    assert_eq!(correlation_id.notnull, 0);
+    let rows: (i64, i64, String) = conn
+        .query_row(
+            "SELECT COUNT(*), COUNT(correlation_id), group_concat(request_id, ',')
+             FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read migrated rows");
+    assert_eq!(rows, (2, 0, "response-1,response-2".to_string()));
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn prerelease_v12_is_backed_up_before_correlation_repair() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    Database::create_tables_on_conn(&conn).expect("create current schema");
+    conn.execute_batch(
+        r#"
+        ALTER TABLE proxy_request_logs DROP COLUMN correlation_id;
+        INSERT INTO proxy_request_logs (
+            request_id, provider_id, app_type, model, input_tokens,
+            latency_ms, status_code, created_at
+        ) VALUES ('response-1', 'nexus', 'codex', 'GLM-5.2-FP8',
+                  10, 100, 200, 1000);
+        PRAGMA user_version = 12;
+        "#,
+    )
+    .expect("seed prerelease v12 request logs");
+    let db = Database {
+        conn: std::sync::Mutex::new(conn),
+    };
+    let backup_count = std::cell::Cell::new(0);
+
+    db.prepare_schema_with_backup(true, |database| {
+        let conn = database.conn.lock().expect("lock pre-repair database");
+        assert!(!Database::has_column(
+            &conn,
+            "proxy_request_logs",
+            "correlation_id"
+        )?);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        backup_count.set(backup_count.get() + 1);
+        Ok(())
+    })
+    .expect("repair prerelease v12 schema");
+
+    let conn = db.conn.lock().expect("lock repaired database");
+    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
+    assert_eq!(correlation_id.r#type, "TEXT");
+    assert_eq!(correlation_id.notnull, 0);
+    assert_eq!(
+        conn.query_row(
+            "SELECT SUM(input_tokens) FROM proxy_request_logs",
+            [],
+            |row| row.get::<_, i64>(0)
+        )
+        .expect("read preserved usage"),
+        10
+    );
+    assert_eq!(backup_count.get(), 1);
 }
 
 #[test]

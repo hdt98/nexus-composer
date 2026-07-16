@@ -4,9 +4,10 @@
 
 use super::{
     content_encoding::{decompress_body, get_content_encoding},
+    error_mapper::{get_error_message, map_proxy_error_to_status},
     forwarder::ActiveConnectionGuard,
     handler_config::{StreamUsageEventFilter, UsageParserConfig},
-    handler_context::{RequestContext, StreamingTimeoutConfig},
+    handler_context::{RequestAccountingGuard, RequestContext, StreamingTimeoutConfig},
     hyper_client::ProxyResponse,
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -190,6 +191,7 @@ pub async fn handle_streaming(
         stream,
         ctx.tag,
         usage_collector,
+        ctx.take_accounting_guard(),
         timeout_config,
         connection_guard,
     );
@@ -199,7 +201,9 @@ pub async fn handle_streaming(
         Ok(resp) => resp,
         Err(e) => {
             log::error!("[{}] 构建流式响应失败: {e}", ctx.tag);
-            ProxyError::Internal(format!("Failed to build streaming response: {e}")).into_response()
+            let error = ProxyError::Internal(format!("Failed to build streaming response: {e}"));
+            log_proxy_error(state, ctx, true, &error);
+            error.into_response()
         }
     }
 }
@@ -221,7 +225,13 @@ pub async fn handle_non_streaming(
             Duration::ZERO
         };
     let (mut response_headers, status, body_bytes) =
-        read_decoded_body(response, ctx.tag, body_timeout).await?;
+        match read_decoded_body(response, ctx.tag, body_timeout).await {
+            Ok(response) => response,
+            Err(error) => {
+                log_proxy_error(state, ctx, false, &error);
+                return Err(error);
+            }
+        };
     strip_hop_by_hop_response_headers(&mut response_headers);
 
     log::debug!(
@@ -230,77 +240,44 @@ pub async fn handle_non_streaming(
         String::from_utf8_lossy(&body_bytes)
     );
 
-    // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
-    if usage_logging_enabled(state) {
-        if let Ok(json_value) = serde_json::from_slice::<Value>(&body_bytes) {
-            // 解析使用量
-            if let Some(usage) = (parser_config.response_parser)(&json_value) {
-                // 归因优先级：usage 解析出的模型 → 响应 model 字段 → 映射后的出站
-                // 模型（路由接管真值）→ 客户端请求模型。空字符串视为缺失。
+    // Parse before constructing the downstream response, but defer the write
+    // until construction succeeds so a request cannot get two terminal rows.
+    let usage = if ctx.accounting().is_some() {
+        match serde_json::from_slice::<Value>(&body_bytes) {
+            Ok(json) => {
+                let usage = (parser_config.response_parser)(&json).unwrap_or_default();
                 let model = usage
                     .model
                     .clone()
-                    .filter(|m| !m.is_empty())
+                    .filter(|model| !model.is_empty())
                     .or_else(|| {
-                        json_value
-                            .get("model")
-                            .and_then(|m| m.as_str())
-                            .filter(|m| !m.is_empty())
+                        json.get("model")
+                            .and_then(Value::as_str)
+                            .filter(|model| !model.is_empty())
                             .map(str::to_string)
                     })
                     .or_else(|| ctx.outbound_model.clone())
                     .unwrap_or_else(|| ctx.request_model.clone());
-
-                spawn_log_usage(
-                    state,
-                    ctx,
-                    usage,
-                    &model,
-                    &ctx.request_model,
-                    status.as_u16(),
-                    false,
-                );
-            } else {
-                let model = json_value
-                    .get("model")
-                    .and_then(|m| m.as_str())
-                    .filter(|m| !m.is_empty())
-                    .map(str::to_string)
-                    .or_else(|| ctx.outbound_model.clone())
-                    .unwrap_or_else(|| ctx.request_model.clone());
-                spawn_log_usage(
-                    state,
-                    ctx,
-                    TokenUsage::default(),
-                    &model,
-                    &ctx.request_model,
-                    status.as_u16(),
-                    false,
-                );
-                log::debug!(
-                    "[{}] 未能解析 usage 信息，跳过记录",
-                    parser_config.app_type_str
-                );
+                Some((usage, model))
             }
-        } else {
-            log::debug!(
-                "[{}] <<< 响应 (非 JSON): {} bytes",
-                ctx.tag,
-                body_bytes.len()
-            );
-            spawn_log_usage(
-                state,
-                ctx,
-                TokenUsage::default(),
-                ctx.outbound_model.as_deref().unwrap_or(&ctx.request_model),
-                &ctx.request_model,
-                status.as_u16(),
-                false,
-            );
+            Err(_) => {
+                log::debug!(
+                    "[{}] <<< Non-JSON response: {} bytes",
+                    ctx.tag,
+                    body_bytes.len()
+                );
+                Some((
+                    TokenUsage::default(),
+                    ctx.outbound_model
+                        .clone()
+                        .unwrap_or_else(|| ctx.request_model.clone()),
+                ))
+            }
         }
     } else {
         log::debug!("[{}] usage logging 已关闭，跳过非流式 usage 解析", ctx.tag);
-    }
+        None
+    };
 
     // 构建响应
     let mut builder = axum::response::Response::builder().status(status);
@@ -309,10 +286,16 @@ pub async fn handle_non_streaming(
     }
 
     let body = axum::body::Body::from(body_bytes);
-    builder.body(body).map_err(|e| {
+    let response = builder.body(body).map_err(|e| {
         log::error!("[{}] 构建响应失败: {e}", ctx.tag);
-        ProxyError::Internal(format!("Failed to build response: {e}"))
-    })
+        let error = ProxyError::Internal(format!("Failed to build response: {e}"));
+        log_proxy_error(state, ctx, false, &error);
+        error
+    })?;
+    if let Some((usage, model)) = usage {
+        spawn_log_usage(state, ctx, usage, &model, status.as_u16(), false);
+    }
+    Ok(response)
 }
 
 /// 通用响应处理入口
@@ -336,7 +319,8 @@ pub async fn process_response(
 // SSE 使用量收集器
 // ============================================================================
 
-type UsageCallbackWithTiming = Arc<dyn Fn(Vec<Value>, Option<u64>) + Send + Sync + 'static>;
+type UsageCallbackWithTiming =
+    Arc<dyn Fn(Vec<Value>, Option<u64>, u16, Option<String>) + Send + Sync + 'static>;
 
 /// SSE 使用量收集器
 #[derive(Clone)]
@@ -347,11 +331,12 @@ pub struct SseUsageCollector {
 struct SseUsageCollectorInner {
     events: Mutex<Vec<Value>>,
     first_event_time: Mutex<Option<std::time::Instant>>,
-    first_event_set: AtomicBool,
     start_time: std::time::Instant,
+    success_status: u16,
     on_complete: UsageCallbackWithTiming,
     should_collect: Option<StreamUsageEventFilter>,
     finished: AtomicBool,
+    saw_completion: AtomicBool,
 }
 
 impl SseUsageCollector {
@@ -359,18 +344,20 @@ impl SseUsageCollector {
     pub fn new(
         start_time: std::time::Instant,
         should_collect: Option<StreamUsageEventFilter>,
-        callback: impl Fn(Vec<Value>, Option<u64>) + Send + Sync + 'static,
+        success_status: u16,
+        callback: impl Fn(Vec<Value>, Option<u64>, u16, Option<String>) + Send + Sync + 'static,
     ) -> Self {
         let on_complete: UsageCallbackWithTiming = Arc::new(callback);
         Self {
             inner: Arc::new(SseUsageCollectorInner {
                 events: Mutex::new(Vec::new()),
                 first_event_time: Mutex::new(None),
-                first_event_set: AtomicBool::new(false),
                 start_time,
+                success_status,
                 on_complete,
                 should_collect,
                 finished: AtomicBool::new(false),
+                saw_completion: AtomicBool::new(false),
             }),
         }
     }
@@ -382,27 +369,55 @@ impl SseUsageCollector {
             .unwrap_or(true)
     }
 
-    /// 标记首个被收集的 SSE 事件时间，沿用 `first_token_ms` 的既有近似语义。
-    async fn mark_first_collected_event_time(&self) {
-        if self.inner.first_event_set.load(Ordering::Acquire) {
+    /// Mark the first substantive downstream data event, independently of the
+    /// usage-event filter (usage commonly arrives only at stream completion).
+    pub async fn observe_data(&self, data: &str) {
+        if !is_substantive_sse_data(data) {
             return;
         }
         let mut first_time = self.inner.first_event_time.lock().await;
         if first_time.is_none() {
             *first_time = Some(std::time::Instant::now());
-            self.inner.first_event_set.store(true, Ordering::Release);
         }
     }
 
     /// 推送 SSE 事件
     pub async fn push(&self, event: Value) {
-        self.mark_first_collected_event_time().await;
         let mut events = self.inner.events.lock().await;
         events.push(event);
     }
 
     /// 完成收集并触发回调
     pub async fn finish(&self) {
+        self.finish_result(self.inner.success_status, None).await;
+    }
+
+    pub async fn finish_with_error(&self, status_code: u16, message: String) {
+        self.finish_result(status_code, Some(message)).await;
+    }
+
+    pub fn mark_completion(&self) {
+        self.inner.saw_completion.store(true, Ordering::Release);
+    }
+
+    pub async fn finish_at_eof(&self) {
+        if self.inner.saw_completion.load(Ordering::Acquire) {
+            self.finish().await;
+        } else {
+            let status = if (200..300).contains(&self.inner.success_status) {
+                502
+            } else {
+                self.inner.success_status
+            };
+            self.finish_with_error(
+                status,
+                "Upstream SSE stream ended before a terminal event".to_string(),
+            )
+            .await;
+        }
+    }
+
+    async fn finish_result(&self, status_code: u16, error_message: Option<String>) {
         if self.inner.finished.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -417,32 +432,39 @@ impl SseUsageCollector {
             first_time.map(|t| (t - self.inner.start_time).as_millis() as u64)
         };
 
-        (self.inner.on_complete)(events, first_token_ms);
+        (self.inner.on_complete)(events, first_token_ms, status_code, error_message);
     }
 }
 
 struct SseUsageFinishGuard {
     collector: Option<SseUsageCollector>,
+    request_guard: Option<RequestAccountingGuard>,
 }
 
 impl SseUsageFinishGuard {
-    fn new(collector: SseUsageCollector) -> Self {
+    fn new(collector: SseUsageCollector, request_guard: Option<RequestAccountingGuard>) -> Self {
         Self {
             collector: Some(collector),
+            request_guard,
         }
     }
 
     fn disarm(&mut self) {
         self.collector = None;
+        self.request_guard = None;
     }
 }
 
 impl Drop for SseUsageFinishGuard {
     fn drop(&mut self) {
         if let Some(collector) = self.collector.take() {
+            let request_guard = self.request_guard.take();
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    collector.finish().await;
+                    collector
+                        .finish_with_error(499, "Request cancelled before completion".to_string())
+                        .await;
+                    drop(request_guard);
                 });
             } else {
                 log::warn!("SSE 用量收尾保护触发时 Tokio runtime 不可用，跳过异步 finish");
@@ -455,21 +477,154 @@ impl Drop for SseUsageFinishGuard {
 // 内部辅助函数
 // ============================================================================
 
+fn has_output_value(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Array(values) => values.iter().any(has_output_value),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            !matches!(
+                key.as_str(),
+                "id" | "type"
+                    | "role"
+                    | "index"
+                    | "status"
+                    | "object"
+                    | "sequence"
+                    | "sequence_number"
+            ) && has_output_value(value)
+        }),
+    }
+}
+
+fn is_substantive_sse_data(data: &str) -> bool {
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return false;
+    }
+    let Ok(event) = serde_json::from_str::<Value>(data) else {
+        return true;
+    };
+    if let Some(event_type) = event.get("type").and_then(Value::as_str) {
+        if matches!(
+            event_type,
+            "message_start"
+                | "message_delta"
+                | "message_stop"
+                | "ping"
+                | "response.created"
+                | "response.in_progress"
+                | "response.completed"
+                | "response.failed"
+                | "response.incomplete"
+                | "error"
+        ) {
+            return false;
+        }
+        if event_type == "content_block_start" {
+            return event.get("content_block").is_some_and(has_output_value);
+        }
+        if event_type.ends_with("_delta") || event_type.contains(".delta") {
+            return event.get("delta").is_some_and(has_output_value);
+        }
+        if event_type == "response.output_item.added" {
+            return event.get("item").is_some_and(has_output_value);
+        }
+    }
+    event
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice
+                    .get("delta")
+                    .or_else(|| choice.get("message"))
+                    .is_some_and(has_output_value)
+            })
+        })
+        || event
+            .get("candidates")
+            .and_then(Value::as_array)
+            .is_some_and(|candidates| {
+                candidates.iter().any(|candidate| {
+                    candidate
+                        .get("content")
+                        .or_else(|| candidate.get("functionCall"))
+                        .is_some_and(has_output_value)
+                })
+            })
+}
+
+enum SseSignal {
+    None,
+    Completion,
+    Terminal,
+    Failed(String),
+}
+
+fn sse_signal(data: &str) -> SseSignal {
+    if data.trim() == "[DONE]" {
+        return SseSignal::Terminal;
+    }
+    let Ok(event) = serde_json::from_str::<Value>(data) else {
+        return SseSignal::None;
+    };
+
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.completed" | "message_stop") => return SseSignal::Terminal,
+        Some(kind @ ("response.failed" | "response.incomplete" | "error")) => {
+            let detail = event
+                .pointer("/response/error/message")
+                .or_else(|| event.pointer("/error/message"))
+                .or_else(|| event.pointer("/response/incomplete_details/reason"))
+                .or_else(|| event.get("message"))
+                .and_then(Value::as_str)
+                .filter(|message| !message.is_empty())
+                .unwrap_or(kind);
+            return SseSignal::Failed(format!("Upstream SSE {kind}: {detail}"));
+        }
+        _ => {}
+    }
+
+    if event
+        .get("candidates")
+        .and_then(Value::as_array)
+        .is_some_and(|candidates| {
+            candidates.iter().any(|candidate| {
+                candidate
+                    .get("finishReason")
+                    .is_some_and(|reason| !reason.is_null())
+            })
+        })
+    {
+        return SseSignal::Terminal;
+    }
+
+    if event
+        .get("choices")
+        .and_then(Value::as_array)
+        .is_some_and(|choices| {
+            choices.iter().any(|choice| {
+                choice
+                    .get("finish_reason")
+                    .is_some_and(|reason| !reason.is_null())
+            })
+        })
+    {
+        return SseSignal::Completion;
+    }
+
+    SseSignal::None
+}
+
 /// 创建使用量收集器
-fn create_usage_collector(
+pub(crate) fn create_usage_collector(
     ctx: &RequestContext,
     state: &ProxyState,
     status_code: u16,
     parser_config: &UsageParserConfig,
 ) -> Option<SseUsageCollector> {
-    let logging_enabled = state
-        .config
-        .try_read()
-        .map(|c| c.enable_logging)
-        .unwrap_or(true);
-    if !logging_enabled {
-        return None;
-    }
+    let accounting = ctx.accounting()?;
 
     let state = state.clone();
     let provider_id = ctx.provider.id.clone();
@@ -489,92 +644,75 @@ fn create_usage_collector(
     let stream_parser = parser_config.stream_parser;
     let model_extractor = parser_config.model_extractor;
     let session_id = ctx.session_id.clone();
+    let correlation_id = ctx.correlation_id();
 
     Some(SseUsageCollector::new(
         start_time,
         parser_config.stream_event_filter,
-        move |events, first_token_ms| {
-            if let Some(usage) = stream_parser(&events) {
-                let model = model_extractor(&events, &fallback_model);
-                let latency_ms = start_time.elapsed().as_millis() as u64;
-
-                let state = state.clone();
-                let provider_id = provider_id.clone();
-                let session_id = session_id.clone();
-                let request_model = request_model.clone();
-                let outbound_model = fallback_model.clone();
-
-                tokio::spawn(async move {
-                    log_usage_internal(
-                        &state,
-                        &provider_id,
-                        app_type_str,
-                        &model,
-                        &request_model,
-                        &outbound_model,
-                        usage,
-                        latency_ms,
-                        first_token_ms,
-                        true, // is_streaming
-                        status_code,
-                        Some(session_id),
-                    )
-                    .await;
-                });
-            } else {
-                let model = model_extractor(&events, &fallback_model);
-                let latency_ms = start_time.elapsed().as_millis() as u64;
-                let state = state.clone();
-                let provider_id = provider_id.clone();
-                let session_id = session_id.clone();
-                let request_model = request_model.clone();
-                let outbound_model = fallback_model.clone();
-
-                tokio::spawn(async move {
-                    log_usage_internal(
-                        &state,
-                        &provider_id,
-                        app_type_str,
-                        &model,
-                        &request_model,
-                        &outbound_model,
-                        TokenUsage::default(),
-                        latency_ms,
-                        first_token_ms,
-                        true, // is_streaming
-                        status_code,
-                        Some(session_id),
-                    )
-                    .await;
-                });
+        status_code,
+        move |events, first_token_ms, final_status, error_message| {
+            if !accounting.claim() {
+                return;
+            }
+            let usage = stream_parser(&events);
+            if usage.is_none() {
                 log::debug!("[{tag}] 流式响应缺少 usage 统计，跳过消费记录");
             }
+            let usage = usage.unwrap_or_default();
+            let model = model_extractor(&events, &fallback_model);
+            let latency_ms = start_time.elapsed().as_millis() as u64;
+
+            let state = state.clone();
+            let provider_id = provider_id.clone();
+            let session_id = session_id.clone();
+            let request_model = request_model.clone();
+            let outbound_model = fallback_model.clone();
+            let correlation_id = correlation_id.clone();
+
+            tokio::spawn(async move {
+                log_usage_internal(
+                    &state,
+                    &provider_id,
+                    app_type_str,
+                    &model,
+                    &request_model,
+                    &outbound_model,
+                    usage,
+                    latency_ms,
+                    first_token_ms,
+                    true, // is_streaming
+                    final_status,
+                    Some(session_id),
+                    correlation_id,
+                    error_message,
+                )
+                .await;
+            });
         },
     ))
 }
 
 /// 异步记录使用量
-fn spawn_log_usage(
+pub(crate) fn spawn_log_usage(
     state: &ProxyState,
     ctx: &RequestContext,
     usage: TokenUsage,
     model: &str,
-    request_model: &str,
     status_code: u16,
     is_streaming: bool,
 ) {
-    // Check enable_logging before spawning the log task
-    if let Ok(config) = state.config.try_read() {
-        if !config.enable_logging {
-            return;
-        }
+    let Some(accounting) = ctx.accounting() else {
+        return;
+    };
+    if !accounting.claim() {
+        return;
     }
 
     let state = state.clone();
     let provider_id = ctx.provider.id.clone();
     let app_type_str = ctx.app_type_str.to_string();
     let model = model.to_string();
-    let request_model = request_model.to_string();
+    let request_model = ctx.request_model.clone();
     // 「按请求计价」模式的锚点：映射后的出站模型，无映射时等于 request_model
     let outbound_model = ctx
         .outbound_model
@@ -582,6 +720,7 @@ fn spawn_log_usage(
         .unwrap_or_else(|| ctx.request_model.clone());
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
+    let correlation_id = ctx.correlation_id();
 
     tokio::spawn(async move {
         log_usage_internal(
@@ -597,17 +736,44 @@ fn spawn_log_usage(
             is_streaming,
             status_code,
             Some(session_id),
+            correlation_id,
+            None,
         )
         .await;
     });
 }
 
-pub(crate) fn usage_logging_enabled(state: &ProxyState) -> bool {
-    state
-        .config
-        .try_read()
-        .map(|config| config.enable_logging)
-        .unwrap_or(true)
+pub(crate) fn log_proxy_error(
+    state: &ProxyState,
+    ctx: &RequestContext,
+    is_streaming: bool,
+    error: &ProxyError,
+) {
+    use super::usage::logger::UsageLogger;
+
+    let Some(accounting) = ctx.accounting() else {
+        return;
+    };
+    if !accounting.claim() {
+        return;
+    }
+
+    let logger = UsageLogger::new(&state.db);
+    if let Err(error) = logger.log_error_with_context(
+        uuid::Uuid::new_v4().to_string(),
+        ctx.correlation_id(),
+        ctx.provider.id.clone(),
+        ctx.app_type_str.to_string(),
+        ctx.request_model.clone(),
+        map_proxy_error_to_status(error),
+        get_error_message(error),
+        ctx.latency_ms(),
+        is_streaming,
+        Some(ctx.session_id.clone()),
+        None,
+    ) {
+        log::warn!("Failed to record proxied request error: {error}");
+    }
 }
 
 /// 内部使用量记录函数
@@ -630,6 +796,8 @@ async fn log_usage_internal(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    correlation_id: Option<String>,
+    error_message: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -655,6 +823,7 @@ async fn log_usage_internal(
 
     if let Err(e) = logger.log_with_calculation(
         request_id,
+        correlation_id,
         provider_id.to_string(),
         app_type.to_string(),
         model.to_string(),
@@ -668,6 +837,7 @@ async fn log_usage_internal(
         session_id,
         None, // provider_type
         is_streaming,
+        error_message,
     ) {
         log::warn!("[USG-001] 记录使用量失败: {e}");
     }
@@ -678,15 +848,21 @@ pub fn create_logged_passthrough_stream(
     stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
     tag: &'static str,
     usage_collector: Option<SseUsageCollector>,
+    request_guard: Option<RequestAccountingGuard>,
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    // Construct the guard before the generator is first polled. A downstream
+    // that disconnects without reading the body must still finalize its row.
+    let finish_guard = usage_collector
+        .clone()
+        .map(|collector| SseUsageFinishGuard::new(collector, request_guard));
     async_stream::stream! {
         let _conn_guard = connection_guard;
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut collector = usage_collector;
-        let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
+        let mut finish_guard = finish_guard;
         let inspect_sse_events =
             collector.is_some() || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
@@ -722,6 +898,14 @@ pub fn create_logged_passthrough_stream(
                             // 超时
                             let timeout_type = if is_first_chunk { "首字节" } else { "静默期" };
                             log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, duration.as_secs());
+                            if let Some(collector) = &collector {
+                                collector
+                                    .finish_with_error(
+                                        504,
+                                        "Upstream stream timed out".to_string(),
+                                    )
+                                    .await;
+                            }
                             yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
                             break;
                         }
@@ -748,6 +932,9 @@ pub fn create_logged_passthrough_stream(
                                 // 提取 data 部分；只有 usage collector 存在时才解析 JSON。
                                 for line in event_text.lines() {
                                     if let Some(data) = strip_sse_field(line, "data") {
+                                        if let Some(collector) = &collector {
+                                            collector.observe_data(data).await;
+                                        }
                                         if data.trim() != "[DONE]" {
                                             let collected = match &collector {
                                                 Some(c) if c.should_collect(data) => {
@@ -769,6 +956,21 @@ pub fn create_logged_passthrough_stream(
                                         } else {
                                             log::debug!("[{tag}] <<< SSE: [DONE]");
                                         }
+                                        if let Some(collector) = &collector {
+                                            match sse_signal(data) {
+                                                SseSignal::None => {}
+                                                SseSignal::Completion => {
+                                                    collector.mark_completion();
+                                                }
+                                                SseSignal::Terminal => {
+                                                    collector.mark_completion();
+                                                    collector.finish().await;
+                                                }
+                                                SseSignal::Failed(message) => {
+                                                    collector.finish_with_error(502, message).await;
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -779,6 +981,11 @@ pub fn create_logged_passthrough_stream(
                 }
                 Some(Err(e)) => {
                     log::error!("[{tag}] 流错误: {e}");
+                    if let Some(collector) = &collector {
+                        collector
+                            .finish_with_error(502, "Upstream stream failed".to_string())
+                            .await;
+                    }
                     yield Err(std::io::Error::other(e.to_string()));
                     break;
                 }
@@ -790,7 +997,7 @@ pub fn create_logged_passthrough_stream(
         }
 
         if let Some(c) = collector.take() {
-            c.finish().await;
+            c.finish_at_eof().await;
         }
         if let Some(guard) = &mut finish_guard {
             guard.disarm();
@@ -812,10 +1019,14 @@ fn format_headers(headers: &HeaderMap) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::AppType;
     use crate::database::Database;
     use crate::error::AppError;
     use crate::provider::ProviderMeta;
     use crate::proxy::failover_switch::FailoverSwitchManager;
+    use crate::proxy::handler_config::{
+        CLAUDE_PARSER_CONFIG, CODEX_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
+    };
     use crate::proxy::provider_router::ProviderRouter;
     use crate::proxy::providers::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
@@ -947,6 +1158,538 @@ mod tests {
         }
     }
 
+    async fn accounting_context(
+        app_type: AppType,
+        app_type_str: &'static str,
+        request_id: &str,
+    ) -> Result<(Arc<Database>, ProxyState, RequestContext), AppError> {
+        let db = Arc::new(Database::memory()?);
+        let provider_id = format!("{app_type_str}-usage-test");
+        insert_provider(
+            &db,
+            &provider_id,
+            app_type_str,
+            ProviderMeta {
+                provider_type: Some("nexus".to_string()),
+                ..ProviderMeta::default()
+            },
+        )?;
+        db.set_current_provider(app_type_str, &provider_id)?;
+        let state = build_state(db.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert("x-request-id", request_id.parse().unwrap());
+        let ctx = RequestContext::new(
+            &state,
+            &serde_json::json!({"model": "GLM-5.2-FP8"}),
+            &headers,
+            app_type,
+            "Test",
+            app_type_str,
+        )
+        .await
+        .map_err(|error| AppError::Message(error.to_string()))?;
+        Ok((db, state, ctx))
+    }
+
+    async fn wait_for_usage_row(db: &Database) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let count = db
+                    .conn
+                    .lock()
+                    .expect("lock usage database")
+                    .query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap_or(0);
+                if count > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("timed out waiting for usage row");
+    }
+
+    type StoredStreamOutcome = (
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+
+    fn stored_stream_outcome(db: &Database) -> Result<StoredStreamOutcome, AppError> {
+        let stored = db.conn.lock().expect("lock usage database").query_row(
+            "SELECT COUNT(*), status_code, input_tokens, cache_read_tokens,
+                    first_token_ms, duration_ms, error_message, correlation_id
+             FROM proxy_request_logs",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                ))
+            },
+        )?;
+        Ok(stored)
+    }
+
+    #[test]
+    fn substantive_sse_detection_excludes_metadata_and_usage_trailers() {
+        for data in [
+            "[DONE]",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":10}}}"#,
+            r#"{"type":"message_delta","usage":{"output_tokens":2}}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#,
+            r#"{"type":"response.completed","response":{"usage":{"input_tokens":10}}}"#,
+            r#"{"type":"response.output_item.added","sequence":1,"item":{"id":"item_1","type":"message","status":"in_progress","object":"response.output_item"}}"#,
+            r#"{"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10}}"#,
+        ] {
+            assert!(!is_substantive_sse_data(data), "metadata event: {data}");
+        }
+        for data in [
+            r#"{"type":"content_block_delta","delta":{"type":"text_delta","text":"answer"}}"#,
+            r#"{"choices":[{"delta":{"content":"answer"}}]}"#,
+            r#"{"type":"response.output_text.delta","delta":"answer"}"#,
+            r#"{"candidates":[{"content":{"parts":[{"text":"answer"}]}}]}"#,
+        ] {
+            assert!(is_substantive_sse_data(data), "output event: {data}");
+        }
+    }
+
+    #[tokio::test]
+    async fn all_stream_paths_record_one_zero_usage_row() -> Result<(), AppError> {
+        for (app_type, app_type_str, parser) in [
+            (AppType::Codex, "codex", &OPENAI_PARSER_CONFIG),
+            (AppType::Claude, "claude", &CLAUDE_PARSER_CONFIG),
+            (AppType::Codex, "codex", &CODEX_PARSER_CONFIG),
+        ] {
+            let request_id = format!("request-{app_type_str}");
+            let (db, state, ctx) = accounting_context(app_type, app_type_str, &request_id).await?;
+            create_usage_collector(&ctx, &state, 200, parser)
+                .expect("usage logging enabled")
+                .finish()
+                .await;
+            wait_for_usage_row(&db).await;
+
+            let stored: (i64, i64, i64, Option<i64>, Option<String>) =
+                db.conn.lock().expect("lock usage database").query_row(
+                    "SELECT COUNT(*), SUM(input_tokens + output_tokens), status_code,
+                            duration_ms, correlation_id FROM proxy_request_logs",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )?;
+            assert_eq!(stored.0, 1);
+            assert_eq!(stored.1, 0);
+            assert_eq!(stored.2, 200);
+            assert!(stored.3.is_some());
+            assert_eq!(stored.4.as_deref(), Some(request_id.as_str()));
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dropped_request_context_records_one_cancelled_row() -> Result<(), AppError> {
+        let (db, _state, ctx) =
+            accounting_context(AppType::Codex, "codex", "request-cancelled").await?;
+        let accounting_clone = ctx.accounting().expect("usage accounting enabled");
+        drop(ctx);
+        wait_for_usage_row(&db).await;
+        drop(accounting_clone);
+
+        let stored: (i64, i64, Option<String>, Option<String>) =
+            db.conn.lock().expect("lock usage database").query_row(
+                "SELECT COUNT(*), status_code, error_message, correlation_id
+                 FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        assert_eq!(
+            stored,
+            (
+                1,
+                499,
+                Some("Request cancelled before completion".to_string()),
+                Some("request-cancelled".to_string()),
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn explicit_error_and_context_drop_record_once() -> Result<(), AppError> {
+        let (db, state, ctx) =
+            accounting_context(AppType::Codex, "codex", "request-timeout").await?;
+        log_proxy_error(
+            &state,
+            &ctx,
+            true,
+            &ProxyError::Timeout("upstream timed out".to_string()),
+        );
+        drop(ctx);
+
+        let stored: (i64, i64) = db.conn.lock().expect("lock usage database").query_row(
+            "SELECT COUNT(*), status_code FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(stored, (1, 504));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_stream_success_and_context_drop_record_once() -> Result<(), AppError> {
+        let (db, state, ctx) =
+            accounting_context(AppType::Codex, "codex", "request-success").await?;
+        spawn_log_usage(
+            &state,
+            &ctx,
+            TokenUsage {
+                input_tokens: 12,
+                output_tokens: 3,
+                ..TokenUsage::default()
+            },
+            "GLM-5.2-FP8",
+            200,
+            false,
+        );
+        drop(ctx);
+        wait_for_usage_row(&db).await;
+
+        let stored: (i64, i64, i64, i64) = db.conn.lock().expect("lock usage database").query_row(
+            "SELECT COUNT(*), status_code, input_tokens, output_tokens FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(stored, (1, 200, 12, 3));
+        Ok(())
+    }
+
+    async fn assert_openai_usage_trailer(
+        terminator: &str,
+        request_id: &str,
+    ) -> Result<(), AppError> {
+        let (db, state, ctx) = accounting_context(AppType::Codex, "codex", request_id).await?;
+        let sse = [
+            concat!(
+                "data: {\"id\":\"chatcmpl-1\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"done\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"id\":\"chatcmpl-1\",\"model\":\"GLM-5.2-FP8\",\"choices\":[],\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":7,\"total_tokens\":127}}\n\n"
+            ),
+            terminator,
+        ]
+        .concat();
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from(sse))]);
+        let mut downstream = Box::pin(create_logged_passthrough_stream(
+            upstream,
+            "Test",
+            create_usage_collector(&ctx, &state, 200, &OPENAI_PARSER_CONFIG),
+            ctx.take_accounting_guard(),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+        ));
+        while downstream.next().await.is_some() {}
+        wait_for_usage_row(&db).await;
+
+        let stored: (i64, i64, i64, i64) = db.conn.lock().expect("lock usage database").query_row(
+            "SELECT COUNT(*), status_code, input_tokens, output_tokens FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(stored, (1, 200, 120, 7));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn openai_stream_waits_for_usage_trailer_after_finish_reason() -> Result<(), AppError> {
+        assert_openai_usage_trailer("data: [DONE]\n\n", "request-usage-trailer-done").await
+    }
+
+    #[tokio::test]
+    async fn openai_stream_clean_eof_after_usage_trailer_is_success() -> Result<(), AppError> {
+        assert_openai_usage_trailer("", "request-usage-trailer-eof").await
+    }
+
+    #[tokio::test]
+    async fn responses_failures_preserve_partial_usage_and_error() -> Result<(), AppError> {
+        for (name, sse, expected_input, expected_output) in [
+            (
+                "failed",
+                "data: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_failed\",\"model\":\"GLM-5.2-FP8\",\"status\":\"failed\",\"usage\":{\"input_tokens\":80,\"output_tokens\":4},\"error\":{\"message\":\"generation failed\"}}}\n\n",
+                80,
+                4,
+            ),
+            (
+                "incomplete",
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"id\":\"resp_incomplete\",\"model\":\"GLM-5.2-FP8\",\"status\":\"incomplete\",\"usage\":{\"input_tokens\":90,\"output_tokens\":5},\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+                90,
+                5,
+            ),
+            (
+                "error",
+                concat!(
+                    "data: {\"id\":\"chatcmpl-error\",\"model\":\"GLM-5.2-FP8\",\"choices\":[],\"usage\":{\"prompt_tokens\":70,\"completion_tokens\":3,\"total_tokens\":73}}\n\n",
+                    "data: {\"type\":\"error\",\"error\":{\"message\":\"stream failed\"}}\n\n"
+                ),
+                70,
+                3,
+            ),
+        ] {
+            let request_id = format!("request-{name}");
+            let (db, state, ctx) =
+                accounting_context(AppType::Codex, "codex", &request_id).await?;
+            let upstream = futures::stream::iter(vec![Ok(Bytes::from(sse))]);
+            let mut downstream = Box::pin(create_logged_passthrough_stream(
+                upstream,
+                "Test",
+                create_usage_collector(&ctx, &state, 200, &CODEX_PARSER_CONFIG),
+                ctx.take_accounting_guard(),
+                StreamingTimeoutConfig {
+                    first_byte_timeout: 0,
+                    idle_timeout: 0,
+                },
+                None,
+            ));
+            while downstream.next().await.is_some() {}
+            wait_for_usage_row(&db).await;
+
+            let stored: (i64, i64, i64, i64, Option<String>, Option<i64>) = db
+                .conn
+                .lock()
+                .expect("lock usage database")
+                .query_row(
+                    "SELECT COUNT(*), status_code, input_tokens, output_tokens,
+                            error_message, first_token_ms FROM proxy_request_logs",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )?;
+            assert_eq!(stored.0, 1, "{name}");
+            assert_eq!(stored.1, 502, "{name}");
+            assert_eq!((stored.2, stored.3), (expected_input, expected_output));
+            assert!(stored.4.as_deref().is_some_and(|error| error.contains(name)));
+            assert_eq!(stored.5, None, "terminal metadata is not TTFT");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn truncated_sse_eof_is_not_recorded_as_success() -> Result<(), AppError> {
+        let (db, state, ctx) =
+            accounting_context(AppType::Codex, "codex", "request-truncated").await?;
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from(
+            "data: {\"id\":\"chatcmpl-truncated\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}]}\n\n",
+        ))]);
+        let mut downstream = Box::pin(create_logged_passthrough_stream(
+            upstream,
+            "Test",
+            create_usage_collector(&ctx, &state, 200, &OPENAI_PARSER_CONFIG),
+            ctx.take_accounting_guard(),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+        ));
+        while downstream.next().await.is_some() {}
+        wait_for_usage_row(&db).await;
+
+        let stored: (i64, i64, Option<String>, Option<i64>) =
+            db.conn.lock().expect("lock usage database").query_row(
+                "SELECT COUNT(*), status_code, error_message, first_token_ms
+                 FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        assert_eq!((stored.0, stored.1), (1, 502));
+        assert!(stored
+            .2
+            .as_deref()
+            .is_some_and(|error| error.contains("terminal event")));
+        assert!(stored.3.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aborted_stream_preserves_partial_usage_and_ttft() -> Result<(), AppError> {
+        let (db, state, ctx) =
+            accounting_context(AppType::Claude, "claude", "request-partial").await?;
+        let collector = create_usage_collector(&ctx, &state, 200, &CLAUDE_PARSER_CONFIG)
+            .expect("usage logging enabled");
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_partial\",\"model\":\"GLM-5.2-FP8\",\"usage\":{\"input_tokens\":120,\"cache_read_input_tokens\":20}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+        )))])
+        .chain(futures::stream::pending());
+        let mut downstream = Box::pin(create_logged_passthrough_stream(
+            upstream,
+            "Test",
+            Some(collector),
+            ctx.take_accounting_guard(),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+        ));
+        assert!(downstream.next().await.unwrap().is_ok());
+        drop(downstream);
+        wait_for_usage_row(&db).await;
+
+        let stored = stored_stream_outcome(&db)?;
+        assert_eq!((stored.0, stored.1, stored.2, stored.3), (1, 499, 120, 20));
+        assert!(stored.4.is_some());
+        assert!(stored.5.is_some());
+        assert_eq!(
+            stored.6.as_deref(),
+            Some("Request cancelled before completion")
+        );
+        assert_eq!(stored.7.as_deref(), Some("request-partial"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unread_stream_still_records_one_aborted_row() -> Result<(), AppError> {
+        let (db, state, ctx) =
+            accounting_context(AppType::Codex, "codex", "request-unread").await?;
+        let stream = create_logged_passthrough_stream(
+            futures::stream::pending(),
+            "Test",
+            create_usage_collector(&ctx, &state, 200, &CODEX_PARSER_CONFIG),
+            ctx.take_accounting_guard(),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+        );
+        drop(stream);
+        wait_for_usage_row(&db).await;
+
+        let stored: (i64, i64, Option<String>, Option<String>) =
+            db.conn.lock().expect("lock usage database").query_row(
+                "SELECT COUNT(*), status_code, error_message, correlation_id
+             FROM proxy_request_logs",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?;
+        assert_eq!(
+            stored,
+            (
+                1,
+                499,
+                Some("Request cancelled before completion".to_string()),
+                Some("request-unread".to_string()),
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn configured_stream_timeout_records_stable_error_and_partial_usage(
+    ) -> Result<(), AppError> {
+        let (db, state, ctx) =
+            accounting_context(AppType::Claude, "claude", "request-stream-timeout").await?;
+        let upstream = futures::stream::iter(vec![Ok(Bytes::from(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_timeout\",\"model\":\"GLM-5.2-FP8\",\"usage\":{\"input_tokens\":90,\"cache_read_input_tokens\":10}}}\n\n",
+            "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+        )))])
+        .chain(futures::stream::pending());
+        let mut downstream = Box::pin(create_logged_passthrough_stream(
+            upstream,
+            "Test",
+            create_usage_collector(&ctx, &state, 200, &CLAUDE_PARSER_CONFIG),
+            ctx.take_accounting_guard(),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 1,
+            },
+            None,
+        ));
+        assert!(downstream.next().await.unwrap().is_ok());
+        assert!(downstream.next().await.unwrap().is_err());
+        assert!(downstream.next().await.is_none());
+        wait_for_usage_row(&db).await;
+
+        let stored = stored_stream_outcome(&db)?;
+        assert_eq!((stored.0, stored.1, stored.2, stored.3), (1, 504, 90, 10));
+        assert!(stored.4.is_some());
+        assert!(stored.5.is_some());
+        assert_eq!(stored.6.as_deref(), Some("Upstream stream timed out"));
+        assert_eq!(stored.7.as_deref(), Some("request-stream-timeout"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upstream_stream_error_records_stable_error_and_partial_usage() -> Result<(), AppError>
+    {
+        let (db, state, ctx) =
+            accounting_context(AppType::Claude, "claude", "request-stream-error").await?;
+        let upstream = futures::stream::iter(vec![
+            Ok(Bytes::from(concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_error\",\"model\":\"GLM-5.2-FP8\",\"usage\":{\"input_tokens\":80,\"cache_read_input_tokens\":8}}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n"
+            ))),
+            Err(std::io::Error::other("private upstream transport detail")),
+        ]);
+        let mut downstream = Box::pin(create_logged_passthrough_stream(
+            upstream,
+            "Test",
+            create_usage_collector(&ctx, &state, 200, &CLAUDE_PARSER_CONFIG),
+            ctx.take_accounting_guard(),
+            StreamingTimeoutConfig {
+                first_byte_timeout: 0,
+                idle_timeout: 0,
+            },
+            None,
+        ));
+        assert!(downstream.next().await.unwrap().is_ok());
+        assert!(downstream.next().await.unwrap().is_err());
+        assert!(downstream.next().await.is_none());
+        wait_for_usage_row(&db).await;
+
+        let stored = stored_stream_outcome(&db)?;
+        assert_eq!((stored.0, stored.1, stored.2, stored.3), (1, 502, 80, 8));
+        assert!(stored.4.is_some());
+        assert!(stored.5.is_some());
+        assert_eq!(stored.6.as_deref(), Some("Upstream stream failed"));
+        assert!(!stored
+            .6
+            .as_deref()
+            .is_some_and(|message| message.contains("private upstream")));
+        assert_eq!(stored.7.as_deref(), Some("request-stream-error"));
+        Ok(())
+    }
+
     fn seed_pricing(db: &Database) -> Result<(), AppError> {
         let conn = crate::database::lock_conn!(db.conn);
         conn.execute(
@@ -1021,6 +1764,8 @@ mod tests {
             false,
             200,
             None,
+            None,
+            None,
         )
         .await;
 
@@ -1090,6 +1835,8 @@ mod tests {
             None,
             false,
             200,
+            None,
+            None,
             None,
         )
         .await;
@@ -1170,6 +1917,8 @@ mod tests {
             None,
             false,
             200,
+            None,
+            None,
             None,
         )
         .await;

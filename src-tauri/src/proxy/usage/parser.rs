@@ -365,12 +365,16 @@ impl TokenUsage {
     pub fn from_codex_stream_events_auto(events: &[Value]) -> Option<Self> {
         log::debug!("[Codex] 智能解析流式事件，共 {} 个事件", events.len());
 
-        // 先尝试 Codex Responses API 格式 (response.completed 事件)
+        // Responses terminal events may carry partial usage even when the
+        // response failed or ended incomplete. Preserve it for diagnostics.
         for event in events {
             if let Some(event_type) = event.get("type").and_then(|v| v.as_str()) {
-                if event_type == "response.completed" {
+                if matches!(
+                    event_type,
+                    "response.completed" | "response.failed" | "response.incomplete"
+                ) {
                     if let Some(response) = event.get("response") {
-                        log::debug!("[Codex] 找到 response.completed 事件");
+                        log::debug!("[Codex] 找到 {event_type} 事件");
                         return Self::from_codex_response_auto(response);
                     }
                 }
@@ -588,10 +592,8 @@ mod tests {
     }
 
     #[test]
-    fn test_codex_response_auto_returns_some_for_synthetic_all_zero() {
-        // P3 回归：上游非流式 Chat 省略 usage 时转换器合成的全 0 usage，from_codex_response_auto
-        // 仍返回 Some（字段存在、无 positivity check）——证明 handlers 必须用 has_billable_tokens
-        // 闸门才能挡住空行，单靠 `if let Some` 不够。
+    fn test_codex_response_auto_preserves_synthetic_all_zero_usage() {
+        // Zero-token accounting still distinguishes this object from no usage.
         let synthetic = json!({
             "usage": { "input_tokens": 0, "output_tokens": 0, "total_tokens": 0 }
         });
@@ -599,7 +601,7 @@ mod tests {
             .expect("全 0 usage 字段存在时 from_codex_response_auto 返回 Some");
         assert!(
             !usage.has_billable_tokens(),
-            "全 0 usage 必须被 has_billable_tokens 判为非计费，由 handlers 闸门跳过"
+            "synthetic all-zero usage must remain non-billable"
         );
     }
 

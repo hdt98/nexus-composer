@@ -3,8 +3,10 @@
 //! 提供请求生命周期的上下文管理，封装通用初始化逻辑
 
 use crate::app_config::AppType;
+use crate::database::Database;
 use crate::provider::Provider;
 use crate::proxy::session::{extract_harness_identity, extract_request_id, HarnessIdentity};
+use crate::proxy::usage::logger::UsageLogger;
 use crate::proxy::{
     extract_session_id,
     forwarder::RequestForwarder,
@@ -13,7 +15,13 @@ use crate::proxy::{
     ProxyError,
 };
 use axum::http::HeaderMap;
-use std::time::Instant;
+use std::{
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex as StdMutex,
+    },
+    time::Instant,
+};
 
 /// 流式超时配置
 #[derive(Debug, Clone, Copy)]
@@ -22,6 +30,120 @@ pub struct StreamingTimeoutConfig {
     pub first_byte_timeout: u64,
     /// 静默期超时（秒），0 表示禁用
     pub idle_timeout: u64,
+}
+
+#[derive(Clone)]
+pub(crate) struct RequestAccounting {
+    inner: Arc<RequestAccountingInner>,
+}
+
+pub(crate) struct RequestAccountingGuard {
+    accounting: RequestAccounting,
+}
+
+struct RequestAccountingInner {
+    finished: AtomicBool,
+    db: Arc<Database>,
+    start_time: Instant,
+    metadata: StdMutex<RequestAccountingMetadata>,
+}
+
+#[derive(Clone)]
+struct RequestAccountingMetadata {
+    provider_id: String,
+    app_type: String,
+    request_model: String,
+    correlation_id: Option<String>,
+    session_id: String,
+    is_streaming: bool,
+}
+
+impl RequestAccounting {
+    fn new(db: Arc<Database>, start_time: Instant, metadata: RequestAccountingMetadata) -> Self {
+        Self {
+            inner: Arc::new(RequestAccountingInner {
+                finished: AtomicBool::new(false),
+                db,
+                start_time,
+                metadata: StdMutex::new(metadata),
+            }),
+        }
+    }
+
+    pub(crate) fn claim(&self) -> bool {
+        self.inner
+            .finished
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn update_route(&self, provider: &Provider, request_id: &str) {
+        let mut metadata = self
+            .inner
+            .metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        metadata.provider_id = provider.id.clone();
+        metadata.correlation_id = provider_correlation_id(provider, request_id);
+    }
+
+    fn update_request_model(&self, request_model: &str) {
+        self.inner
+            .metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .request_model = request_model.to_string();
+    }
+
+    fn record_cancelled(&self) {
+        if !self.claim() {
+            return;
+        }
+
+        let metadata = self
+            .inner
+            .metadata
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let logger = UsageLogger::new(&self.inner.db);
+        if let Err(error) = logger.log_error_with_context(
+            uuid::Uuid::new_v4().to_string(),
+            metadata.correlation_id,
+            metadata.provider_id,
+            metadata.app_type,
+            metadata.request_model,
+            499,
+            "Request cancelled before completion".to_string(),
+            self.inner.start_time.elapsed().as_millis() as u64,
+            metadata.is_streaming,
+            Some(metadata.session_id),
+            None,
+        ) {
+            log::warn!("Failed to record cancelled proxied request: {error}");
+        }
+    }
+}
+
+impl RequestAccountingGuard {
+    fn new(accounting: RequestAccounting) -> Self {
+        Self { accounting }
+    }
+}
+
+impl Drop for RequestAccountingGuard {
+    fn drop(&mut self) {
+        self.accounting.record_cancelled();
+    }
+}
+
+fn provider_correlation_id(provider: &Provider, request_id: &str) -> Option<String> {
+    (provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.provider_type.as_deref())
+        == Some("nexus"))
+    .then(|| request_id.to_string())
 }
 
 /// 请求上下文
@@ -66,6 +188,8 @@ pub struct RequestContext {
     /// Correlation values held for the complete logical request.
     request_id: String,
     harness_identity: Option<HarnessIdentity>,
+    accounting: Option<RequestAccounting>,
+    accounting_guard: StdMutex<Option<RequestAccountingGuard>>,
     /// Session ID 是否由客户端提供。生成的 UUID 不能作为上游缓存 key，否则每个请求都会换 key。
     pub session_client_provided: bool,
     /// 整流器配置
@@ -154,6 +278,29 @@ impl RequestContext {
             .cloned()
             .ok_or(ProxyError::NoAvailableProvider)?;
 
+        let accounting = state
+            .config
+            .try_read()
+            .map(|config| config.enable_logging)
+            .unwrap_or(true)
+            .then(|| {
+                RequestAccounting::new(
+                    state.db.clone(),
+                    start_time,
+                    RequestAccountingMetadata {
+                        provider_id: provider.id.clone(),
+                        app_type: app_type_str.to_string(),
+                        request_model: request_model.clone(),
+                        correlation_id: provider_correlation_id(&provider, &request_id),
+                        session_id: session_id.clone(),
+                        is_streaming: body
+                            .get("stream")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(false),
+                    },
+                )
+            });
+
         log::debug!(
             "[{}] Provider: {}, model: {}, failover chain: {} providers, session: {}",
             tag,
@@ -162,6 +309,8 @@ impl RequestContext {
             providers.len(),
             session_id
         );
+
+        let accounting_guard = StdMutex::new(accounting.clone().map(RequestAccountingGuard::new));
 
         Ok(Self {
             start_time,
@@ -177,6 +326,8 @@ impl RequestContext {
             session_id,
             request_id,
             harness_identity,
+            accounting,
+            accounting_guard,
             session_client_provided: session_result.client_provided,
             rectifier_config,
             optimizer_config,
@@ -195,6 +346,9 @@ impl RequestContext {
 
         self.request_model =
             extract_gemini_model_from_path(endpoint).unwrap_or_else(|| "unknown".to_string());
+        if let Some(accounting) = &self.accounting {
+            accounting.update_request_model(&self.request_model);
+        }
 
         self
     }
@@ -259,6 +413,34 @@ impl RequestContext {
     /// 返回在创建上下文时已选择的 providers，避免重复调用 select_providers()
     pub fn get_providers(&self) -> Vec<Provider> {
         self.providers.clone()
+    }
+
+    pub(crate) fn set_provider(&mut self, provider: Provider) {
+        self.provider = provider;
+        if let Some(accounting) = &self.accounting {
+            accounting.update_route(&self.provider, &self.request_id);
+        }
+    }
+
+    pub(crate) fn set_forward_route(&mut self, provider: Provider, outbound_model: Option<String>) {
+        self.outbound_model = outbound_model;
+        self.set_provider(provider);
+    }
+
+    pub(crate) fn accounting(&self) -> Option<RequestAccounting> {
+        self.accounting.clone()
+    }
+
+    pub(crate) fn take_accounting_guard(&self) -> Option<RequestAccountingGuard> {
+        self.accounting_guard
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+    }
+
+    /// ID sent to Nexus upstreams for server-log correlation.
+    pub(crate) fn correlation_id(&self) -> Option<String> {
+        provider_correlation_id(&self.provider, &self.request_id)
     }
 
     /// 计算请求延迟（毫秒）

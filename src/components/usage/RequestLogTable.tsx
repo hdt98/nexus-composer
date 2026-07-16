@@ -17,6 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { copyText } from "@/lib/clipboard";
 import { useRequestLogs } from "@/lib/query/usage";
 import {
   getFreshInputTokens,
@@ -26,6 +27,7 @@ import {
 } from "@/types/usage";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
+import { RequestDetailPanel } from "./RequestDetailPanel";
 import {
   fmtInt,
   fmtUsd,
@@ -59,6 +61,7 @@ export function RequestLogTable({
   const [statusCode, setStatusCode] = useState<number | undefined>(undefined);
   const [page, setPage] = useState(0);
   const [pageInput, setPageInput] = useState("");
+  const [selectedRequestId, setSelectedRequestId] = useState<string>();
   const pageSize = 20;
 
   const effectiveFilters: LogFilters = {
@@ -179,7 +182,13 @@ export function RequestLogTable({
                     {t("usage.status")}
                   </TableHead>
                   <TableHead className="text-center whitespace-nowrap">
+                    {t("usage.correlationId")}
+                  </TableHead>
+                  <TableHead className="text-center whitespace-nowrap">
                     {t("usage.source", { defaultValue: "Source" })}
+                  </TableHead>
+                  <TableHead className="text-center whitespace-nowrap">
+                    {t("common.actions")}
                   </TableHead>
                 </TableRow>
               </TableHeader>
@@ -187,7 +196,7 @@ export function RequestLogTable({
                 {logs.length === 0 ? (
                   <TableRow>
                     <TableCell
-                      colSpan={9}
+                      colSpan={11}
                       className="text-center text-muted-foreground"
                     >
                       {t("usage.noData")}
@@ -196,6 +205,7 @@ export function RequestLogTable({
                 ) : (
                   logs.map((log) => {
                     const unpriced = isUnpricedUsage(log);
+                    const correlationId = log.correlationId;
                     return (
                       <TableRow key={log.requestId}>
                         <TableCell className="text-center whitespace-nowrap text-xs px-1.5">
@@ -277,7 +287,7 @@ export function RequestLogTable({
                             }`}
                           >
                             {unpriced
-                              ? t("usage.unpriced", "未定价")
+                              ? t("usage.unpriced")
                               : fmtUsd(log.totalCostUsd, 4)}
                           </div>
                           {parseFiniteNumber(log.costMultiplier) != null &&
@@ -309,8 +319,34 @@ export function RequestLogTable({
                             {log.statusCode}
                           </span>
                         </TableCell>
+                        <TableCell className="text-center">
+                          {correlationId ? (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="ghost"
+                              className="font-mono text-xs"
+                              title={correlationId}
+                              aria-label={t("usage.copyCorrelationId")}
+                              onClick={() => void copyText(correlationId)}
+                            >
+                              {correlationId.slice(0, 8)}…
+                            </Button>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
                         <TableCell className="text-center text-xs text-muted-foreground">
                           {log.dataSource || "proxy"}
+                        </TableCell>
+                        <TableCell className="text-center">
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setSelectedRequestId(log.requestId)}
+                          >
+                            {t("common.view")}
+                          </Button>
                         </TableCell>
                       </TableRow>
                     );
@@ -397,6 +433,12 @@ export function RequestLogTable({
               </div>
             </div>
           </div>
+          {selectedRequestId && (
+            <RequestDetailPanel
+              requestId={selectedRequestId}
+              onClose={() => setSelectedRequestId(undefined)}
+            />
+          )}
         </>
       )}
     </div>
