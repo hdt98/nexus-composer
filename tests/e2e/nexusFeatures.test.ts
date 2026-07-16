@@ -96,6 +96,7 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
     expect(nexus.modelCatalog![0].model).toBe("glm-5.2");
     expect(nexus.modelCatalog![0].displayName).toBe("GLM-5.2");
     expect(nexus.modelCatalog![0].contextWindow).toBe(1048576);
+    expect(nexus.modelCatalog![0].inputModalities).toEqual(["text"]);
   });
 });
 
