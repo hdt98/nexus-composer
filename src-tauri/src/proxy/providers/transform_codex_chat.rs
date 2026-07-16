@@ -257,6 +257,14 @@ pub fn responses_to_chat_completions_with_reasoning(
     body: Value,
     reasoning_config: Option<&CodexChatReasoningConfig>,
 ) -> Result<Value, ProxyError> {
+    responses_to_chat_completions_with_reasoning_history(body, reasoning_config, false)
+}
+
+pub(crate) fn responses_to_chat_completions_with_reasoning_history(
+    body: Value,
+    reasoning_config: Option<&CodexChatReasoningConfig>,
+    preserve_exact_history: bool,
+) -> Result<Value, ProxyError> {
     let mut result = json!({});
     let tool_context = build_codex_tool_context_from_request(&body);
 
@@ -276,7 +284,12 @@ pub fn responses_to_chat_completions_with_reasoning(
     }
 
     if let Some(input) = body.get("input") {
-        append_responses_input_as_chat_messages(input, &mut messages, &tool_context)?;
+        append_responses_input_as_chat_messages(
+            input,
+            &mut messages,
+            &tool_context,
+            preserve_exact_history,
+        )?;
     }
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
@@ -539,6 +552,7 @@ fn append_responses_input_as_chat_messages(
     input: &Value,
     messages: &mut Vec<Value>,
     tool_context: &CodexToolContext,
+    preserve_exact_history: bool,
 ) -> Result<(), ProxyError> {
     let mut pending_tool_calls = Vec::new();
     let mut pending_reasoning: Option<String> = None;
@@ -560,6 +574,7 @@ fn append_responses_input_as_chat_messages(
                     &mut pending_reasoning,
                     &mut last_assistant_index,
                     tool_context,
+                    preserve_exact_history,
                 )?;
             }
         }
@@ -571,6 +586,7 @@ fn append_responses_input_as_chat_messages(
                 &mut pending_reasoning,
                 &mut last_assistant_index,
                 tool_context,
+                preserve_exact_history,
             )?;
         }
         _ => {}
@@ -582,7 +598,25 @@ fn append_responses_input_as_chat_messages(
         &mut pending_reasoning,
         &mut last_assistant_index,
     );
-    backfill_tool_call_reasoning_placeholders(messages);
+    if preserve_exact_history {
+        if let Some(reasoning) = pending_reasoning
+            .take()
+            .filter(|reasoning| !reasoning.trim().is_empty())
+        {
+            messages.push(json!({
+                "role": "assistant",
+                "content": null,
+                "reasoning_content": reasoning
+            }));
+        }
+    } else {
+        messages.iter_mut().for_each(|message| {
+            if let Some(Value::String(reasoning)) = message.get_mut("reasoning_content") {
+                *reasoning = reasoning.trim().to_owned();
+            }
+        });
+        backfill_tool_call_reasoning_placeholders(messages);
+    }
     Ok(())
 }
 
@@ -593,22 +627,41 @@ fn append_responses_item_as_chat_message(
     pending_reasoning: &mut Option<String>,
     last_assistant_index: &mut Option<usize>,
     tool_context: &CodexToolContext,
+    preserve_exact_history: bool,
 ) -> Result<(), ProxyError> {
     let item_type = item.get("type").and_then(|v| v.as_str());
     match item_type {
         Some("function_call") => {
-            append_unique_pending_reasoning(pending_reasoning, responses_item_reasoning_text(item));
+            append_unique_pending_reasoning(
+                pending_reasoning,
+                reasoning_history_fragment(
+                    responses_item_reasoning_text(item),
+                    preserve_exact_history,
+                ),
+            );
             pending_tool_calls.push(responses_function_call_to_chat_tool_call(
                 item,
                 tool_context,
             ));
         }
         Some("custom_tool_call") => {
-            append_unique_pending_reasoning(pending_reasoning, responses_item_reasoning_text(item));
+            append_unique_pending_reasoning(
+                pending_reasoning,
+                reasoning_history_fragment(
+                    responses_item_reasoning_text(item),
+                    preserve_exact_history,
+                ),
+            );
             pending_tool_calls.push(responses_custom_tool_call_to_chat_tool_call(item));
         }
         Some("tool_search_call") => {
-            append_unique_pending_reasoning(pending_reasoning, responses_item_reasoning_text(item));
+            append_unique_pending_reasoning(
+                pending_reasoning,
+                reasoning_history_fragment(
+                    responses_item_reasoning_text(item),
+                    preserve_exact_history,
+                ),
+            );
             pending_tool_calls.push(responses_tool_search_call_to_chat_tool_call(item));
         }
         Some("function_call_output") => {
@@ -646,7 +699,10 @@ fn append_responses_item_as_chat_message(
             }));
         }
         Some("reasoning") => {
-            let reasoning = responses_reasoning_item_text(item);
+            let reasoning = reasoning_history_fragment(
+                responses_reasoning_item_text(item),
+                preserve_exact_history,
+            );
             let attached_to_previous = pending_tool_calls.is_empty()
                 && attach_reasoning_to_last_assistant(messages, *last_assistant_index, &reasoning);
             if !attached_to_previous {
@@ -689,7 +745,11 @@ fn append_responses_item_as_chat_message(
                 last_assistant_index,
             );
             if item.get("role").is_some() || item.get("content").is_some() {
-                let message = responses_message_item_to_chat_message(item, pending_reasoning);
+                let message = responses_message_item_to_chat_message(
+                    item,
+                    pending_reasoning,
+                    preserve_exact_history,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
             }
@@ -702,7 +762,11 @@ fn append_responses_item_as_chat_message(
                 last_assistant_index,
             );
             if item.get("role").is_some() || item.get("content").is_some() {
-                let message = responses_message_item_to_chat_message(item, pending_reasoning);
+                let message = responses_message_item_to_chat_message(
+                    item,
+                    pending_reasoning,
+                    preserve_exact_history,
+                );
                 update_last_assistant_index(messages, &message, last_assistant_index);
                 messages.push(message);
             }
@@ -735,6 +799,7 @@ fn flush_pending_tool_calls(
 fn responses_message_item_to_chat_message(
     item: &Value,
     pending_reasoning: &mut Option<String>,
+    preserve_exact_history: bool,
 ) -> Value {
     let role = item.get("role").and_then(|v| v.as_str()).unwrap_or("user");
     let chat_role = responses_role_to_chat_role(role);
@@ -749,13 +814,32 @@ fn responses_message_item_to_chat_message(
     });
 
     if chat_role == "assistant" {
-        append_pending_reasoning(pending_reasoning, responses_message_reasoning_text(item));
+        append_pending_reasoning(
+            pending_reasoning,
+            reasoning_history_fragment(
+                responses_message_reasoning_text(item),
+                preserve_exact_history,
+            ),
+        );
         attach_pending_reasoning_to_assistant(&mut message, pending_reasoning);
     } else if pending_reasoning.is_some() {
         pending_reasoning.take();
     }
 
     message
+}
+
+fn reasoning_history_fragment(
+    reasoning: Option<String>,
+    preserve_exact_history: bool,
+) -> Option<String> {
+    reasoning.map(|reasoning| {
+        if preserve_exact_history {
+            reasoning
+        } else {
+            reasoning.trim().to_owned()
+        }
+    })
 }
 
 fn responses_role_to_chat_role(role: &str) -> &'static str {
@@ -785,21 +869,17 @@ fn update_last_assistant_index(
 }
 
 fn append_pending_reasoning(pending_reasoning: &mut Option<String>, reasoning: Option<String>) {
-    let Some(reasoning) = reasoning else {
+    let Some(reasoning) = reasoning.filter(|text| !text.trim().is_empty()) else {
         return;
     };
-    let reasoning = reasoning.trim();
-    if reasoning.is_empty() {
-        return;
-    }
 
     match pending_reasoning {
         Some(existing) if !existing.is_empty() => {
             existing.push_str("\n\n");
-            existing.push_str(reasoning);
+            existing.push_str(&reasoning);
         }
         _ => {
-            *pending_reasoning = Some(reasoning.to_string());
+            *pending_reasoning = Some(reasoning);
         }
     }
 }
@@ -808,24 +888,13 @@ fn append_unique_pending_reasoning(
     pending_reasoning: &mut Option<String>,
     reasoning: Option<String>,
 ) {
-    let Some(reasoning) = reasoning else {
-        return;
-    };
-    let reasoning = reasoning.trim();
-    if reasoning.is_empty() {
+    if reasoning
+        .as_ref()
+        .is_some_and(|reasoning| pending_reasoning.as_ref() == Some(reasoning))
+    {
         return;
     }
-
-    match pending_reasoning {
-        Some(existing) if existing.contains(reasoning) => {}
-        Some(existing) if !existing.is_empty() => {
-            existing.push_str("\n\n");
-            existing.push_str(reasoning);
-        }
-        _ => {
-            *pending_reasoning = Some(reasoning.to_string());
-        }
-    }
+    append_pending_reasoning(pending_reasoning, reasoning);
 }
 
 fn attach_pending_reasoning_to_assistant(
@@ -835,10 +904,6 @@ fn attach_pending_reasoning_to_assistant(
     let Some(reasoning) = pending_reasoning.take() else {
         return;
     };
-    if reasoning.trim().is_empty() {
-        return;
-    }
-
     if let Some(obj) = message.as_object_mut() {
         append_reasoning_content(obj, &reasoning);
     }
@@ -888,11 +953,7 @@ fn attach_reasoning_to_last_assistant(
     last_assistant_index: Option<usize>,
     reasoning: &Option<String>,
 ) -> bool {
-    let Some(reasoning) = reasoning
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    else {
+    let Some(reasoning) = reasoning.as_deref().filter(|text| !text.trim().is_empty()) else {
         return true;
     };
     let Some(index) = last_assistant_index else {
@@ -1749,6 +1810,44 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nexus_history_is_exact_while_baseline_history_still_backfills() {
+        let tool = "  tool call\n\n[redacted thinking]\nReal.  \n";
+        let input = json!({
+            "model": "glm-5.2",
+            "input": [{
+                "type": "function_call", "call_id": "call_1",
+                "name": "lookup", "arguments": "{}", "reasoning_content": tool
+            }, {
+                "type": "function_call_output", "call_id": "call_1", "output": "ok"
+            }]
+        });
+        let config = CodexChatReasoningConfig {
+            supports_thinking: Some(true),
+            thinking_param: Some("thinking".into()),
+            output_format: Some("reasoning_content".into()),
+            ..Default::default()
+        };
+        let preserved = responses_to_chat_completions_with_reasoning_history(
+            input.clone(),
+            Some(&config),
+            true,
+        )
+        .unwrap();
+        assert_eq!(preserved["messages"][0]["reasoning_content"], tool);
+        let filled = responses_to_chat_completions(input).unwrap();
+        assert_eq!(filled["messages"][0]["reasoning_content"], tool.trim());
+
+        let missing = responses_to_chat_completions(json!({
+            "input": [{
+                "type": "function_call", "call_id": "call_1",
+                "name": "lookup", "arguments": "{}"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(missing["messages"][0]["reasoning_content"], "tool call");
+    }
 
     #[test]
     fn responses_request_with_stream_injects_include_usage() {

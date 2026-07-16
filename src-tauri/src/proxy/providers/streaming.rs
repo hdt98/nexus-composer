@@ -147,6 +147,13 @@ fn build_message_delta_event(stop_reason: Option<String>, usage_json: Option<Val
 pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    create_anthropic_sse_stream_with_mode(stream, false)
+}
+
+pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send + 'static>(
+    stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
+    strict: bool,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     async_stream::stream! {
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
@@ -179,6 +186,26 @@ pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
                     while let Some(line) = take_sse_block(&mut buffer) {
                         if line.trim().is_empty() {
                             continue;
+                        }
+
+                        if strict {
+                            let event = line.lines().find_map(|line| {
+                                strip_sse_field(line, "event").map(str::trim)
+                            });
+                            if event == Some("nexus.keepalive") {
+                                yield Ok(Bytes::from_static(b"event: ping\ndata: {\"type\":\"ping\"}\n\n"));
+                                continue;
+                            }
+                            if event == Some("error") {
+                                let data = line.lines().find_map(|line| strip_sse_field(line, "data"));
+                                let value = data.and_then(|data| serde_json::from_str::<Value>(data).ok());
+                                let error = value.as_ref().and_then(|value| value.get("error")).cloned()
+                                    .unwrap_or_else(|| json!({"type": "stream_protocol_error", "message": "Invalid upstream stream"}));
+                                yield Ok(Bytes::from(format!(
+                                    "event: error\ndata: {}\n\n", json!({"type": "error", "error": error})
+                                )));
+                                return;
+                            }
                         }
 
                         for l in line.lines() {
@@ -709,10 +736,29 @@ mod tests {
     use std::collections::HashMap;
 
     async fn collect_anthropic_events(input: &str) -> Vec<Value> {
+        collect_anthropic_events_mode(input, false).await
+    }
+
+    async fn collect_anthropic_events_mode(input: &str, strict: bool) -> Vec<Value> {
         let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             input.as_bytes().to_vec(),
         ))]);
-        let converted = create_anthropic_sse_stream(upstream);
+        collect_anthropic_stream(upstream, strict).await
+    }
+
+    async fn collect_nexus_anthropic_events(input: &str) -> Vec<Value> {
+        let upstream = stream::iter([Ok::<_, std::io::Error>(Bytes::copy_from_slice(
+            input.as_bytes(),
+        ))]);
+        let normalized = super::super::chat_reasoning::normalize_sse_stream(upstream, true, true);
+        collect_anthropic_stream(normalized, true).await
+    }
+
+    async fn collect_anthropic_stream(
+        stream: impl futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+        strict: bool,
+    ) -> Vec<Value> {
+        let converted = create_anthropic_sse_stream_with_mode(stream, strict);
         let chunks: Vec<_> = converted.collect().await;
         let merged = chunks
             .into_iter()
@@ -728,6 +774,65 @@ mod tests {
                 serde_json::from_str::<Value>(data).ok()
             })
             .collect()
+    }
+
+    #[tokio::test]
+    async fn nexus_mode_maps_boundaries_and_protocol_errors() {
+        let events = collect_nexus_anthropic_events(concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Plan `literal </think>\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"` continue</think>Answer\"},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            ))
+        .await;
+        assert!(events.iter().any(|event| event.pointer("/delta/thinking")
+            == Some(&json!("Plan `literal </think>` continue"))));
+        assert!(events
+            .iter()
+            .any(|event| event.pointer("/delta/text") == Some(&json!("Answer"))));
+
+        let events =
+            collect_anthropic_events_mode("event: nexus.keepalive\ndata: {}\n\n", true).await;
+        assert_eq!(events[0]["type"], "ping");
+
+        for error in ["{}", "false", r#"{"message":"","code":"0"}"#] {
+            let input = format!("data: {{\"error\":{error},\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+            let events = collect_nexus_anthropic_events(&input).await;
+            assert!(events.iter().any(|event| event["type"] == "message_stop"));
+            assert!(!events.iter().any(|event| event["type"] == "error"));
+        }
+
+        for (input, code, leaked) in [
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"broken\\\":\"}}]}}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\" leaked tail\"},\"finish_reason\":\"tool_calls\"}]}\n\n"
+                ),
+                "upstream_tool_protocol_error",
+                "leaked tail",
+            ),
+            (
+                concat!(
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+                    "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\n"
+                ),
+                "stream_protocol_error",
+                "late",
+            ),
+            (
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                "upstream_tool_protocol_error",
+                "not-present",
+            ),
+        ] {
+            let events = collect_nexus_anthropic_events(input).await;
+            let error = events
+                .iter()
+                .find(|event| event["type"] == "error")
+                .expect("missing Anthropic error event");
+            assert_eq!(error["error"]["type"], code);
+            assert!(!events.iter().any(|event| event["type"] == "message_stop"));
+            assert!(!serde_json::to_string(&events).unwrap().contains(leaked));
+        }
     }
 
     fn event_type(event: &Value) -> Option<&str> {
