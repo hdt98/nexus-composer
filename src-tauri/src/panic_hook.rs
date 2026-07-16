@@ -173,7 +173,10 @@ Stack Trace (Backtrace)
             let _ = file.flush();
 
             // 记录日志文件位置到 stderr
-            eprintln!("\n[CC-Switch] Crash log saved to: {}", log_path.display());
+            eprintln!(
+                "\n[Nexus Composer] Crash log saved to: {}",
+                log_path.display()
+            );
         }
 
         // 同时输出到 stderr（便于开发调试）
