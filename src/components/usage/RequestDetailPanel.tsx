@@ -104,7 +104,6 @@ export function RequestDetailPanel({
   const isCacheInclusive = request.inputTokens !== freshInput;
   const unpriced = isUnpricedUsage(request);
   const correlationId = request.correlationId;
-  const sessionId = request.sessionId;
 
   return (
     <Dialog open onOpenChange={handleOpenChange}>
@@ -129,13 +128,6 @@ export function RequestDetailPanel({
                   label={t("usage.correlationId")}
                   value={correlationId}
                   copyLabel={t("usage.copyCorrelationId")}
-                />
-              )}
-              {sessionId && (
-                <CopyableId
-                  label={t("usage.sessionId")}
-                  value={sessionId}
-                  copyLabel={t("usage.copySessionId")}
                 />
               )}
               <div>

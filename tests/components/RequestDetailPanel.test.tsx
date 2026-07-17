@@ -12,9 +12,10 @@ vi.mock("react-i18next", () => ({
     t: (key: string) =>
       ({
         "common.close": "Close",
+        "usage.requestId": "Nexus request ID",
+        "usage.correlationId": "Server request ID",
         "usage.copyRequestId": "Copy Nexus request ID",
         "usage.copyCorrelationId": "Copy server request ID",
-        "usage.copySessionId": "Copy harness session ID",
       })[key] ?? key,
     i18n: { language: "en" },
   }),
@@ -56,7 +57,6 @@ describe("RequestDetailPanel", () => {
   const request: RequestLog = {
     requestId: "response-id",
     correlationId: "server-request-id",
-    sessionId: "codex-thread-id",
     providerId: "provider-1",
     providerName: "Nexus",
     appType: "codex",
@@ -87,6 +87,8 @@ describe("RequestDetailPanel", () => {
   it("shows and copies debug request IDs", () => {
     render(<RequestDetailPanel requestId="response-id" onClose={vi.fn()} />);
 
+    expect(screen.getByText("Nexus request ID")).toBeInTheDocument();
+    expect(screen.getByText("Server request ID")).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "Copy Nexus request ID" }),
     );
@@ -97,12 +99,22 @@ describe("RequestDetailPanel", () => {
       screen.getByRole("button", { name: "Copy server request ID" }),
     );
     expect(copyTextMock).toHaveBeenCalledWith("server-request-id");
+  });
 
-    expect(screen.getByText("codex-thread-id")).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Copy harness session ID" }),
-    );
-    expect(copyTextMock).toHaveBeenCalledWith("codex-thread-id");
+  it("hides the optional server request ID when it is absent", () => {
+    useRequestDetailMock.mockReturnValue({
+      data: { ...request, correlationId: undefined },
+      isLoading: false,
+    });
+
+    render(<RequestDetailPanel requestId="response-id" onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("button", { name: "Copy server request ID" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy Nexus request ID" }),
+    ).toBeInTheDocument();
   });
 
   it("uses concise Vietnamese request-detail labels", () => {
@@ -114,10 +126,8 @@ describe("RequestDetailPanel", () => {
       performance: viLocale.usage.performance,
       nexusId: viLocale.usage.requestId,
       serverId: viLocale.usage.correlationId,
-      sessionId: viLocale.usage.sessionId,
       copyNexus: viLocale.usage.copyRequestId,
       copyServer: viLocale.usage.copyCorrelationId,
-      copySession: viLocale.usage.copySessionId,
     }).toEqual({
       title: "Chi tiết yêu cầu",
       general: "Thông tin chung",
@@ -126,10 +136,8 @@ describe("RequestDetailPanel", () => {
       performance: "Hiệu năng",
       nexusId: "Mã trong Nexus",
       serverId: "Mã yêu cầu",
-      sessionId: "Mã phiên",
       copyNexus: "Sao chép mã Nexus",
       copyServer: "Sao chép mã yêu cầu",
-      copySession: "Sao chép mã phiên",
     });
   });
 

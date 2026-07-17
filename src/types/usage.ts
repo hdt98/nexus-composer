@@ -11,8 +11,6 @@ export interface RequestLog {
   requestId: string;
   /** Stable request ID sent to the upstream model server. */
   correlationId?: string;
-  /** Harness conversation/session ID, e.g. Codex thread or Claude Code session. */
-  sessionId?: string;
   providerId: string;
   providerName?: string;
   appType: string;
