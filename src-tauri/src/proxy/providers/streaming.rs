@@ -234,7 +234,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                 if let Ok(chunk) = serde_json::from_str::<OpenAIStreamChunk>(data) {
                                     log::debug!("[Claude/OpenRouter] <<< SSE chunk received");
 
-                                    if message_id.is_none() && !chunk.id.is_empty() {
+                                    if message_id.is_none() && !chunk.id.trim().is_empty() {
                                         message_id = Some(chunk.id.clone());
                                     }
                                     if current_model.is_none() && !chunk.model.is_empty() {
@@ -252,6 +252,9 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
 
                                     if let Some(choice) = chunk.choices.first() {
                                         if !has_sent_message_start {
+                                            let message_id = message_id
+                                                .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+                                                .clone();
                                             // Build usage with cache tokens if available from first chunk
                                             let mut start_usage = json!({
                                                 "input_tokens": 0,
@@ -278,7 +281,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                             let event = json!({
                                                 "type": "message_start",
                                                 "message": {
-                                                    "id": message_id.clone().unwrap_or_default(),
+                                                    "id": message_id,
                                                     "type": "message",
                                                     "role": "assistant",
                                                     "model": current_model.clone().unwrap_or_default(),
@@ -1268,6 +1271,28 @@ mod tests {
                 .and_then(|v| v.as_u64()),
             Some(0)
         );
+    }
+
+    #[tokio::test]
+    async fn test_missing_upstream_id_gets_anthropic_message_id() {
+        for first_chunk in [
+            r#"data: {"model":"glm-5.2","choices":[{"delta":{"content":"answer"},"finish_reason":null}]}"#,
+            r#"data: {"id":"  ","model":"glm-5.2","choices":[{"delta":{"content":"answer"},"finish_reason":null}]}"#,
+        ] {
+            let input = format!(
+                "{first_chunk}\n\ndata: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":4,\"completion_tokens\":1}}}}\n\ndata: [DONE]\n\n"
+            );
+
+            let events = collect_anthropic_events(&input).await;
+            let message_id = events
+                .iter()
+                .find(|event| event_type(event) == Some("message_start"))
+                .and_then(|event| event.pointer("/message/id"))
+                .and_then(Value::as_str)
+                .expect("message_start should contain an ID");
+
+            assert!(uuid::Uuid::parse_str(message_id).is_ok());
+        }
     }
 
     #[tokio::test]
