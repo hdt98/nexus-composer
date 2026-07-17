@@ -1,6 +1,6 @@
 # Flatpak Build Guide
 
-This directory contains the Flatpak manifest (`com.nexus-composer.desktop`) for Nexus Composer, used to convert the generated `.deb` artifact into an installable `.flatpak` package via CI or local builds.
+This directory contains the Flatpak manifest (`com.nexuscomposer.desktop`) for Nexus Composer, used to convert the generated `.deb` artifact into an installable `.flatpak` package via CI or local builds.
 
 ## Dependencies
 
@@ -33,22 +33,22 @@ cp "$(find src-tauri/target/release/bundle -name '*.deb' | head -n 1)" flatpak/n
 3) Build the local Flatpak repository and export the `.flatpak`:
 
 ```bash
-flatpak-builder --force-clean --user --disable-cache --repo flatpak-repo flatpak-build flatpak/com.nexus-composer.desktop.yml
-flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo flatpak-repo CC-Switch-Linux.flatpak com.nexus-composer.desktop
+flatpak-builder --force-clean --user --disable-cache --repo flatpak-repo flatpak-build flatpak/com.nexuscomposer.desktop.yml
+flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo flatpak-repo Nexus-Composer-Linux.flatpak com.nexuscomposer.desktop
 ```
 
 4) Install and run:
 
 ```bash
-flatpak install --user ./CC-Switch-Linux.flatpak
-flatpak run com.nexus-composer.desktop
+flatpak install --user ./Nexus-Composer-Linux.flatpak
+flatpak run com.nexuscomposer.desktop
 ```
 
 ## Permissions Note
 
 The current manifest uses `--filesystem=home` by default for "download and run" convenience, allowing the app to directly read/write CLI configuration files and app data on the host (and supporting the "directory override" feature).
 
-If you prefer minimal permissions (e.g., for Flathub submission or security concerns), you can replace `--filesystem=home` in `flatpak/com.nexus-composer.desktop.yml` with more precise grants:
+If you prefer minimal permissions (e.g., for Flathub submission or security concerns), you can replace `--filesystem=home` in `flatpak/com.nexuscomposer.desktop.yml` with more precise grants:
 
 ```yaml
   - --filesystem=~/.nexus-composer:create
@@ -62,4 +62,4 @@ If you prefer minimal permissions (e.g., for Flathub submission or security conc
 
 Note: Flatpak's `:create` modifier only works with directories, not files. Therefore, `~/.claude.json` cannot use `:create`. If this file doesn't exist on the user's machine, the app may not be able to create it with restricted permissions. Users should either run Claude Code once to generate it, or manually create an empty JSON file (content: `{}`).
 
-If you plan to publish on Flathub or want stricter permission control, adjust the `finish-args` in `flatpak/com.nexus-composer.desktop.yml` accordingly.
+If you plan to publish on Flathub or want stricter permission control, adjust the `finish-args` in `flatpak/com.nexuscomposer.desktop.yml` accordingly.

@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Nexus Composer
-Comment=All-in-One Assistant for Claude Code, Codex & Gemini CLI
+Comment=Model endpoint management and routing for coding assistants
 Exec=nexus-composer
-Icon=com.nexus-composer.desktop
+Icon=com.nexuscomposer.desktop
 Terminal=false
 Categories=Utility;Development;
 StartupNotify=true

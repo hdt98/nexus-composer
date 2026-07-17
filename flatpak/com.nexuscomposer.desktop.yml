@@ -1,4 +1,4 @@
-id: com.nexus-composer.desktop
+id: com.nexuscomposer.desktop
 
 runtime: org.gnome.Platform
 runtime-version: '46'
@@ -82,9 +82,9 @@ modules:
       - type: file
         path: nexus-composer.deb
       - type: file
-        path: com.nexus-composer.desktop.desktop
+        path: com.nexuscomposer.desktop.desktop
       - type: file
-        path: com.nexus-composer.desktop.metainfo.xml
+        path: com.nexuscomposer.desktop.metainfo.xml
       - type: file
         path: ../src-tauri/icons/128x128.png
     build-commands:
@@ -93,6 +93,6 @@ modules:
       - cp -a usr/* /app/
       # Use our own desktop/metainfo/icon to align with Flatpak app id
       - rm -f /app/share/applications/*.desktop
-      - install -Dm644 com.nexus-composer.desktop.desktop /app/share/applications/com.nexus-composer.desktop.desktop
-      - install -Dm644 com.nexus-composer.desktop.metainfo.xml /app/share/metainfo/com.nexus-composer.desktop.metainfo.xml
-      - install -Dm644 128x128.png /app/share/icons/hicolor/128x128/apps/com.nexus-composer.desktop.png
+      - install -Dm644 com.nexuscomposer.desktop.desktop /app/share/applications/com.nexuscomposer.desktop.desktop
+      - install -Dm644 com.nexuscomposer.desktop.metainfo.xml /app/share/metainfo/com.nexuscomposer.desktop.metainfo.xml
+      - install -Dm644 128x128.png /app/share/icons/hicolor/128x128/apps/com.nexuscomposer.desktop.png
