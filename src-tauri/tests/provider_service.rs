@@ -8,8 +8,8 @@ use nexus_composer_lib::{
 #[path = "support.rs"]
 mod support;
 use support::{
-    create_test_state, create_test_state_with_config, enable_codex_official_auth_preservation,
-    ensure_test_home, reset_test_fs, test_mutex,
+    create_test_state, create_test_state_with_config, disable_codex_official_auth_preservation,
+    enable_codex_official_auth_preservation, ensure_test_home, reset_test_fs, test_mutex,
 };
 
 fn sanitize_provider_name(name: &str) -> String {
@@ -709,10 +709,10 @@ wire_api = "responses"
 fn provider_service_switch_codex_default_overwrites_official_auth_when_preservation_off() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
-    // Intentionally do NOT enable preservation: this locks the default opt-out
-    // behavior where switching to a third-party provider rewrites auth.json,
-    // discarding the user's ChatGPT OAuth login. It is the dual of
+    // Explicitly opt out to lock the legacy behavior where switching to a
+    // third-party provider rewrites auth.json. It is the dual of
     // `provider_service_switch_codex_preserves_oauth_and_backfills_api_key_from_live_token`.
+    disable_codex_official_auth_preservation();
     let _home = ensure_test_home();
 
     let live_auth = json!({
