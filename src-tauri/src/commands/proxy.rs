@@ -8,11 +8,32 @@ use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
 
 /// 启动代理服务器（仅启动服务，不接管 Live 配置）
+pub(crate) async fn start_proxy_server_inner(state: &AppState) -> Result<ProxyServerInfo, String> {
+    let started_here = !state.proxy_service.is_running().await;
+    let info = state.proxy_service.start().await?;
+    if let Err(error) = crate::services::proxy::sync_current_claude_desktop_proxy_profile(state) {
+        if started_here {
+            let rollback = state.proxy_service.stop().await;
+            return Err(match rollback {
+                Ok(()) => format!("Failed to apply the Claude Desktop proxy profile: {error}"),
+                Err(rollback_error) => format!(
+                    "Failed to apply the Claude Desktop proxy profile: {error}; \
+                     failed to stop the proxy after that error: {rollback_error}"
+                ),
+            });
+        }
+        return Err(format!(
+            "Failed to apply the Claude Desktop proxy profile: {error}"
+        ));
+    }
+    Ok(info)
+}
+
 #[tauri::command]
 pub async fn start_proxy_server(
     state: tauri::State<'_, AppState>,
 ) -> Result<ProxyServerInfo, String> {
-    state.proxy_service.start().await
+    start_proxy_server_inner(state.inner()).await
 }
 
 /// 停止代理服务器（仅停止服务，不恢复/清理 Live 接管状态）

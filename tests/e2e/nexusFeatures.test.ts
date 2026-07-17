@@ -37,9 +37,17 @@ describe("Nexus Composer preset arrays", () => {
     expect(names).toContain("OpenAI Official");
   });
 
+  it("Claude Desktop presets contain exactly Nexus GLM-5.2 and Claude Desktop Official", () => {
+    const names = claudeDesktopProviderPresets.map((preset) => preset.name);
+    expect(names).toHaveLength(2);
+    expect(names).toContain("Nexus GLM-5.2");
+    expect(names).toContain("Claude Desktop Official");
+  });
+
   it("does not contain any removed presets", () => {
     const claudeNames = providerPresets.map((p) => p.name);
     const codexNames = codexProviderPresets.map((p) => p.name);
+    const desktopNames = claudeDesktopProviderPresets.map((p) => p.name);
 
     const removed = [
       "Longcat",
@@ -61,6 +69,7 @@ describe("Nexus Composer preset arrays", () => {
     for (const name of removed) {
       expect(claudeNames).not.toContain(name);
       expect(codexNames).not.toContain(name);
+      expect(desktopNames).not.toContain(name);
     }
   });
 
@@ -71,10 +80,13 @@ describe("Nexus Composer preset arrays", () => {
     const codex = codexProviderPresets.find(
       (preset) => preset.name === "Nexus GLM-5.2",
     )!;
+    const desktop = claudeDesktopProviderPresets.find(
+      (preset) => preset.name === "Nexus GLM-5.2",
+    )!;
 
     expect((claude.settingsConfig as any).env.ANTHROPIC_AUTH_TOKEN).toBe("");
     expect((codex.auth as any).OPENAI_API_KEY).toBe("");
-    expect(JSON.stringify({ claude, codex })).not.toContain("onenx_");
+    expect(JSON.stringify({ claude, codex, desktop })).not.toContain("onenx_");
   });
 });
 
@@ -214,6 +226,9 @@ describe("Sponsor filter", () => {
     for (const p of codexProviderPresets) {
       expect(isSponsorPreset(p)).toBe(false);
     }
+    for (const p of claudeDesktopProviderPresets) {
+      expect(isSponsorPreset(p)).toBe(false);
+    }
 
     const fakeSponsor = {
       name: "FakeProvider",
@@ -227,6 +242,7 @@ describe("Sponsor filter", () => {
     const serialized = JSON.stringify({
       providerPresets,
       codexProviderPresets,
+      claudeDesktopProviderPresets,
     });
     expect(serialized).not.toMatch(/onenx_[A-Za-z0-9_-]+/);
     expect(serialized).not.toMatch(/127\.0\.0\.1|localhost/i);

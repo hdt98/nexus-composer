@@ -1752,7 +1752,7 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
         // 非接管模式：代理在运行则仅停止代理
         if proxy_service.is_running().await {
             log::info!("检测到代理服务器正在运行，开始停止...");
-            if let Err(e) = proxy_service.stop().await {
+            if let Err(e) = proxy_service.stop_with_restore_keep_state().await {
                 log::error!("退出时停止代理失败: {e}");
             }
             log::info!("代理服务器清理完成");
@@ -1799,7 +1799,14 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
         }
     }
 
-    if apps_to_restore.is_empty() {
+    let global_proxy_enabled = state
+        .db
+        .get_global_proxy_config()
+        .await
+        .map(|config| config.proxy_enabled)
+        .unwrap_or(false);
+
+    if apps_to_restore.is_empty() && !global_proxy_enabled {
         log::debug!("启动时无需恢复代理状态");
         return;
     }
@@ -1827,6 +1834,19 @@ async fn restore_proxy_state_on_startup(state: &store::AppState) {
                     log::error!("清除 {app_type} 代理状态失败: {clear_err}");
                 }
             }
+        }
+    }
+
+    if global_proxy_enabled && !state.proxy_service.is_running().await {
+        if let Err(error) = state.proxy_service.start().await {
+            log::error!("Failed to restore the local proxy: {error}");
+            return;
+        }
+    }
+
+    if state.proxy_service.is_running().await {
+        if let Err(error) = services::proxy::sync_current_claude_desktop_proxy_profile(state) {
+            log::error!("Failed to restore the Claude Desktop proxy profile: {error}");
         }
     }
 }
