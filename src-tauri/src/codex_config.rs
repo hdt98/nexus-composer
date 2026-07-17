@@ -12,7 +12,8 @@ use std::process::Command;
 use toml_edit::DocumentMut;
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
-pub const CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+pub const NEXUS_CODEX_MODEL_CATALOG_FILENAME: &str = "nexus-model-catalog.json";
+const LEGACY_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
 const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
@@ -93,7 +94,7 @@ fn codex_native_gateway_rejects_web_search(config_text: &str) -> bool {
     }
     false
 }
-const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.5";
+const CODEX_MODEL_CATALOG_TEMPLATE_SLUG: &str = "gpt-5.6-sol";
 
 /// Which Codex tool surface the generated model catalog should target.
 ///
@@ -154,7 +155,7 @@ pub fn get_codex_config_path() -> PathBuf {
 }
 
 pub fn get_codex_model_catalog_path() -> PathBuf {
-    get_codex_config_dir().join(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+    get_codex_config_dir().join(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
 }
 
 /// 获取 Codex 供应商配置文件路径
@@ -439,13 +440,23 @@ fn codex_catalog_model_entry(
     entry_obj.insert("service_tiers".to_string(), json!([]));
     entry_obj.insert("availability_nux".to_string(), Value::Null);
     entry_obj.insert("upgrade".to_string(), Value::Null);
+    entry_obj.insert("use_responses_lite".to_string(), json!(false));
+    entry_obj.remove("comp_hash");
+    entry_obj.remove("default_service_tier");
+
+    if let Some(modalities) = &spec.input_modalities {
+        entry_obj.insert("input_modalities".to_string(), json!(modalities));
+        if !modalities.iter().any(|modality| modality == "image") {
+            entry_obj.insert("supports_image_detail_original".to_string(), json!(false));
+        }
+    }
 
     if profile == CodexCatalogToolProfile::NativeResponses {
         // Native `/responses` gateways reject Codex's freeform `apply_patch`
         // (type=="custom") tool. Strip any key that would make Codex emit a
         // custom/freeform tool, and rely on shell_type="shell_command" for
         // edits. Defensive even though the native template is already clean
-        // (guards against template drift / an accidental gpt-5.5 clone).
+        // (guards against template drift / an accidental full Sol clone).
         //
         // NOTE: `base_instructions` is NOT stripped — Codex's catalog parser
         // treats it as a REQUIRED field and refuses to load the file without
@@ -460,6 +471,7 @@ fn codex_catalog_model_entry(
             entry_obj.remove(key);
         }
         entry_obj.insert("shell_type".to_string(), json!("shell_command"));
+        entry_obj.insert("tool_mode".to_string(), json!("direct"));
 
         if let Some(base_instructions) = spec
             .base_instructions
@@ -471,9 +483,6 @@ fn codex_catalog_model_entry(
         }
         if let Some(parallel) = spec.supports_parallel_tool_calls {
             entry_obj.insert("supports_parallel_tool_calls".to_string(), json!(parallel));
-        }
-        if let Some(modalities) = &spec.input_modalities {
-            entry_obj.insert("input_modalities".to_string(), json!(modalities));
         }
     }
 
@@ -488,8 +497,7 @@ struct CodexCatalogModelSpec {
     /// Per-row override for the native template's `supports_parallel_tool_calls`
     /// (e.g. MiniMax=true, MiMo=false). Only consulted for `NativeResponses`.
     supports_parallel_tool_calls: Option<bool>,
-    /// Per-row override for the native template's `input_modalities`
-    /// (e.g. `["text","image"]`). Only consulted for `NativeResponses`.
+    /// Per-row override for the template's `input_modalities`.
     input_modalities: Option<Vec<String>>,
     /// Per-row override for the native template's `base_instructions` (the
     /// model identity / system preamble). Carries each vendor's OFFICIAL value
@@ -556,7 +564,8 @@ fn codex_catalog_model_specs(settings: &Value, config_text: &str) -> Vec<CodexCa
                     .map(str::to_string)
                     .collect::<Vec<_>>()
             })
-            .filter(|items| !items.is_empty());
+            .filter(|items| !items.is_empty())
+            .or_else(|| Some(vec!["text".to_string()]));
 
         let base_instructions = model_config
             .get("baseInstructions")
@@ -585,8 +594,17 @@ fn find_codex_model_template(catalog: &Value) -> Option<Value> {
         .and_then(|models| models.as_array())
         .and_then(|models| {
             models.iter().find(|model| {
-                model.get("slug").and_then(|slug| slug.as_str())
-                    == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
+                model.get("slug").and_then(Value::as_str) == Some(CODEX_MODEL_CATALOG_TEMPLATE_SLUG)
+                    && model.get("multi_agent_version").and_then(Value::as_str) == Some("v2")
+                    && model.get("tool_mode").and_then(Value::as_str) == Some("code_mode_only")
+                    && model
+                        .get("supported_reasoning_levels")
+                        .and_then(Value::as_array)
+                        .is_some_and(|levels| {
+                            levels.iter().any(|level| {
+                                level.get("effort").and_then(Value::as_str) == Some("ultra")
+                            })
+                        })
             })
         })
         .cloned()
@@ -801,22 +819,22 @@ fn load_codex_model_template_from_bundled() -> Result<Option<Value>, AppError> {
 }
 
 fn load_codex_model_template_static() -> Option<Value> {
-    let text = include_str!("resources/gpt5_5_template.json");
+    let text = include_str!("resources/gpt5_6_sol_template.json");
     match serde_json::from_str(text) {
         Ok(template) => Some(template),
         Err(e) => {
-            log::warn!("Failed to parse bundled gpt-5.5 template: {e}");
+            log::warn!("Failed to parse bundled gpt-5.6-sol template: {e}");
             None
         }
     }
 }
 
 /// Bundled clean template for native `/responses` providers. Unlike the
-/// gpt-5.5 template it carries NO freeform `apply_patch` / `web_search` tool
+/// Sol template it carries NO freeform `apply_patch` / `web_search` tool
 /// declarations and no GPT-5 base_instructions, so Codex never emits a
 /// `type=="custom"` tool that native gateways (MiMo/MiniMax/…) reject. Edits
 /// flow through `shell_type="shell_command"` instead. We deliberately do NOT
-/// fall back to `models_cache.json` here (that would reintroduce gpt-5.5's
+/// fall back to `models_cache.json` here (that would reintroduce Sol's
 /// freeform apply_patch).
 fn load_codex_native_responses_template() -> Value {
     let text = include_str!("resources/codex_native_responses_template.json");
@@ -867,7 +885,7 @@ fn codex_model_catalog_from_settings(
     }
 
     // Native providers use the bundled clean template (no freeform apply_patch,
-    // no cache dependency); proxy-chat providers keep cloning Codex's gpt-5.5
+    // no cache dependency); proxy-chat providers keep cloning Codex's Sol
     // entry so the proxy can rewrite custom<->function tools as before.
     let template = match profile {
         CodexCatalogToolProfile::NativeResponses => load_codex_native_responses_template(),
@@ -888,16 +906,13 @@ fn set_codex_model_catalog_json_field(
 
     match catalog_path {
         Some(_) => {
-            doc["model_catalog_json"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
+            doc["model_catalog_json"] = toml_edit::value(NEXUS_CODEX_MODEL_CATALOG_FILENAME);
         }
         None => {
             let should_remove = doc
                 .get("model_catalog_json")
                 .and_then(|item| item.as_str())
-                .map(|path| {
-                    Path::new(path).file_name().and_then(|name| name.to_str())
-                        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
-                })
+                .map(|path| is_nexus_model_catalog_path(Path::new(path)))
                 .unwrap_or(false);
             if should_remove {
                 doc.as_table_mut().remove("model_catalog_json");
@@ -972,7 +987,8 @@ pub fn prepare_codex_config_text_with_model_catalog(
 ///
 /// We only reverse-parse catalogs whose `model_catalog_json` path is the
 /// Nexus Composer–generated file (identified by filename
-/// `cc-switch-model-catalog.json`). A user-managed external catalog file is
+/// `nexus-model-catalog.json`, or its legacy `cc-switch-model-catalog.json`
+/// name). A user-managed external catalog file is
 /// left alone — surfacing its richer structure as the simplified table would
 /// be a downgrade we can't safely round-trip.
 ///
@@ -1008,7 +1024,7 @@ pub fn read_codex_model_catalog_simplified_from_live() -> Result<Option<Value>, 
 
 /// Given `config.toml` text, resolve the on-disk path of the nexus-composer–owned
 /// catalog file (returns `None` if `model_catalog_json` is absent or points at
-/// a file we don't own). Relative paths fall back to `generated_path`.
+/// a file we don't own). Relative paths resolve beside `generated_path`.
 pub(crate) fn resolve_nexus_catalog_path(
     config_text: &str,
     generated_path: &Path,
@@ -1024,17 +1040,24 @@ pub(crate) fn resolve_nexus_catalog_path(
         .filter(|s| !s.is_empty())?;
 
     let referenced_path = Path::new(catalog_path_str);
-    let is_cc_switch_owned = referenced_path.file_name().and_then(|name| name.to_str())
-        == Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME);
-    if !is_cc_switch_owned {
+    if !is_nexus_model_catalog_path(referenced_path) {
         return None;
     }
 
     if referenced_path.is_absolute() {
         Some(referenced_path.to_path_buf())
     } else {
-        Some(generated_path.to_path_buf())
+        generated_path
+            .parent()
+            .map(|parent| parent.join(referenced_path))
     }
+}
+
+fn is_nexus_model_catalog_path(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME | LEGACY_CODEX_MODEL_CATALOG_FILENAME)
+    )
 }
 
 /// Pure reverse-parsing core: convert Codex catalog JSON text back into the
@@ -2292,12 +2315,12 @@ base_url = "https://production.api/v1"
     #[test]
     fn codex_model_catalog_uses_provider_models_and_context() {
         let template = json!({
-            "slug": "gpt-5.5",
-            "display_name": "GPT-5.5",
+            "slug": "gpt-5.6-sol",
+            "display_name": "GPT-5.6 Sol",
             "description": "Frontier model",
-            "base_instructions": "gpt-5.5 base instructions",
+            "base_instructions": "Sol base instructions",
             "model_messages": {
-                "instructions_template": "gpt-5.5 instructions template",
+                "instructions_template": "Sol instructions template",
                 "instructions_variables": {
                     "personality_default": "",
                     "personality_friendly": "",
@@ -2313,11 +2336,16 @@ base_url = "https://production.api/v1"
                 }
             ],
             "availability_nux": {
-                "message": "GPT-5.5 is now available."
+                "message": "GPT-5.6 Sol is now available."
             },
             "upgrade": {
-                "target": "gpt-5.5"
+                "target": "gpt-5.6-sol"
             },
+            "input_modalities": ["text", "image"],
+            "supports_image_detail_original": true,
+            "use_responses_lite": true,
+            "comp_hash": "3000",
+            "default_service_tier": "priority",
             "context_window": 272000,
             "max_context_window": 272000
         });
@@ -2369,12 +2397,12 @@ base_url = "https://production.api/v1"
             models[0]
                 .get("base_instructions")
                 .and_then(|value| value.as_str()),
-            Some("gpt-5.5 base instructions")
+            Some("Sol base instructions")
         );
         assert_eq!(
             models[0].get("model_messages"),
             template.get("model_messages"),
-            "custom catalog entries should keep the gpt-5.5 agent template"
+            "custom catalog entries should keep the Sol agent template"
         );
         assert_eq!(
             models[0].get("additional_speed_tiers"),
@@ -2385,8 +2413,39 @@ base_url = "https://production.api/v1"
             models[0]
                 .get("availability_nux")
                 .is_some_and(|value| value.is_null()),
-            "generated third-party entries should not inherit GPT-5.5 launch messaging"
+            "generated third-party entries should not inherit Sol launch messaging"
         );
+        assert_eq!(models[0]["input_modalities"], json!(["text"]));
+        assert_eq!(models[0]["supports_image_detail_original"], false);
+        assert_eq!(models[0]["use_responses_lite"], false);
+        assert!(models[0].get("comp_hash").is_none());
+        assert!(models[0].get("default_service_tier").is_none());
+    }
+
+    #[test]
+    fn model_template_requires_exact_sol_capabilities() {
+        let model = |version: &str| {
+            json!({
+                "slug": "gpt-5.6-sol",
+                "supported_reasoning_levels": [{"effort": "ultra"}],
+                "multi_agent_version": version,
+                "tool_mode": "code_mode_only"
+            })
+        };
+
+        assert!(find_codex_model_template(&json!({"models": [model("v3")]})).is_none());
+        assert!(find_codex_model_template(&json!({"models": [model("v2")]})).is_some());
+    }
+
+    #[test]
+    fn static_model_template_carries_sol_contract() {
+        let template = load_codex_model_template_static().expect("static template");
+        assert_eq!(template["slug"], "gpt-5.6-sol");
+        assert_eq!(template["multi_agent_version"], "v2");
+        assert_eq!(template["tool_mode"], "code_mode_only");
+        assert!(template["supported_reasoning_levels"]
+            .as_array()
+            .is_some_and(|levels| levels.iter().any(|level| level["effort"] == "ultra")));
     }
 
     #[test]
@@ -2442,7 +2501,7 @@ base_url = "https://production.api/v1"
         );
         assert!(
             entry.get("model_messages").is_none(),
-            "native entries must not carry the gpt-5.5 model_messages persona text"
+            "native entries must not carry the Sol model_messages persona text"
         );
         assert_eq!(
             entry.get("supports_parallel_tool_calls"),
@@ -2457,6 +2516,17 @@ base_url = "https://production.api/v1"
         assert_eq!(
             entry.get("context_window").and_then(|v| v.as_u64()),
             Some(1_000_000)
+        );
+        assert_eq!(entry["default_reasoning_level"], "high");
+        assert_eq!(entry["multi_agent_version"], "v2");
+        assert_eq!(entry["tool_mode"], "direct");
+        assert_eq!(
+            entry["supported_reasoning_levels"],
+            json!([
+                {"effort": "none", "description": "Disable Thinking"},
+                {"effort": "high", "description": "Enabled Thinking"},
+                {"effort": "ultra", "description": "Maximum reasoning with automatic task delegation"}
+            ])
         );
     }
 
@@ -2501,7 +2571,7 @@ base_url = "https://production.api/v1"
             input_modalities: None,
             base_instructions: None,
         }];
-        // Using a gpt-5.5-shaped template under ProxyChat must NOT strip
+        // Using a Sol-shaped template under ProxyChat must NOT strip
         // apply_patch_tool_type. (The native template lacks it, so synthesize
         // one with the field present to prove ProxyChat leaves it intact.)
         let mut proxy_template = template.clone();
@@ -2527,7 +2597,7 @@ base_url = "https://production.api/v1"
 [model_providers.any]
 name = "any"
 "#;
-        let catalog_path = Path::new("/tmp/cc-switch-model-catalog.json");
+        let catalog_path = Path::new("/tmp/nexus-model-catalog.json");
 
         let result = set_codex_model_catalog_json_field(input, Some(catalog_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
@@ -2535,7 +2605,7 @@ name = "any"
             parsed
                 .get("model_catalog_json")
                 .and_then(|value| value.as_str()),
-            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME)
+            Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
         );
         assert!(
             parsed
@@ -2674,7 +2744,7 @@ web_search = "disabled"
 
     #[test]
     fn resolve_catalog_path_returns_none_when_config_missing_field() {
-        let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
         assert!(resolve_nexus_catalog_path("", &generated).is_none());
         assert!(
             resolve_nexus_catalog_path("model = \"gpt-5\"", &generated).is_none(),
@@ -2683,9 +2753,19 @@ web_search = "disabled"
     }
 
     #[test]
-    fn resolve_catalog_path_accepts_cc_switch_owned_file() {
-        let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
+    fn resolve_catalog_path_accepts_legacy_file() {
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
+        let legacy = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
         let config = r#"model_catalog_json = "/tmp/.codex/cc-switch-model-catalog.json"
+"#;
+        let resolved = resolve_nexus_catalog_path(config, &generated).expect("path resolves");
+        assert_eq!(resolved, legacy);
+    }
+
+    #[test]
+    fn resolve_catalog_path_accepts_canonical_file() {
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
+        let config = r#"model_catalog_json = "/tmp/.codex/nexus-model-catalog.json"
 "#;
         let resolved = resolve_nexus_catalog_path(config, &generated).expect("path resolves");
         assert_eq!(resolved, generated);
@@ -2693,8 +2773,8 @@ web_search = "disabled"
 
     #[test]
     fn resolve_catalog_path_rejects_user_owned_external_file() {
-        let generated = PathBuf::from("/tmp/.codex/cc-switch-model-catalog.json");
-        let config = r#"model_catalog_json = "/Users/me/.codex/my-handwritten-catalog.json"
+        let generated = PathBuf::from("/tmp/.codex/nexus-model-catalog.json");
+        let config = r#"model_catalog_json = "/Users/me/.codex/glm-catalog.json"
 "#;
         assert!(
             resolve_nexus_catalog_path(config, &generated).is_none(),
@@ -2860,8 +2940,8 @@ web_search = "disabled"
             load_codex_model_template_static().expect("static template must parse as valid JSON");
         assert_eq!(
             template.get("slug").and_then(|v| v.as_str()),
-            Some("gpt-5.5"),
-            "static template slug must be gpt-5.5"
+            Some("gpt-5.6-sol"),
+            "static template slug must be gpt-5.6-sol"
         );
     }
 
@@ -2891,7 +2971,7 @@ model = "glm-5"
         // Simulate a WSL UNC path as Nexus Composer would see it on Windows;
         // the function now writes just the relative filename.
         let unc_path =
-            Path::new(r"\\wsl.localhost\Ubuntu\home\user\.codex\cc-switch-model-catalog.json");
+            Path::new(r"\\wsl.localhost\Ubuntu\home\user\.codex\nexus-model-catalog.json");
 
         let result = set_codex_model_catalog_json_field(input, Some(unc_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
@@ -2901,7 +2981,7 @@ model = "glm-5"
             .and_then(|v| v.as_str())
             .expect("model_catalog_json should be set");
         assert_eq!(
-            written_path, CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME,
+            written_path, NEXUS_CODEX_MODEL_CATALOG_FILENAME,
             "should write only the relative filename, not the UNC path"
         );
     }
@@ -2911,56 +2991,71 @@ model = "glm-5"
         let input = r#"model_provider = "custom"
 model = "glm-5"
 "#;
-        let regular_path = Path::new("/home/user/.codex/cc-switch-model-catalog.json");
+        let regular_path = Path::new("/home/user/.codex/nexus-model-catalog.json");
 
         let result = set_codex_model_catalog_json_field(input, Some(regular_path)).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
 
         assert_eq!(
             parsed.get("model_catalog_json").and_then(|v| v.as_str()),
-            Some(CC_SWITCH_CODEX_MODEL_CATALOG_FILENAME),
+            Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME),
             "should write only the relative filename, not the full path"
         );
     }
 
     #[test]
-    fn set_catalog_json_none_removes_cc_switch_owned_by_filename() {
+    fn set_catalog_json_none_removes_canonical_and_legacy_filenames() {
         // After the WSL fix, TOML may contain a Linux-style path.
         // The None arm must still remove it (file_name match catches any format).
-        let input = r#"model_catalog_json = "/home/user/.codex/cc-switch-model-catalog.json"
-"#;
-        let result = set_codex_model_catalog_json_field(input, None).unwrap();
-        let parsed: toml::Value = toml::from_str(&result).unwrap();
-        assert!(
-            parsed.get("model_catalog_json").is_none(),
-            "None arm should remove Nexus Composer-owned field regardless of path format"
-        );
+        for filename in [
+            NEXUS_CODEX_MODEL_CATALOG_FILENAME,
+            LEGACY_CODEX_MODEL_CATALOG_FILENAME,
+        ] {
+            let input = format!("model_catalog_json = \"/home/user/.codex/{filename}\"\n");
+            let result = set_codex_model_catalog_json_field(&input, None).unwrap();
+            let parsed: toml::Value = toml::from_str(&result).unwrap();
+            assert!(parsed.get("model_catalog_json").is_none());
+        }
     }
 
     #[test]
     fn set_catalog_json_none_preserves_user_owned_catalog() {
-        let input = r#"model_catalog_json = "/Users/me/.codex/my-custom-catalog.json"
+        let input = r#"model_catalog_json = "/Users/me/.codex/glm-catalog.json"
 "#;
         let result = set_codex_model_catalog_json_field(input, None).unwrap();
         let parsed: toml::Value = toml::from_str(&result).unwrap();
         assert_eq!(
             parsed.get("model_catalog_json").and_then(|v| v.as_str()),
-            Some("/Users/me/.codex/my-custom-catalog.json"),
+            Some("/Users/me/.codex/glm-catalog.json"),
             "None arm should NOT remove user-owned catalog"
         );
     }
 
     #[test]
-    fn resolve_catalog_finds_relative_filename() {
+    fn resolve_catalog_finds_canonical_relative_filename() {
         let config_text = r#"model_provider = "custom"
-model_catalog_json = "cc-switch-model-catalog.json"
+model_catalog_json = "nexus-model-catalog.json"
 "#;
-        let generated_path = PathBuf::from("/home/user/.codex/cc-switch-model-catalog.json");
+        let generated_path = PathBuf::from("/home/user/.codex/nexus-model-catalog.json");
         let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result,
             Some(generated_path),
-            "relative filename should resolve to generated_path for file I/O"
+            "canonical relative filename should resolve to generated_path"
+        );
+    }
+
+    #[test]
+    fn resolve_catalog_finds_legacy_relative_filename() {
+        let config_text = r#"model_catalog_json = "cc-switch-model-catalog.json"
+"#;
+        let generated_path = PathBuf::from("/home/user/.codex/nexus-model-catalog.json");
+        let result = resolve_nexus_catalog_path(config_text, &generated_path);
+        assert_eq!(
+            result,
+            Some(PathBuf::from(
+                "/home/user/.codex/cc-switch-model-catalog.json"
+            ))
         );
     }
 
@@ -2968,7 +3063,7 @@ model_catalog_json = "cc-switch-model-catalog.json"
     fn resolve_catalog_ignores_user_owned_relative() {
         let config_text = r#"model_catalog_json = "my-custom-catalog.json"
 "#;
-        let generated_path = PathBuf::from("/home/user/.codex/cc-switch-model-catalog.json");
+        let generated_path = PathBuf::from("/home/user/.codex/nexus-model-catalog.json");
         let result = resolve_nexus_catalog_path(config_text, &generated_path);
         assert_eq!(
             result, None,

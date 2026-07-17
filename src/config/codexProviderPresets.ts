@@ -122,6 +122,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
         model: "glm-5.2",
         displayName: "GLM-5.2",
         contextWindow: 1048576,
+        inputModalities: ["text"],
       },
     ]),
     category: "third_party",

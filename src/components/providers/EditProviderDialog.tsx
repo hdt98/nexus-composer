@@ -22,6 +22,31 @@ interface EditProviderDialogProps {
   isProxyTakeover?: boolean; // 代理接管模式下不读取 live（避免显示被接管后的代理配置）
 }
 
+const NEXUS_MODEL_CATALOG_FILES = new Set([
+  "nexus-model-catalog.json",
+  "cc-switch-model-catalog.json",
+]);
+
+function withoutNexusModelCatalogPointer(config: string): string {
+  let topLevel = true;
+  return config
+    .split("\n")
+    .filter((line) => {
+      const trimmed = line.trimStart();
+      if (trimmed.startsWith("[")) topLevel = false;
+      const path = topLevel
+        ? trimmed.match(/^model_catalog_json\s*=\s*["']([^"']+)["']/)?.[1]
+        : undefined;
+      return !NEXUS_MODEL_CATALOG_FILES.has(path?.split(/[\\/]/).pop() ?? "");
+    })
+    .join("\n");
+}
+
+function hasModelCatalogEntries(catalog: unknown): boolean {
+  const models = (catalog as { models?: unknown } | null)?.models;
+  return Array.isArray(models) && models.length > 0;
+}
+
 export function EditProviderDialog({
   open,
   provider,
@@ -151,7 +176,17 @@ export function EditProviderDialog({
       const dbCatalog = (provider.settingsConfig as Record<string, unknown>)
         .modelCatalog;
       if (dbCatalog !== undefined) {
-        return { ...base, modelCatalog: dbCatalog };
+        const merged: Record<string, unknown> = {
+          ...base,
+          modelCatalog: dbCatalog,
+        };
+        if (
+          hasModelCatalogEntries(dbCatalog) &&
+          typeof merged.config === "string"
+        ) {
+          merged.config = withoutNexusModelCatalogPointer(merged.config);
+        }
+        return merged;
       }
     }
 
