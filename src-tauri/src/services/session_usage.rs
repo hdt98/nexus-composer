@@ -414,8 +414,6 @@ fn insert_session_log_entry(
     request_id: &str,
     msg: &ParsedAssistantUsage,
 ) -> Result<bool, AppError> {
-    let conn = lock_conn!(db.conn);
-
     let created_at = msg
         .timestamp
         .as_ref()
@@ -440,15 +438,33 @@ fn insert_session_log_entry(
         cache_creation_tokens: msg.cache_creation_tokens,
         created_at,
     };
-    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
-        return Ok(false);
-    }
+
+    let takeover_active = {
+        let conn = lock_conn!(db.conn);
+        if should_skip_session_insert(&conn, request_id, &dedup_key)? {
+            return Ok(false);
+        }
+        conn.query_row(
+            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude' AND enabled = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+            > 0
+    };
 
     // When proxy takeover is active, Claude Code reports its native model name
     // (e.g. "claude-fable-5") in session logs, but the actual upstream model is
     // configured in the provider's settings (e.g. "glm-5.2"). Use the provider's
     // model for pricing so costs are calculated at the correct rate.
-    let pricing_model = resolve_pricing_model_for_session(db, &conn, &msg.model);
+    // Provider DAOs lock Database.conn, so resolve outside the insertion lock.
+    let pricing_model = resolve_pricing_model_for_session(db, takeover_active, &msg.model);
+
+    // Recheck after reacquiring the lock to close the sync race.
+    let conn = lock_conn!(db.conn);
+    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
+        return Ok(false);
+    }
 
     // 计算费用
     let usage = TokenUsage {
@@ -539,18 +555,9 @@ fn insert_session_log_entry(
 /// We look up the current provider and use its configured model for pricing.
 fn resolve_pricing_model_for_session(
     db: &Database,
-    conn: &rusqlite::Connection,
+    takeover_active: bool,
     client_model: &str,
 ) -> String {
-    // Check if proxy takeover is active for Claude (sync query on proxy_config table)
-    let takeover_active = conn
-        .query_row(
-            "SELECT COUNT(*) FROM proxy_config WHERE app_type = 'claude' AND enabled = 1",
-            [],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        > 0;
     if !takeover_active {
         return client_model.to_string();
     }
@@ -849,6 +856,69 @@ mod tests {
         drop(conn);
 
         fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn claude_takeover_session_insert_does_not_relock_database() -> Result<(), AppError> {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let result = (|| -> Result<String, AppError> {
+                let db = Database::memory()?;
+                let provider_id = crate::settings::get_current_provider(&AppType::Claude)
+                    .unwrap_or_else(|| "claude-takeover-deadlock-test".to_string());
+                {
+                    let conn = lock_conn!(db.conn);
+                    conn.execute(
+                        "INSERT INTO providers (
+                            id, app_type, name, settings_config, is_current
+                         ) VALUES (?1, 'claude', 'Takeover test', ?2, 1)",
+                        rusqlite::params![
+                            provider_id,
+                            serde_json::json!({
+                                "env": {"ANTHROPIC_MODEL": "GLM-5.2-FP8"}
+                            })
+                            .to_string(),
+                        ],
+                    )?;
+                    conn.execute(
+                        "UPDATE proxy_config SET enabled = 1 WHERE app_type = 'claude'",
+                        [],
+                    )?;
+                }
+
+                let message = ParsedAssistantUsage {
+                    message_id: "msg_takeover_sync".to_string(),
+                    model: "claude-sonnet-5".to_string(),
+                    input_tokens: 100,
+                    output_tokens: 20,
+                    cache_read_tokens: 0,
+                    cache_creation_tokens: 0,
+                    stop_reason: Some("end_turn".to_string()),
+                    timestamp: Some("2026-07-15T15:16:56Z".to_string()),
+                    session_id: Some("session-takeover-sync".to_string()),
+                };
+                assert!(insert_session_log_entry(
+                    &db,
+                    "session:msg_takeover_sync",
+                    &message,
+                )?);
+                let conn = lock_conn!(db.conn);
+                conn.query_row(
+                    "SELECT pricing_model FROM proxy_request_logs
+                     WHERE request_id = 'session:msg_takeover_sync'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(AppError::from)
+            })();
+            let _ = sender.send(result);
+        });
+
+        let pricing_model = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("session usage insert must not deadlock while resolving takeover pricing")?;
+        assert_eq!(pricing_model, "GLM-5.2-FP8");
         Ok(())
     }
 }
