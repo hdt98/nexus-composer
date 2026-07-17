@@ -2015,11 +2015,17 @@ impl ProxyService {
                 .map_err(|e| format!("构建 {app_type} 有效配置失败: {e}"))?;
 
         if matches!(app_type_enum, AppType::Codex) {
-            effective_settings["apiFormat"] = json!(provider
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.api_format.as_deref())
-                .unwrap_or("openai_chat"));
+            effective_settings
+                .as_object_mut()
+                .ok_or_else(|| "Codex backup must be a JSON object".to_string())?
+                .insert(
+                    "apiFormat".to_string(),
+                    json!(provider
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.api_format.as_deref())
+                        .unwrap_or("openai_chat")),
+                );
             let existing_backup_value = self
                 .db
                 .get_live_backup(app_type)
@@ -2566,32 +2572,14 @@ impl ProxyService {
         // living in the config's `experimental_bearer_token`). Computing it up here
         // keeps every config-writing branch — write-auth, delete-auth, no-auth —
         // consistent instead of letting the empty-auth path skip projection.
-        // Provider-rebuilt backups carry apiFormat. Legacy backups can recover
-        // it from the current provider only when their inline catalog matches,
-        // so unrelated current-provider metadata cannot change a restored catalog.
+        // Provider-rebuilt backups carry apiFormat. Legacy backups do not carry
+        // enough provider identity to infer the tool profile safely, so retain
+        // the historical ProxyChat fallback for them.
         let profile = config
             .get("apiFormat")
             .and_then(Value::as_str)
             .map(|api_format| {
                 crate::codex_config::CodexCatalogToolProfile::from_api_format(Some(api_format))
-            })
-            .or_else(|| {
-                let catalog = config.get("modelCatalog")?;
-                let provider = self
-                    .get_current_provider_for_app(&AppType::Codex)
-                    .ok()
-                    .flatten()?;
-                if provider.settings_config.get("modelCatalog") != Some(catalog) {
-                    return None;
-                }
-                Some(
-                    crate::codex_config::CodexCatalogToolProfile::from_api_format(
-                        provider
-                            .meta
-                            .as_ref()
-                            .and_then(|meta| meta.api_format.as_deref()),
-                    ),
-                )
             })
             .unwrap_or(crate::codex_config::CodexCatalogToolProfile::ProxyChat);
         let prepared_cfg = config_str
@@ -2908,75 +2896,6 @@ mod tests {
             .expect("serialize models_cache"),
         )
         .expect("write models_cache.json");
-    }
-
-    fn assert_restored_native_catalog() {
-        let catalog: Value = serde_json::from_str(
-            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
-                .expect("read generated catalog"),
-        )
-        .expect("parse generated catalog");
-        let entry = &catalog["models"][0];
-        assert_eq!(entry["tool_mode"], "direct");
-        assert!(entry.get("apply_patch_tool_type").is_none());
-        assert!(entry.get("web_search_tool_type").is_none());
-    }
-
-    async fn assert_native_backup_restore(marked: bool) {
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-        seed_codex_model_template();
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let service = ProxyService::new(db.clone());
-        let mut provider = Provider::with_id(
-            "native".to_string(),
-            "Native".to_string(),
-            json!({
-                "auth": { "OPENAI_API_KEY": "native-key" },
-                "config": "model_provider = \"custom\"\nmodel = \"native-model\"\n",
-                "modelCatalog": { "models": [{ "model": "native-model" }] }
-            }),
-            None,
-        );
-        provider.meta = Some(ProviderMeta {
-            api_format: Some("openai_responses".to_string()),
-            ..Default::default()
-        });
-
-        if marked {
-            service
-                .update_live_backup_from_provider("codex", &provider)
-                .await
-                .expect("rebuild native backup");
-            let stored = db
-                .get_live_backup("codex")
-                .await
-                .expect("read native backup")
-                .expect("native backup exists");
-            let backup: Value =
-                serde_json::from_str(&stored.original_config).expect("parse native backup");
-            assert_eq!(backup["apiFormat"], "openai_responses");
-        } else {
-            db.save_provider("codex", &provider)
-                .expect("save native provider");
-            db.set_current_provider("codex", &provider.id)
-                .expect("select native provider");
-            crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
-                .expect("select local native provider");
-            db.save_live_backup(
-                "codex",
-                &serde_json::to_string(&provider.settings_config).expect("serialize legacy backup"),
-            )
-            .await
-            .expect("save legacy backup");
-        }
-
-        service
-            .restore_live_config_for_app_with_fallback(&AppType::Codex)
-            .await
-            .expect("restore native backup");
-        assert_restored_native_catalog();
     }
 
     #[test]
@@ -6145,13 +6064,123 @@ requires_openai_auth = true
     #[tokio::test]
     #[serial]
     async fn codex_restore_marked_native_backup_preserves_tool_profile() {
-        assert_native_backup_restore(true).await;
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut provider = Provider::with_id(
+            "native".to_string(),
+            "Native".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "native-key" },
+                "config": "model_provider = \"custom\"\nmodel = \"native-model\"\n",
+                "modelCatalog": { "models": [{ "model": "native-model" }] }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+
+        service
+            .update_live_backup_from_provider("codex", &provider)
+            .await
+            .expect("rebuild native backup");
+        let stored = db
+            .get_live_backup("codex")
+            .await
+            .expect("read native backup")
+            .expect("native backup exists");
+        let backup: Value =
+            serde_json::from_str(&stored.original_config).expect("parse native backup");
+        assert_eq!(backup["apiFormat"], "openai_responses");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore native backup");
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated catalog"),
+        )
+        .expect("parse generated catalog");
+        let entry = &catalog["models"][0];
+        assert_eq!(entry["tool_mode"], "direct");
+        assert!(entry.get("apply_patch_tool_type").is_none());
+        assert!(entry.get("web_search_tool_type").is_none());
     }
 
     #[tokio::test]
     #[serial]
-    async fn codex_restore_legacy_native_backup_infers_tool_profile() {
-        assert_native_backup_restore(false).await;
+    async fn codex_restore_legacy_backup_does_not_infer_profile_from_matching_catalog() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let catalog = json!({"models": [{"model": "shared-model"}]});
+        let mut current = Provider::with_id(
+            "native".to_string(),
+            "Native".to_string(),
+            json!({"modelCatalog": catalog}),
+            None,
+        );
+        current.meta = Some(ProviderMeta {
+            api_format: Some("openai_responses".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &current)
+            .expect("save current provider");
+        db.set_current_provider("codex", &current.id)
+            .expect("select current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&current.id))
+            .expect("select local current provider");
+
+        let backup = json!({
+            "auth": {"OPENAI_API_KEY": "chat-key"},
+            "config": "model_provider = \"custom\"\nmodel = \"shared-model\"\n",
+            "modelCatalog": catalog
+        });
+        db.save_live_backup("codex", &backup.to_string())
+            .await
+            .expect("save legacy chat backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore legacy chat backup");
+        let catalog: Value = serde_json::from_str(
+            &std::fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read generated catalog"),
+        )
+        .expect("parse generated catalog");
+        let entry = &catalog["models"][0];
+        assert_ne!(entry["tool_mode"], "direct");
+        assert!(entry.get("apply_patch_tool_type").is_some());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_backup_rejects_non_object_provider_settings() {
+        for settings in [Value::Null, json!([])] {
+            let db = Arc::new(Database::memory().expect("init db"));
+            let service = ProxyService::new(db.clone());
+            let provider =
+                Provider::with_id("invalid".to_string(), "Invalid".to_string(), settings, None);
+
+            let error = service
+                .update_live_backup_from_provider("codex", &provider)
+                .await
+                .expect_err("non-object settings must be rejected");
+            assert_eq!(error, "Codex backup must be a JSON object");
+            assert!(db
+                .get_live_backup("codex")
+                .await
+                .expect("read backup")
+                .is_none());
+        }
     }
 
     /// Regression: a provider-rebuilt backup can pair an inline `modelCatalog`
