@@ -109,7 +109,7 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     name: "Nexus",
     nameKey: "providerForm.presets.nexus",
     websiteUrl: "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
-    auth: generateThirdPartyAuth("onenx_77c730bc912a8f08_e6pVlx7XLCcIugi-JwxWP7gPbzCugk6vxmbU-YEXpWc"),
+    auth: generateThirdPartyAuth(""),
     config: generateThirdPartyConfig(
       "nexus_glm",
       "https://glm-test-glm52-tp4.onenexus-do.cloud/v1",
