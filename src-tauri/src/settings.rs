@@ -373,8 +373,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub enable_failover_toggle: bool,
     /// Keep Codex ChatGPT login material in auth.json when switching to third-party providers.
-    /// Opt-in: defaults to false so third-party switches cleanly overwrite auth.json.
-    #[serde(default)]
+    /// Enabled by default; users can explicitly opt out to restore the legacy overwrite behavior.
+    #[serde(default = "default_preserve_codex_official_auth_on_switch")]
     pub preserve_codex_official_auth_on_switch: bool,
     /// Run official Codex providers under the shared "custom" model_provider id
     /// so official sessions share one resume-history bucket with third-party
@@ -485,6 +485,10 @@ fn default_show_in_tray() -> bool {
 }
 
 fn default_minimize_to_tray_on_close() -> bool {
+    true
+}
+
+fn default_preserve_codex_official_auth_on_switch() -> bool {
     true
 }
 
@@ -1161,5 +1165,13 @@ mod tests {
         };
         unsupported.normalize_paths();
         assert_eq!(unsupported.language, None);
+    }
+
+    #[test]
+    fn settings_missing_codex_auth_preservation_defaults_enabled() {
+        let settings: AppSettings =
+            serde_json::from_value(serde_json::json!({})).expect("settings");
+
+        assert!(settings.preserve_codex_official_auth_on_switch);
     }
 }
