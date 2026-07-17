@@ -141,6 +141,7 @@
     "searchCloseAriaLabel": "Close provider search",
     "noSearchResults": "No providers match your search.",
     "duplicate": "Duplicate",
+    "duplicateLiveIdsLoadFailed": "Failed to read provider IDs from the current configuration. Fix the configuration and try again.",
     "sortUpdateFailed": "Failed to update sort order",
     "configureUsage": "Configure usage query",
     "officialPartner": "Official Partner",
@@ -217,6 +218,7 @@
     "statusGatewayTokenMissing": "The local routing token has not been generated yet. Switching to this provider again will write a new local token.",
     "statusBaseUrlMismatch": "The Claude Desktop profile points to a different URL than the current provider. Current: {{actual}}; expected: {{expected}}. Switch to the current provider again to repair it.",
     "route": {
+      "stopBlockedByTakeover": "Another app is using local routing. Turn off routing for that app in Settings before stopping the service.",
       "tooltip": {
         "active": "Claude Desktop local routing is running - {{address}}:{{port}}",
         "inactive": "Turn on Claude Desktop local routing for providers that need model mapping or format conversion. Configured address: {{address}}:{{port}}"
@@ -254,6 +256,7 @@
     "proxyReasonCopilot": "uses GitHub Copilot as a Claude provider",
     "proxyReasonOpenAIChat": "uses OpenAI Chat API format",
     "proxyReasonOpenAIResponses": "uses OpenAI Responses API format",
+    "proxyReasonClaudeDesktop": "uses Claude Desktop local routing mode",
     "proxyReasonFullUrl": "has full URL connection mode enabled",
     "openAIFormatHint": "This provider uses OpenAI-compatible format and requires the routing service to be enabled",
     "copilotProxyHint": "GitHub Copilot as a Claude provider always requires local routing; routing automatically selects Chat Completions or Responses based on the current model.",
@@ -1003,6 +1006,7 @@
     "omoHint": "💡 OMO config manages Agent model assignments and supports both oh-my-openagent.jsonc and oh-my-opencode.jsonc",
     "officialHint": "💡 Official provider uses browser login, no API Key needed",
     "getApiKey": "Get API Key",
+    "providerKeyStatusLoading": "Provider key status is still loading. Try again shortly.",
     "partnerPromotion": {
       "code0": "code0.ai is an AI coding service platform for developers, supporting Claude Code, Codex, and Gemini. Exclusive for Nexus Composer users: contact support via the official website to claim free trial credits!",
       "nekocode": "NekoCode gives developers a stable, efficient, and reliable API relay for Claude, Codex, and other AI models, with transparent pay-as-you-go pricing. Exclusive 10% off for Nexus Composer users: register via the link above and enter promo code nexus-composer at recharge to save 10%!",
@@ -1275,6 +1279,7 @@
     "apiUrlLabel": "API Request URL",
     "extractFromCurrent": "Extract from Editor",
     "extractNoCommonConfig": "No common config available to extract from editor",
+    "noCommonConfigToApply": "The common config snippet is empty or has nothing to apply",
     "extractFailed": "Extract failed: {{error}}",
     "saveFailed": "Save failed: {{error}}",
     "modelNameHint": "Specify the model to use, will be auto-updated in config.toml",
@@ -2401,6 +2406,7 @@
       "tooltip": "Failover priority {{priority}}"
     },
     "tooltip": {
+      "takeoverRequired": "Enable routing for {{app}} before enabling failover",
       "enabled": "{{app}} failover enabled\nRequests follow queue priority (P1→P2→...)",
       "disabled": "Enable {{app}} failover\nSwitches to queue P1 immediately, then falls back on failures"
     }
@@ -2580,7 +2586,9 @@
     },
     "server": {
       "started": "Routing service started - {{address}}:{{port}}",
-      "startFailed": "Failed to start routing service: {{detail}}"
+      "startFailed": "Failed to start routing service: {{detail}}",
+      "stopped": "Routing service stopped",
+      "stopFailed": "Failed to stop routing service: {{detail}}"
     },
     "stoppedWithRestore": "Routing service stopped, all routing configs restored",
     "stopWithRestoreFailed": "Stop failed: {{detail}}"
@@ -2692,6 +2700,7 @@
     "noAppsEnabled": "No apps enabled",
     "added": "Universal provider added",
     "addedAndSynced": "Universal provider added and synced",
+    "addedButSyncFailed": "Universal provider added, but sync failed",
     "updated": "Universal provider updated",
     "deleted": "Universal provider deleted",
     "addSuccess": "Universal provider added successfully",
@@ -2907,6 +2916,7 @@
     "sevenDay": "7-Day",
     "sevenDayOpus": "7-Day (Opus)",
     "sevenDaySonnet": "7-Day (Sonnet)",
+    "thirtyDay": "30-Day",
     "geminiPro": "Pro",
     "geminiFlash": "Flash",
     "geminiFlashLite": "Flash Lite",
