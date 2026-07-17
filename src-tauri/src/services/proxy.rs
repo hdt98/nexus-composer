@@ -2299,6 +2299,42 @@ impl ProxyService {
             .unwrap_or_else(|_| toml_str.to_string())
     }
 
+    fn nexus_codex_provider_display_name(provider: &Provider) -> Option<&'static str> {
+        let is_nexus = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            == Some("nexus");
+        is_nexus.then_some("Nexus")
+    }
+
+    fn repair_nexus_codex_provider_selector(toml_str: &str) -> String {
+        let Ok(mut doc) = toml_str.parse::<toml_edit::DocumentMut>() else {
+            return toml_str.to_string();
+        };
+        let has_canonical_table = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table())
+            .is_some_and(|providers| providers.contains_key("nexus"));
+        let Some(selector) = doc
+            .get_mut("model_provider")
+            .and_then(|item| item.as_value_mut())
+        else {
+            return toml_str.to_string();
+        };
+        let is_case_variant = selector
+            .as_str()
+            .is_some_and(|value| value != "nexus" && value.eq_ignore_ascii_case("nexus"));
+        if !has_canonical_table || !is_case_variant {
+            return toml_str.to_string();
+        }
+
+        let decor = selector.decor().clone();
+        *selector = toml_edit::Value::from("nexus");
+        *selector.decor_mut() = decor;
+        doc.to_string()
+    }
+
     /// 接管 Codex 时，本地客户端必须继续以 Responses wire API 访问代理。
     /// 真实上游是否走 Chat Completions 由 provider 配置决定，并在代理内部转换。
     fn apply_codex_proxy_toml_config_for_provider(
@@ -2306,7 +2342,11 @@ impl ProxyService {
         proxy_url: &str,
         provider: Option<&Provider>,
     ) -> String {
-        let updated = Self::update_toml_base_url(toml_str, proxy_url);
+        let nexus_display_name = provider.and_then(Self::nexus_codex_provider_display_name);
+        let updated = nexus_display_name
+            .map(|_| Self::repair_nexus_codex_provider_selector(toml_str))
+            .unwrap_or_else(|| toml_str.to_string());
+        let updated = Self::update_toml_base_url(&updated, proxy_url);
         let mut updated =
             crate::codex_config::update_codex_toml_field(&updated, "wire_api", "responses")
                 .unwrap_or(updated);
@@ -2317,6 +2357,11 @@ impl ProxyService {
             updated =
                 crate::codex_config::update_codex_toml_field(&updated, "model", &upstream_model)
                     .unwrap_or(updated);
+        }
+
+        if let Some(display_name) = nexus_display_name {
+            updated = crate::codex_config::update_codex_toml_field(&updated, "name", display_name)
+                .unwrap_or(updated);
         }
 
         updated
@@ -4276,6 +4321,129 @@ wire_api = "responses"
                 .and_then(|v| v.as_str()),
             Some(proxy_url)
         );
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_keeps_model_and_normalizes_nexus_name() {
+        let input = r#"
+model_provider = "Nexus" # keep selector comment
+model = "GLM-5.2-FP8"
+
+[model_providers.nexus]
+name = "nexus_glm"
+base_url = "https://example.invalid/v1"
+wire_api = "responses"
+stream_idle_timeout_ms = 900000
+"#;
+        let mut provider = Provider::with_id(
+            "nexus-glm-5-2".to_string(),
+            "Nexus GLM-5.2".to_string(),
+            json!({
+                "config": input
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            provider_type: Some("nexus".to_string()),
+            ..Default::default()
+        });
+
+        let proxy_url = "http://127.0.0.1:5000/v1";
+        let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+            input,
+            proxy_url,
+            Some(&provider),
+        );
+        let parsed: toml::Value =
+            toml::from_str(&output).expect("updated config should be valid TOML");
+
+        assert_eq!(
+            parsed.get("model").and_then(|v| v.as_str()),
+            Some("GLM-5.2-FP8")
+        );
+        assert_eq!(
+            parsed.get("model_provider").and_then(|v| v.as_str()),
+            Some("nexus")
+        );
+        let nexus = parsed
+            .get("model_providers")
+            .and_then(|v| v.get("nexus"))
+            .expect("canonical provider should be active");
+        assert_eq!(
+            nexus.get("base_url").and_then(|v| v.as_str()),
+            Some(proxy_url)
+        );
+        assert_eq!(nexus.get("name").and_then(|v| v.as_str()), Some("Nexus"));
+        assert_eq!(
+            nexus
+                .get("stream_idle_timeout_ms")
+                .and_then(|v| v.as_integer()),
+            Some(900000)
+        );
+        assert!(
+            parsed
+                .get("model_providers")
+                .and_then(|v| v.get("Nexus"))
+                .is_none()
+        );
+        assert!(output.contains("# keep selector comment"));
+    }
+
+    #[test]
+    fn apply_codex_proxy_toml_config_preserves_other_active_nexus_tables() {
+        let cases = [
+            (
+                r#"model_provider = "custom" # keep custom selector
+model = "GLM-5.2-FP8"
+[model_providers.custom]
+name = "Custom GLM"
+custom_option = "keep"
+"#,
+                "custom",
+                "# keep custom selector",
+            ),
+            (
+                r#"model_provider = "Nexus" # keep uppercase selector
+model = "GLM-5.2-FP8"
+[model_providers.Nexus]
+name = "User Nexus"
+custom_option = "keep"
+"#,
+                "Nexus",
+                "# keep uppercase selector",
+            ),
+        ];
+
+        for (input, expected_key, expected_comment) in cases {
+            let mut provider = Provider::with_id(
+                "nexus-glm-5-2".to_string(),
+                "Nexus GLM-5.2".to_string(),
+                json!({ "config": input }),
+                None,
+            );
+            provider.meta = Some(ProviderMeta {
+                api_format: Some("openai_chat".to_string()),
+                provider_type: Some("nexus".to_string()),
+                ..Default::default()
+            });
+            let output = ProxyService::apply_codex_proxy_toml_config_for_provider(
+                input,
+                "http://127.0.0.1:5000/v1",
+                Some(&provider),
+            );
+            let parsed: toml::Value = toml::from_str(&output).expect("valid TOML");
+            let providers = parsed.get("model_providers").expect("model_providers");
+            let active = providers
+                .get(expected_key)
+                .expect("expected provider should remain active");
+
+            assert_eq!(parsed["model_provider"].as_str(), Some(expected_key));
+            assert_eq!(active["name"].as_str(), Some("Nexus"));
+            assert_eq!(active["custom_option"].as_str(), Some("keep"));
+            assert!(providers.get("nexus").is_none());
+            assert!(output.contains(expected_comment));
+        }
     }
 
     #[test]
