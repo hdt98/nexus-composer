@@ -1145,6 +1145,27 @@ impl RequestForwarder {
             .and_then(|m| m.provider_type.as_deref())
             == Some("github_copilot")
             || base_url.contains("githubcopilot.com");
+        let (endpoint_path, _) = split_endpoint_and_query(endpoint);
+        let count_tokens = adapter.name() == "Claude" && is_claude_count_tokens_path(endpoint_path);
+        let configured_claude_api_format = super::providers::get_claude_api_format(provider);
+        let count_tokens_mode = if count_tokens {
+            claude_count_tokens_mode(provider)
+        } else {
+            None
+        };
+        let count_tokens_via_tokenize =
+            count_tokens_mode == Some(ClaudeCountTokensMode::OpenAiTokenize);
+        if count_tokens
+            && (is_full_url
+                || is_copilot
+                || provider.is_codex_oauth()
+                || count_tokens_mode.is_none())
+        {
+            return Err(ProxyError::InvalidRequest(
+                "count_tokens requires an Anthropic-compatible provider or managed Nexus OpenAI Chat provider"
+                    .to_string(),
+            ));
+        }
 
         // 应用模型映射（独立于格式转换）
         // Claude Desktop proxy 模式必须先把 Desktop 可见的 claude-* route
@@ -1303,10 +1324,12 @@ impl RequestForwarder {
             }
         }
         let resolved_claude_api_format = if adapter.name() == "Claude" {
-            Some(
+            Some(if count_tokens {
+                configured_claude_api_format.to_string()
+            } else {
                 self.resolve_claude_api_format(provider, &mapped_body, is_copilot)
-                    .await,
-            )
+                    .await
+            })
         } else {
             None
         };
@@ -1328,6 +1351,10 @@ impl RequestForwarder {
             && super::providers::should_convert_codex_responses_to_chat(provider, endpoint);
         let (effective_endpoint, passthrough_query) = if codex_responses_to_chat {
             rewrite_codex_responses_endpoint_to_chat(endpoint)
+        } else if count_tokens_via_tokenize {
+            ("/v1/tokenize".to_string(), None)
+        } else if count_tokens {
+            rewrite_claude_count_tokens_endpoint(endpoint)
         } else if needs_transform && adapter.name() == "Claude" {
             let api_format = resolved_claude_api_format
                 .as_deref()
@@ -1418,7 +1445,7 @@ impl RequestForwarder {
         // 过滤私有参数（以 `_` 开头的字段），防止内部信息泄露到上游
         // 默认使用空白名单，过滤所有 _ 前缀字段
         let mut filtered_body = prepare_upstream_request_body(request_body);
-        if !is_copilot {
+        if !is_copilot && (!count_tokens || count_tokens_via_tokenize) {
             if let Some(overrides) = provider
                 .meta
                 .as_ref()
@@ -1428,6 +1455,9 @@ impl RequestForwarder {
                     filtered_body = prepare_upstream_request_body(filtered_body);
                 }
             }
+        }
+        if count_tokens_via_tokenize {
+            filtered_body = build_openai_tokenize_request(filtered_body)?;
         }
         // 出站 body 定稿后刷新真值（覆盖 Codex chat 上游模型覆写、转换层模型改写）
         if let Some(m) = filtered_body
@@ -2374,6 +2404,77 @@ fn is_claude_messages_path(path: &str) -> bool {
     matches!(path, "/v1/messages" | "/claude/v1/messages")
 }
 
+pub(crate) fn is_claude_count_tokens_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/v1/messages/count_tokens" | "/claude/v1/messages/count_tokens"
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClaudeCountTokensMode {
+    Anthropic,
+    OpenAiTokenize,
+}
+
+fn claude_count_tokens_mode(provider: &Provider) -> Option<ClaudeCountTokensMode> {
+    match super::providers::get_claude_api_format(provider) {
+        "anthropic" => Some(ClaudeCountTokensMode::Anthropic),
+        "openai_chat"
+            if provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.provider_type.as_deref())
+                == Some("nexus") =>
+        {
+            Some(ClaudeCountTokensMode::OpenAiTokenize)
+        }
+        _ => None,
+    }
+}
+
+fn rewrite_claude_count_tokens_endpoint(endpoint: &str) -> (String, Option<String>) {
+    let query = split_endpoint_and_query(endpoint)
+        .1
+        .filter(|query| !query.is_empty())
+        .map(ToString::to_string);
+    let endpoint = match query.as_deref() {
+        Some(query) => format!("/v1/messages/count_tokens?{query}"),
+        None => "/v1/messages/count_tokens".to_string(),
+    };
+    (endpoint, query)
+}
+
+fn build_openai_tokenize_request(body: Value) -> Result<Value, ProxyError> {
+    let Value::Object(source) = body else {
+        return Err(ProxyError::TransformError(
+            "OpenAI Chat count_tokens request must be a JSON object".to_string(),
+        ));
+    };
+    if !source.get("messages").is_some_and(Value::is_array) {
+        return Err(ProxyError::TransformError(
+            "OpenAI Chat count_tokens request requires messages".to_string(),
+        ));
+    }
+
+    let mut request = serde_json::Map::new();
+    for key in [
+        "model",
+        "messages",
+        "tools",
+        "tool_choice",
+        "reasoning_effort",
+        "task",
+        "continue_final_message",
+        "chat_template_kwargs",
+    ] {
+        if let Some(value) = source.get(key) {
+            request.insert(key.to_string(), value.clone());
+        }
+    }
+    Ok(canonicalize_value(Value::Object(request)))
+}
+
 fn rewrite_codex_responses_endpoint_to_chat(endpoint: &str) -> (String, Option<String>) {
     let (_path, query) = split_endpoint_and_query(endpoint);
     let passthrough_query = query.map(ToString::to_string);
@@ -2961,6 +3062,67 @@ mod tests {
         assert_eq!(code, log_fwd::PROVIDER_FAILED_RETRY);
         assert!(message.contains("继续尝试下一个 (1/3)"));
         assert!(message.contains("请求超时"));
+    }
+
+    #[test]
+    fn count_tokens_modes_are_explicit() {
+        let mut native = test_provider_with_type(None);
+        native.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("anthropic".to_string()),
+            ..Default::default()
+        });
+        let mut nexus = test_provider_with_type(Some("nexus"));
+        nexus.meta.as_mut().expect("Nexus metadata").api_format = Some("openai_chat".to_string());
+        let mut generic_chat = test_provider_with_type(None);
+        generic_chat.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            claude_count_tokens_mode(&native),
+            Some(ClaudeCountTokensMode::Anthropic)
+        );
+        assert_eq!(
+            claude_count_tokens_mode(&nexus),
+            Some(ClaudeCountTokensMode::OpenAiTokenize)
+        );
+        assert_eq!(claude_count_tokens_mode(&generic_chat), None);
+
+        let (endpoint, query) =
+            rewrite_claude_count_tokens_endpoint("/claude/v1/messages/count_tokens?beta=true");
+        assert_eq!(endpoint, "/v1/messages/count_tokens?beta=true");
+        assert_eq!(query.as_deref(), Some("beta=true"));
+    }
+
+    #[test]
+    fn tokenize_request_keeps_only_chat_template_inputs() {
+        let request = build_openai_tokenize_request(json!({
+            "model": "GLM-5.2-FP8",
+            "messages": [
+                {"role": "assistant", "reasoning_content": "prior proof", "content": "checkpoint"},
+                {"role": "user", "content": "continue"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "check", "parameters": {}}}],
+            "tool_choice": "auto",
+            "reasoning_effort": "high",
+            "task": "query",
+            "continue_final_message": false,
+            "chat_template_kwargs": {"enable_thinking": true, "clear_thinking": false},
+            "max_tokens": 131_072,
+            "stream": true,
+            "temperature": 0.4,
+            "stream_options": {"include_usage": true}
+        }))
+        .expect("tokenize request");
+
+        assert_eq!(request["messages"][0]["reasoning_content"], "prior proof");
+        assert_eq!(request["chat_template_kwargs"]["clear_thinking"], false);
+        assert!(request.get("tools").is_some());
+        assert!(request.get("max_tokens").is_none());
+        assert!(request.get("stream").is_none());
+        assert!(request.get("temperature").is_none());
+        assert!(request.get("stream_options").is_none());
     }
 
     #[test]

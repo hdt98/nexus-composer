@@ -296,6 +296,11 @@ impl ProxyServer {
             // Claude API (支持带前缀和不带前缀两种格式)
             .route("/v1/messages", post(handlers::handle_messages))
             .route("/claude/v1/messages", post(handlers::handle_messages))
+            .route("/v1/messages/count_tokens", post(handlers::handle_messages))
+            .route(
+                "/claude/v1/messages/count_tokens",
+                post(handlers::handle_messages),
+            )
             // Claude Desktop 3P 本地 gateway（独立 provider namespace）
             .route(
                 "/claude-desktop/v1/models",
@@ -303,6 +308,10 @@ impl ProxyServer {
             )
             .route(
                 "/claude-desktop/v1/messages",
+                post(handlers::handle_claude_desktop_messages),
+            )
+            .route(
+                "/claude-desktop/v1/messages/count_tokens",
                 post(handlers::handle_claude_desktop_messages),
             )
             // OpenAI Chat Completions API (Codex CLI，支持带前缀和不带前缀)
@@ -391,5 +400,260 @@ impl ProxyServer {
             .provider_router
             .reset_provider_breaker(provider_id, app_type)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app_config::AppType,
+        provider::{Provider, ProviderMeta},
+    };
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, Uri},
+        response::IntoResponse,
+        Json,
+    };
+    use http_body_util::BodyExt;
+    use serde_json::{json, Value};
+
+    struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+    impl<T> Drop for AbortOnDrop<T> {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    fn save_provider(
+        db: &Database,
+        id: &str,
+        base_url: &str,
+        api_format: &str,
+        managed_nexus: bool,
+    ) {
+        let mut provider = Provider::with_id(
+            id.to_string(),
+            "Nexus GLM-5.2".to_string(),
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_AUTH_TOKEN": "upstream-token"
+            }}),
+            None,
+        );
+        provider.meta = Some(
+            serde_json::from_value::<ProviderMeta>(json!({
+                "apiFormat": api_format,
+                "providerType": managed_nexus.then_some("nexus"),
+                "localProxyRequestOverrides": {
+                    "body": {
+                        "max_tokens": 65_536,
+                        "chat_template_kwargs": {
+                            "enable_thinking": true,
+                            "clear_thinking": false
+                        }
+                    }
+                }
+            }))
+            .expect("build provider metadata"),
+        );
+        db.save_provider(AppType::Claude.as_str(), &provider)
+            .expect("save count_tokens provider");
+        db.set_current_provider(AppType::Claude.as_str(), id)
+            .expect("select count_tokens provider");
+    }
+
+    async fn dispatch(router: &Router, path: &str, body: Value) -> axum::response::Response {
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri(path)
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header(http::header::AUTHORIZATION, "Bearer proxy-managed")
+            .body(Body::from(body.to_string()))
+            .expect("build count_tokens request");
+        let mut router = router.clone();
+        tower::Service::call(&mut router, request)
+            .await
+            .expect("route count_tokens request")
+    }
+
+    fn usage_count(db: &Database) -> i64 {
+        let conn = db.conn.lock().expect("lock test database");
+        conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+            row.get(0)
+        })
+        .expect("count usage rows")
+    }
+
+    fn count_body() -> Value {
+        json!({
+            "model": "GLM-5.2-FP8[1m]",
+            "system": "Work from the saved proof state.",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "prior proof checkpoint", "signature": "sig"},
+                        {"type": "text", "text": "Checkpoint saved."}
+                    ]
+                },
+                {"role": "user", "content": "Continue the proof."}
+            ],
+            "tools": [{
+                "name": "verify",
+                "description": "Verify the proof",
+                "input_schema": {"type": "object", "properties": {}}
+            }],
+            "tool_choice": {"type": "auto"}
+        })
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn count_tokens_preserves_managed_and_native_request_semantics() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (capture_tx, mut capture_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (native_tx, mut native_rx) = tokio::sync::mpsc::unbounded_channel();
+        let upstream = Router::new()
+            .route(
+                "/v1/tokenize",
+                post(move |Json(body): Json<Value>| {
+                    let capture_tx = capture_tx.clone();
+                    async move {
+                        let is_error = body["messages"]
+                            .as_array()
+                            .and_then(|messages| messages.last())
+                            .is_some_and(|message| message["content"] == "force error");
+                        capture_tx.send(body).expect("capture tokenize request");
+                        if is_error {
+                            (StatusCode::BAD_REQUEST, Json(json!({"error": "bad count"})))
+                                .into_response()
+                        } else {
+                            Json(json!({
+                                "tokens": [1, 2, 3],
+                                "count": 17,
+                                "max_model_len": 1_048_576
+                            }))
+                            .into_response()
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/messages/count_tokens",
+                post(move |uri: Uri, Json(body): Json<Value>| async move {
+                    native_tx.send((uri, body)).expect("capture native request");
+                    Json(json!({"input_tokens": 9}))
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind count_tokens upstream");
+        let upstream_addr = listener.local_addr().expect("read upstream address");
+        let _upstream_task = AbortOnDrop(tokio::spawn(async move {
+            axum::serve(listener, upstream).await
+        }));
+
+        let db = Arc::new(Database::memory().expect("create test database"));
+        let provider_id = crate::settings::get_current_provider(&AppType::Claude)
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| "count-claude".to_string());
+        save_provider(
+            &db,
+            &provider_id,
+            &format!("http://{upstream_addr}/v1"),
+            "openai_chat",
+            true,
+        );
+        let server = ProxyServer::new(
+            ProxyConfig {
+                listen_port: 0,
+                ..ProxyConfig::default()
+            },
+            db.clone(),
+            None,
+        );
+        let router = server.build_router();
+
+        let response = dispatch(&router, "/claude/v1/messages/count_tokens", count_body()).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("read count response")
+            .to_bytes();
+        assert_eq!(body, bytes::Bytes::from_static(br#"{"input_tokens":17}"#));
+
+        let captured = capture_rx.recv().await.expect("captured tokenize request");
+        let messages = captured["messages"].as_array().expect("OpenAI messages");
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("assistant history");
+        assert_eq!(assistant["reasoning_content"], "prior proof checkpoint");
+        assert_eq!(captured["tools"][0]["function"]["name"], "verify");
+        assert_eq!(captured["tool_choice"], "auto");
+        assert_eq!(
+            captured["chat_template_kwargs"],
+            json!({"enable_thinking": true, "clear_thinking": false})
+        );
+        assert!(captured.get("max_tokens").is_none());
+        assert!(captured.get("stream").is_none());
+
+        let response = dispatch(
+            &router,
+            "/v1/messages/count_tokens",
+            json!({
+                "model": "GLM-5.2-FP8[1m]",
+                "messages": [{"role": "user", "content": "force error"}]
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("read count error")
+                .to_bytes(),
+            bytes::Bytes::from_static(br#"{"error":"bad count"}"#)
+        );
+
+        save_provider(
+            &db,
+            &provider_id,
+            &format!("http://{upstream_addr}/v1"),
+            "anthropic",
+            false,
+        );
+        let native_body = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": "count natively"}]
+        });
+        let response = dispatch(
+            &router,
+            "/v1/messages/count_tokens?beta=true",
+            native_body.clone(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .into_body()
+                .collect()
+                .await
+                .expect("read native count response")
+                .to_bytes(),
+            bytes::Bytes::from_static(br#"{"input_tokens":9}"#)
+        );
+        let (uri, body) = native_rx.recv().await.expect("captured native request");
+        assert_eq!(uri.path(), "/v1/messages/count_tokens");
+        assert_eq!(uri.query(), Some("beta=true"));
+        assert_eq!(body, native_body);
+        assert_eq!(usage_count(&db), 0);
     }
 }

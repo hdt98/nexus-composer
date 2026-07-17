@@ -212,6 +212,7 @@ pub async fn handle_non_streaming(
     parser_config: &UsageParserConfig,
     // guard 在函数 scope 内持有，整包响应读取完成后随函数返回一并 drop
     _connection_guard: Option<ActiveConnectionGuard>,
+    record_usage: bool,
 ) -> Result<Response, ProxyError> {
     // 整包超时：仅在故障转移开启且配置值非零时生效
     let body_timeout =
@@ -231,7 +232,7 @@ pub async fn handle_non_streaming(
     );
 
     // 解析并记录使用量。关闭 usage logging 时直接跳过，避免非流式响应整包 JSON parse。
-    if usage_logging_enabled(state) {
+    if record_usage && usage_logging_enabled(state) {
         if let Ok(json_value) = serde_json::from_slice::<Value>(&body_bytes) {
             // 解析使用量
             if let Some(usage) = (parser_config.response_parser)(&json_value) {
@@ -328,7 +329,7 @@ pub async fn process_response(
     if is_sse_response(&response) {
         Ok(handle_streaming(response, ctx, state, parser_config, connection_guard).await)
     } else {
-        handle_non_streaming(response, ctx, state, parser_config, connection_guard).await
+        handle_non_streaming(response, ctx, state, parser_config, connection_guard, true).await
     }
 }
 

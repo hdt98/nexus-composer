@@ -10,10 +10,10 @@
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
     error_mapper::{get_error_message, map_proxy_error_to_status},
-    forwarder::ActiveConnectionGuard,
+    forwarder::{is_claude_count_tokens_path, ActiveConnectionGuard},
     handler_config::{
-        claude_stream_usage_event_filter, codex_stream_usage_event_filter, CLAUDE_PARSER_CONFIG,
-        CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
+        claude_stream_usage_event_filter, codex_stream_usage_event_filter, UsageParserConfig,
+        CLAUDE_PARSER_CONFIG, CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
     },
     handler_context::RequestContext,
     providers::{
@@ -31,9 +31,9 @@ use super::{
         transform, transform_codex_chat, transform_gemini, transform_responses,
     },
     response_processor::{
-        create_logged_passthrough_stream, process_response, read_decoded_body,
-        strip_entity_headers_for_rebuilt_body, strip_hop_by_hop_response_headers,
-        usage_logging_enabled, SseUsageCollector,
+        create_logged_passthrough_stream, handle_non_streaming, process_response,
+        read_decoded_body, strip_entity_headers_for_rebuilt_body,
+        strip_hop_by_hop_response_headers, usage_logging_enabled, SseUsageCollector,
     },
     server::ProxyState,
     sse::{strip_sse_field, take_sse_block},
@@ -183,6 +183,8 @@ async fn handle_messages_for_app(
     let endpoint = strip_prefix
         .and_then(|prefix| raw_endpoint.strip_prefix(prefix))
         .unwrap_or(raw_endpoint);
+    let record_usage =
+        !is_claude_count_tokens_path(endpoint.split_once('?').map_or(endpoint, |(path, _)| path));
 
     let is_stream = body
         .get("stream")
@@ -208,7 +210,9 @@ async fn handle_messages_for_app(
             if let Some(provider) = err.provider.take() {
                 ctx.provider = provider;
             }
-            log_forward_error(&state, &ctx, is_stream, &err.error);
+            if record_usage {
+                log_forward_error(&state, &ctx, is_stream, &err.error);
+            }
             return Err(err.error);
         }
     };
@@ -225,7 +229,7 @@ async fn handle_messages_for_app(
 
     // 检查是否需要格式转换（OpenRouter 等中转服务）
     let adapter = get_adapter(&app_type);
-    let needs_transform = adapter.needs_transform(&ctx.provider);
+    let needs_transform = record_usage && adapter.needs_transform(&ctx.provider);
 
     // Claude 特有：格式转换处理
     if needs_transform {
@@ -241,6 +245,18 @@ async fn handle_messages_for_app(
         .await;
     }
 
+    if !record_usage {
+        return handle_count_tokens_response(
+            response,
+            &ctx,
+            &state,
+            &CLAUDE_PARSER_CONFIG,
+            connection_guard,
+            &api_format,
+        )
+        .await;
+    }
+
     // 通用响应处理（透传模式）
     process_response(
         response,
@@ -250,6 +266,56 @@ async fn handle_messages_for_app(
         connection_guard,
     )
     .await
+}
+
+async fn handle_count_tokens_response(
+    response: super::hyper_client::ProxyResponse,
+    ctx: &RequestContext,
+    state: &ProxyState,
+    parser_config: &UsageParserConfig,
+    connection_guard: Option<ActiveConnectionGuard>,
+    api_format: &str,
+) -> Result<axum::response::Response, ProxyError> {
+    if api_format != "openai_chat" || !response.status().is_success() {
+        return handle_non_streaming(response, ctx, state, parser_config, connection_guard, false)
+            .await;
+    }
+
+    let body_timeout =
+        if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
+            std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
+        } else {
+            std::time::Duration::ZERO
+        };
+    let (mut headers, status, body) = read_decoded_body(response, ctx.tag, body_timeout).await?;
+    let body = translate_tokenize_count_response(&body)?;
+
+    strip_hop_by_hop_response_headers(&mut headers);
+    strip_entity_headers_for_rebuilt_body(&mut headers);
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    let mut builder = axum::response::Response::builder().status(status);
+    for (name, value) in &headers {
+        builder = builder.header(name, value);
+    }
+    builder
+        .body(axum::body::Body::from(body))
+        .map_err(|error| ProxyError::Internal(format!("Failed to build response: {error}")))
+}
+
+fn translate_tokenize_count_response(body: &[u8]) -> Result<Vec<u8>, ProxyError> {
+    let value: Value = serde_json::from_slice(body).map_err(|error| {
+        ProxyError::ForwardFailed(format!("invalid /v1/tokenize response: {error}"))
+    })?;
+    let count = value.get("count").and_then(Value::as_u64).ok_or_else(|| {
+        ProxyError::ForwardFailed(
+            "invalid /v1/tokenize response: count must be a non-negative integer".to_string(),
+        )
+    })?;
+    serde_json::to_vec(&json!({"input_tokens": count}))
+        .map_err(|error| ProxyError::Internal(error.to_string()))
 }
 
 fn validate_claude_desktop_gateway_auth(
@@ -2174,7 +2240,7 @@ mod tests {
         chat_sse_to_response_value_for_normalization, codex_proxy_error_json, log_forward_error,
         normalize_chat_fallback, normalize_chat_value, responses_sse_to_response_value,
         should_emit_anthropic_reasoning, should_use_claude_transform_streaming, transform,
-        upstream_body_parse_error,
+        translate_tokenize_count_response, upstream_body_parse_error,
     };
     use crate::{
         app_config::AppType,
@@ -2195,6 +2261,27 @@ mod tests {
     };
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::RwLock;
+
+    #[test]
+    fn tokenize_count_response_maps_scalar_count() {
+        assert_eq!(
+            translate_tokenize_count_response(
+                br#"{"tokens":[1,2],"count":2,"max_model_len":1048576}"#
+            )
+            .expect("valid count"),
+            br#"{"input_tokens":2}"#
+        );
+    }
+
+    #[test]
+    fn tokenize_count_response_rejects_batch_count() {
+        assert!(matches!(
+            translate_tokenize_count_response(
+                br#"{"tokens":[[1],[2]],"count":[1,1],"max_model_len":1048576}"#
+            ),
+            Err(ProxyError::ForwardFailed(_))
+        ));
+    }
 
     fn build_state(db: Arc<Database>) -> ProxyState {
         ProxyState {
