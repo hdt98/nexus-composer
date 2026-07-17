@@ -10,24 +10,9 @@ const LEGACY_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
 const MODEL: &str = "GLM-5.2-FP8";
 const CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
 const MANAGED_VERSION: u64 = 7;
-const CLAUDE_DESKTOP_MANAGED_VERSION: u64 = 8;
 const CONTEXT_WINDOW: i64 = 1_048_576;
 const COMPACT_TOKENS: i64 = 252_000;
 const MAX_OUTPUT_TOKENS: u64 = 65_536;
-const CLAUDE_DESKTOP_ROLE_IDS: [&str; 4] = [
-    "claude-sonnet-5",
-    "claude-opus-4-8",
-    "claude-fable-5",
-    "claude-haiku-4-5",
-];
-
-fn managed_version(app: &AppType) -> u64 {
-    if matches!(app, AppType::ClaudeDesktop) {
-        CLAUDE_DESKTOP_MANAGED_VERSION
-    } else {
-        MANAGED_VERSION
-    }
-}
 
 fn recognized_endpoint(value: &str) -> bool {
     matches!(
@@ -43,12 +28,7 @@ fn recognized_model(value: &str) -> bool {
     )
 }
 
-fn has_hosted_signature(
-    app: &AppType,
-    settings: &Value,
-    meta: &Value,
-    require_complete_desktop_routes: bool,
-) -> bool {
+fn has_hosted_signature(app: &AppType, settings: &Value) -> bool {
     match app {
         AppType::Codex => {
             let Some(config) = settings.get("config").and_then(Value::as_str) else {
@@ -76,36 +56,6 @@ fn has_hosted_signature(
                     .get("ANTHROPIC_MODEL")
                     .and_then(Value::as_str)
                     .is_some_and(recognized_model)
-        }
-        AppType::ClaudeDesktop => {
-            let Some(env) = settings.get("env") else {
-                return false;
-            };
-            env.get("ANTHROPIC_BASE_URL")
-                .and_then(Value::as_str)
-                .is_some_and(recognized_endpoint)
-                && meta.get("claudeDesktopMode").and_then(Value::as_str) == Some("proxy")
-                && meta.get("apiFormat").and_then(Value::as_str) == Some("openai_chat")
-                && meta
-                    .get("claudeDesktopModelRoutes")
-                    .and_then(Value::as_object)
-                    .is_some_and(|routes| {
-                        !routes.is_empty()
-                            && (!require_complete_desktop_routes
-                                || routes.len() == CLAUDE_DESKTOP_ROLE_IDS.len())
-                            && routes.iter().all(|(role_id, route)| {
-                                CLAUDE_DESKTOP_ROLE_IDS.contains(&role_id.as_str())
-                                    && route
-                                        .get("model")
-                                        .and_then(Value::as_str)
-                                        .is_some_and(recognized_model)
-                                    && (!require_complete_desktop_routes
-                                        || (route.get("labelOverride").and_then(Value::as_str)
-                                            == Some(MODEL)
-                                            && route.get("supports1m").and_then(Value::as_bool)
-                                                == Some(true)))
-                            })
-                    })
         }
         _ => false,
     }
@@ -197,7 +147,7 @@ fn merge_text_only_catalog(settings: &mut Value, app: &AppType) -> Result<(), Ap
     Ok(())
 }
 
-fn merge_request_defaults(meta: &mut Value, version: u64) -> Result<(), AppError> {
+fn merge_request_defaults(meta: &mut Value) -> Result<(), AppError> {
     let meta = meta
         .as_object_mut()
         .ok_or_else(|| AppError::Message("Nexus metadata must be an object".into()))?;
@@ -227,26 +177,8 @@ fn merge_request_defaults(meta: &mut Value, version: u64) -> Result<(), AppError
         .entry("clear_thinking")
         .or_insert_with(|| json!(false));
     meta.insert("providerType".into(), json!("nexus"));
-    meta.insert("managedNexusPresetVersion".into(), json!(version));
+    meta.insert("managedNexusPresetVersion".into(), json!(MANAGED_VERSION));
     meta.insert("apiFormat".into(), json!("openai_chat"));
-    Ok(())
-}
-
-fn merge_desktop_routes(meta: &mut Value) -> Result<(), AppError> {
-    let meta = meta
-        .as_object_mut()
-        .ok_or_else(|| AppError::Message("Nexus metadata must be an object".into()))?;
-    let routes = CLAUDE_DESKTOP_ROLE_IDS
-        .into_iter()
-        .map(|route| {
-            (
-                route.to_string(),
-                json!({"model": MODEL, "labelOverride": MODEL, "supports1m": true}),
-            )
-        })
-        .collect();
-    meta.insert("claudeDesktopModelRoutes".into(), Value::Object(routes));
-    meta.insert("claudeDesktopMode".into(), json!("proxy"));
     Ok(())
 }
 
@@ -299,20 +231,10 @@ fn upgrade_settings(app: &AppType, settings: &mut Value, meta: &mut Value) -> Re
                 env.insert(key.into(), json!(value));
             }
         }
-        AppType::ClaudeDesktop => {
-            let env = settings
-                .get_mut("env")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| {
-                    AppError::Message("Nexus Claude Desktop env must be an object".into())
-                })?;
-            env.insert("ANTHROPIC_BASE_URL".into(), json!(HOSTED_ENDPOINT));
-            merge_desktop_routes(meta)?;
-        }
         _ => return Ok(()),
     }
     merge_text_only_catalog(settings, app)?;
-    merge_request_defaults(meta, managed_version(app))
+    merge_request_defaults(meta)
 }
 
 impl Database {
@@ -321,14 +243,10 @@ impl Database {
         app: &AppType,
         current_id: Option<&str>,
     ) -> Result<bool, AppError> {
-        if !matches!(
-            app,
-            AppType::Claude | AppType::ClaudeDesktop | AppType::Codex
-        ) {
+        if !matches!(app, AppType::Claude | AppType::Codex) {
             return Ok(false);
         }
         let app_name = app.as_str();
-        let target_version = managed_version(app);
         let mut connection = lock_conn!(self.conn);
         let transaction = connection.transaction()?;
         let rows = {
@@ -358,7 +276,7 @@ impl Database {
             let version = meta
                 .get("managedNexusPresetVersion")
                 .and_then(Value::as_u64);
-            if version.is_some_and(|version| version > target_version) {
+            if version.is_some_and(|version| version > MANAGED_VERSION) {
                 continue;
             }
             let explicitly_managed =
@@ -368,15 +286,13 @@ impl Database {
                 continue;
             }
 
-            if explicitly_managed
-                && !has_hosted_signature(app, &settings, &meta, version == Some(target_version))
-            {
+            if explicitly_managed && !has_hosted_signature(app, &settings) {
                 let Some(meta) = meta.as_object_mut() else {
                     continue;
                 };
                 meta.remove("providerType");
                 meta.remove("managedNexusPresetVersion");
-            } else if version != Some(target_version) {
+            } else if version != Some(MANAGED_VERSION) {
                 upgrade_settings(app, &mut settings, &mut meta).map_err(|error| {
                     AppError::Message(format!(
                         "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
@@ -406,11 +322,10 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLAUDE_DESKTOP_MANAGED_VERSION, CLAUDE_DESKTOP_ROLE_IDS, MANAGED_VERSION, MODEL};
     use crate::app_config::AppType;
     use crate::database::Database;
     use crate::provider::Provider;
-    use serde_json::{json, Value};
+    use serde_json::json;
 
     const LEGACY_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
     const HOSTED_ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
@@ -605,238 +520,5 @@ mod tests {
         assert!(!db
             .migrate_managed_nexus_for_app(&AppType::Claude, Some("managed"))
             .unwrap());
-    }
-
-    #[test]
-    fn desktop_version_bump_does_not_rewrite_current_cli_presets() {
-        let db = Database::memory().unwrap();
-        let codex_settings = json!({
-            "config": format!(
-                "model_provider='nexus'\nmodel='GLM-5.2-FP8'\nmodel_auto_compact_token_limit=300000\n[model_providers.nexus]\nbase_url='{HOSTED_ENDPOINT}'\nstream_idle_timeout_ms=900000"
-            )
-        });
-        let claude_settings = json!({"env": {
-            "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
-            "ANTHROPIC_MODEL": "GLM-5.2-FP8[1m]",
-            "API_TIMEOUT_MS": "900000"
-        }});
-        for (app, id, settings) in [
-            (AppType::Codex, "codex-current", codex_settings.clone()),
-            (AppType::Claude, "claude-current", claude_settings.clone()),
-        ] {
-            save_provider(
-                &db,
-                app.clone(),
-                id,
-                "Nexus GLM-5.2",
-                settings,
-                json!({
-                    "providerType": "nexus",
-                    "managedNexusPresetVersion": MANAGED_VERSION,
-                    "apiFormat": "openai_chat"
-                }),
-            );
-            assert!(!db.migrate_managed_nexus_for_app(&app, Some(id)).unwrap());
-        }
-
-        assert_eq!(
-            db.get_provider_by_id("codex-current", AppType::Codex.as_str())
-                .unwrap()
-                .unwrap()
-                .settings_config,
-            codex_settings
-        );
-        assert_eq!(
-            db.get_provider_by_id("claude-current", AppType::Claude.as_str())
-                .unwrap()
-                .unwrap()
-                .settings_config,
-            claude_settings
-        );
-    }
-
-    #[test]
-    fn migrates_managed_claude_desktop_preset() {
-        let db = Database::memory().unwrap();
-        save_provider(
-            &db,
-            AppType::ClaudeDesktop,
-            "desktop",
-            "Nexus GLM-5.2",
-            json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
-                    "ANTHROPIC_AUTH_TOKEN": "user-key"
-                }
-            }),
-            json!({
-                "providerType": "nexus",
-                "managedNexusPresetVersion": 7,
-                "apiFormat": "openai_chat",
-                "claudeDesktopMode": "proxy",
-                "claudeDesktopModelRoutes": {
-                    "claude-sonnet-5": {"model": "GLM-5.2-FP8", "supports1m": true}
-                }
-            }),
-        );
-
-        assert!(db
-            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("desktop"))
-            .unwrap());
-        let provider = db
-            .get_provider_by_id("desktop", AppType::ClaudeDesktop.as_str())
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            provider.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
-            "user-key"
-        );
-        assert_eq!(
-            provider.settings_config["env"]["ANTHROPIC_BASE_URL"],
-            HOSTED_ENDPOINT
-        );
-        assert_eq!(
-            provider.settings_config["modelCatalog"]["models"][0]["inputModalities"],
-            json!(["text"])
-        );
-        let meta = provider.meta.unwrap();
-        assert_eq!(
-            meta.managed_nexus_preset_version,
-            Some(CLAUDE_DESKTOP_MANAGED_VERSION as u32)
-        );
-        assert_eq!(meta.claude_desktop_model_routes.len(), 4);
-        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
-        assert_eq!(
-            meta.claude_desktop_mode.as_ref(),
-            Some(&crate::provider::ClaudeDesktopMode::Proxy)
-        );
-        for route in [
-            "claude-sonnet-5",
-            "claude-opus-4-8",
-            "claude-fable-5",
-            "claude-haiku-4-5",
-        ] {
-            let route = meta
-                .claude_desktop_model_routes
-                .get(route)
-                .expect("managed Desktop route");
-            assert_eq!(route.model, "GLM-5.2-FP8");
-            assert_eq!(route.supports_1m, Some(true));
-        }
-        let body = meta
-            .local_proxy_request_overrides
-            .as_ref()
-            .and_then(|overrides| overrides.body.as_ref())
-            .expect("managed request defaults");
-        assert_eq!(body["chat_template_kwargs"]["clear_thinking"], false);
-    }
-
-    #[test]
-    fn claude_desktop_migration_detaches_user_modified_contract_fields() {
-        let db = Database::memory().unwrap();
-        let settings = json!({
-            "env": {
-                "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
-                "ANTHROPIC_AUTH_TOKEN": "user-key"
-            },
-            "userSetting": "keep"
-        });
-        let base_meta = json!({
-            "providerType": "nexus",
-            "managedNexusPresetVersion": 7,
-            "apiFormat": "openai_chat",
-            "claudeDesktopMode": "proxy",
-            "customUserAgent": "keep-agent",
-            "claudeDesktopModelRoutes": {
-                "claude-sonnet-5": {"model": "GLM-5.2-FP8"}
-            }
-        });
-        let mut current_meta = base_meta.clone();
-        current_meta["managedNexusPresetVersion"] = json!(CLAUDE_DESKTOP_MANAGED_VERSION);
-        current_meta["claudeDesktopModelRoutes"] = Value::Object(
-            CLAUDE_DESKTOP_ROLE_IDS
-                .into_iter()
-                .map(|role| {
-                    (
-                        role.to_string(),
-                        json!({"model": MODEL, "labelOverride": MODEL, "supports1m": true}),
-                    )
-                })
-                .collect(),
-        );
-        let cases = [
-            ("changed-mode", {
-                let mut meta = base_meta.clone();
-                meta["claudeDesktopMode"] = json!("direct");
-                meta
-            }),
-            ("changed-format", {
-                let mut meta = base_meta.clone();
-                meta["apiFormat"] = json!("anthropic");
-                meta
-            }),
-            ("extra-route", {
-                let mut meta = base_meta.clone();
-                meta["claudeDesktopModelRoutes"]["custom-route"] = json!({"model": "GLM-5.2-FP8"});
-                meta
-            }),
-            ("changed-model", {
-                let mut meta = base_meta.clone();
-                meta["claudeDesktopModelRoutes"]["claude-sonnet-5"]["model"] = json!("user-model");
-                meta
-            }),
-            ("current-version-missing-role", {
-                let mut meta = base_meta.clone();
-                meta["managedNexusPresetVersion"] = json!(CLAUDE_DESKTOP_MANAGED_VERSION);
-                meta
-            }),
-            ("current-version-label-changed", {
-                let mut meta = current_meta.clone();
-                meta["claudeDesktopModelRoutes"]["claude-sonnet-5"]["labelOverride"] =
-                    json!("Custom label");
-                meta
-            }),
-            ("current-version-1m-disabled", {
-                let mut meta = current_meta.clone();
-                meta["claudeDesktopModelRoutes"]["claude-haiku-4-5"]["supports1m"] = json!(false);
-                meta
-            }),
-        ];
-
-        for (id, meta) in &cases {
-            save_provider(
-                &db,
-                AppType::ClaudeDesktop,
-                id,
-                "Nexus GLM-5.2",
-                settings.clone(),
-                meta.clone(),
-            );
-        }
-
-        assert!(!db
-            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("other"))
-            .unwrap());
-
-        for (id, expected_meta) in cases {
-            let detached = db
-                .get_provider_by_id(id, AppType::ClaudeDesktop.as_str())
-                .unwrap()
-                .unwrap();
-            assert_eq!(detached.settings_config, settings);
-            let detached_meta = serde_json::to_value(detached.meta.unwrap()).unwrap();
-            assert!(detached_meta.get("providerType").is_none());
-            assert!(detached_meta.get("managedNexusPresetVersion").is_none());
-            assert_eq!(detached_meta["apiFormat"], expected_meta["apiFormat"]);
-            assert_eq!(
-                detached_meta["claudeDesktopMode"],
-                expected_meta["claudeDesktopMode"]
-            );
-            assert_eq!(
-                detached_meta["claudeDesktopModelRoutes"],
-                expected_meta["claudeDesktopModelRoutes"]
-            );
-            assert_eq!(detached_meta["customUserAgent"], "keep-agent");
-        }
     }
 }

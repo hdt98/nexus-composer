@@ -631,11 +631,7 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
-            for app_type in [
-                app_config::AppType::Claude,
-                app_config::AppType::ClaudeDesktop,
-                app_config::AppType::Codex,
-            ] {
+            for app_type in [app_config::AppType::Claude, app_config::AppType::Codex] {
                 let current_id = services::provider::ProviderService::current(
                     &app_state,
                     app_type.clone(),

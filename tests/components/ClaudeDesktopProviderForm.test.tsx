@@ -6,7 +6,7 @@ import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
 import {
   NEXUS_ENDPOINT,
-  NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+  NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -53,7 +53,7 @@ function managedNexusProvider() {
     },
     meta: {
       providerType: "nexus",
-      managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
       claudeDesktopMode: "proxy" as const,
       apiFormat: "openai_chat" as const,
@@ -88,6 +88,20 @@ function expectManagedNexusDetached(submitted: {
   expect(submitted.meta).not.toHaveProperty("localProxyRequestOverrides");
 }
 
+function expectManagedNexusEndpointDetached(submitted: {
+  settingsConfig: string;
+  meta: Record<string, unknown>;
+}) {
+  expect(JSON.parse(submitted.settingsConfig).modelCatalog).toEqual(
+    NEXUS_TEXT_MODEL_CATALOG,
+  );
+  expect(submitted.meta).toMatchObject({
+    providerType: "nexus",
+    localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
+  });
+  expect(submitted.meta).not.toHaveProperty("managedNexusPresetVersion");
+}
+
 describe("ClaudeDesktopProviderForm", () => {
   it("persists the managed Nexus preset metadata and request defaults", async () => {
     const onSubmit = vi.fn();
@@ -113,7 +127,7 @@ describe("ClaudeDesktopProviderForm", () => {
     );
     expect(submitted.meta).toMatchObject({
       providerType: "nexus",
-      managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     });
     const routes = Object.values(submitted.meta.claudeDesktopModelRoutes) as {
@@ -128,7 +142,7 @@ describe("ClaudeDesktopProviderForm", () => {
     ).toBe(true);
   });
 
-  it("detaches a newly selected Nexus preset when its endpoint is customized", async () => {
+  it("preserves Nexus protocol capabilities when a new preset uses a custom endpoint", async () => {
     const onSubmit = vi.fn();
     renderForm(undefined, onSubmit);
 
@@ -138,7 +152,7 @@ describe("ClaudeDesktopProviderForm", () => {
       }),
     );
     fireEvent.change(screen.getByLabelText("providerForm.apiEndpoint"), {
-      target: { value: "https://custom.example.com/v1" },
+      target: { value: "http://127.0.0.1:30001/v1" },
     });
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "test-key" },
@@ -146,7 +160,11 @@ describe("ClaudeDesktopProviderForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    expectManagedNexusDetached(onSubmit.mock.calls[0][0]);
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(JSON.parse(submitted.settingsConfig).env.ANTHROPIC_BASE_URL).toBe(
+      "http://127.0.0.1:30001/v1",
+    );
+    expectManagedNexusEndpointDetached(submitted);
   });
 
   it("preserves managed Nexus ownership for name and API-key edits", async () => {
@@ -169,12 +187,12 @@ describe("ClaudeDesktopProviderForm", () => {
     });
     expect(submitted.meta).toMatchObject({
       providerType: "nexus",
-      managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     });
   });
 
-  it("detaches managed Nexus ownership when the endpoint changes", async () => {
+  it("preserves Nexus protocol capabilities when an existing endpoint changes", async () => {
     const { onSubmit } = renderForm(managedNexusProvider());
 
     fireEvent.change(screen.getByLabelText("providerForm.apiEndpoint"), {
@@ -183,7 +201,11 @@ describe("ClaudeDesktopProviderForm", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
-    expectManagedNexusDetached(onSubmit.mock.calls[0][0]);
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(JSON.parse(submitted.settingsConfig).env.ANTHROPIC_BASE_URL).toBe(
+      "https://custom.example.com/v1",
+    );
+    expectManagedNexusEndpointDetached(submitted);
   });
 
   it("detaches managed Nexus ownership when the routing mode changes", async () => {

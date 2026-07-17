@@ -2971,9 +2971,6 @@ mod tests {
         crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some(&provider.id))
             .expect("select local Desktop provider");
 
-        assert!(db
-            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some(&provider.id))
-            .expect("migrate managed Desktop provider"));
         crate::services::provider::ProviderService::sync_current_provider_for_app(
             &state,
             AppType::ClaudeDesktop,
@@ -3086,30 +3083,47 @@ mod tests {
         crate::settings::reload_settings().expect("reload settings");
 
         let captured_upstream = Arc::new(Mutex::new(None::<Value>));
-        let upstream_app = axum::Router::new().route(
-            "/v1/chat/completions",
-            axum::routing::post({
-                let captured_upstream = captured_upstream.clone();
-                move |axum::Json(body): axum::Json<Value>| {
+        let captured_tokenize = Arc::new(Mutex::new(None::<Value>));
+        let upstream_app = axum::Router::new()
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post({
                     let captured_upstream = captured_upstream.clone();
-                    async move {
-                        *captured_upstream.lock().expect("capture upstream request") = Some(body);
-                        (
-                            [(
-                                axum::http::header::CONTENT_TYPE,
-                                "text/event-stream",
-                            )],
-                            concat!(
-                                "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Inspect safely.\"}}]}\n\n",
-                                "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Hanoi\\\"}\"}}]}}]}\n\n",
-                                "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}\n\n",
-                                "data: [DONE]\n\n"
-                            ),
-                        )
+                    move |axum::Json(body): axum::Json<Value>| {
+                        let captured_upstream = captured_upstream.clone();
+                        async move {
+                            *captured_upstream.lock().expect("capture upstream request") =
+                                Some(body);
+                            (
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "text/event-stream",
+                                )],
+                                concat!(
+                                    "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Inspect safely.\"}}]}\n\n",
+                                    "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Hanoi\\\"}\"}}]}}]}\n\n",
+                                    "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}\n\n",
+                                    "data: [DONE]\n\n"
+                                ),
+                            )
+                        }
                     }
-                }
-            }),
-        );
+                }),
+            )
+            .route(
+                "/v1/tokenize",
+                axum::routing::post({
+                    let captured_tokenize = captured_tokenize.clone();
+                    move |axum::Json(body): axum::Json<Value>| {
+                        let captured_tokenize = captured_tokenize.clone();
+                        async move {
+                            *captured_tokenize.lock().expect("capture tokenize request") =
+                                Some(body);
+                            axum::Json(json!({"tokens": [1, 2, 3], "count": 17}))
+                        }
+                    }
+                }),
+            );
         let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock upstream");
@@ -3164,7 +3178,7 @@ mod tests {
                 })),
                 ..Default::default()
             }),
-            managed_nexus_preset_version: Some(8),
+            managed_nexus_preset_version: Some(7),
             provider_type: Some("nexus".to_string()),
             ..Default::default()
         });
@@ -3178,15 +3192,103 @@ mod tests {
         let proxy = state.proxy_service.start().await.expect("start proxy");
         let gateway_token = crate::claude_desktop_config::get_or_create_gateway_token(db.as_ref())
             .expect("create gateway token");
-        let response = reqwest::Client::builder()
+        let client = reqwest::Client::builder()
             .no_proxy()
             .build()
-            .expect("build test client")
+            .expect("build test client");
+        let count_response = client
+            .post(format!(
+                "http://127.0.0.1:{}/claude-desktop/v1/messages/count_tokens",
+                proxy.port
+            ))
+            .bearer_auth(&gateway_token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "claude-sonnet-5",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "prior proof checkpoint",
+                                "signature": "sig"
+                            },
+                            {"type": "text", "text": "Checkpoint saved."}
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Continue from the image."},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "COUNT_IMAGE_MUST_NOT_REACH_UPSTREAM"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .expect("send Desktop count request");
+        assert_eq!(count_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            count_response
+                .json::<Value>()
+                .await
+                .expect("read Desktop count response"),
+            json!({"input_tokens": 17})
+        );
+        let count_upstream = captured_tokenize
+            .lock()
+            .expect("read captured tokenize request")
+            .clone()
+            .expect("mock upstream should receive one tokenize request");
+        assert_eq!(count_upstream["model"], "GLM-5.2-FP8");
+        let count_messages = count_upstream["messages"]
+            .as_array()
+            .expect("OpenAI count messages");
+        let count_assistant = count_messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("count request assistant history");
+        assert_eq!(
+            count_assistant["reasoning_content"],
+            "prior proof checkpoint"
+        );
+        assert_eq!(
+            count_upstream["chat_template_kwargs"],
+            json!({"enable_thinking": true, "clear_thinking": false})
+        );
+        let serialized_count =
+            serde_json::to_string(&count_upstream).expect("serialize count request");
+        assert!(serialized_count.contains(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER));
+        assert!(!serialized_count.contains("COUNT_IMAGE_MUST_NOT_REACH_UPSTREAM"));
+        assert!(count_upstream.get("max_tokens").is_none());
+        assert!(count_upstream.get("stream").is_none());
+        assert_eq!(
+            db.conn
+                .lock()
+                .expect("lock test database")
+                .query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count Usage rows"),
+            0,
+            "count_tokens must not create a Usage row"
+        );
+
+        let response = client
             .post(format!(
                 "http://127.0.0.1:{}/claude-desktop/v1/messages",
                 proxy.port
             ))
-            .bearer_auth(gateway_token)
+            .bearer_auth(&gateway_token)
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": "claude-sonnet-5",

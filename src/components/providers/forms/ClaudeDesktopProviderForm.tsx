@@ -251,15 +251,13 @@ function defaultRouteRows(
   );
 }
 
-function matchesManagedNexusContract(
-  baseUrl: string,
+function matchesNexusProtocolContract(
   mode: "direct" | "proxy",
   apiFormat: ClaudeApiFormat,
   routes: Record<string, ClaudeDesktopModelRoute>,
 ) {
   const expectedRoutes = Object.values(CLAUDE_DESKTOP_ROLE_ROUTE_IDS);
   return (
-    normalizeEndpoint(baseUrl) === normalizeEndpoint(NEXUS_ENDPOINT) &&
     mode === "proxy" &&
     apiFormat === "openai_chat" &&
     Object.keys(routes).length === expectedRoutes.length &&
@@ -689,9 +687,12 @@ export function ClaudeDesktopProviderForm({
     const managedNexusSelected =
       activePreset?.providerType === "nexus" ||
       (!activePreset && initialData?.meta?.providerType === "nexus");
-    const managedNexusChanged =
+    const managedNexusProtocolChanged =
       managedNexusSelected &&
-      !matchesManagedNexusContract(baseUrl, mode, apiFormat, routeMap);
+      !matchesNexusProtocolContract(mode, apiFormat, routeMap);
+    const managedNexusEndpointChanged =
+      managedNexusSelected &&
+      normalizeEndpoint(baseUrl) !== normalizeEndpoint(NEXUS_ENDPOINT);
 
     const meta: ProviderMeta = {
       ...(initialData?.meta ?? {}),
@@ -705,11 +706,13 @@ export function ClaudeDesktopProviderForm({
       meta.localProxyRequestOverrides = activePreset.localProxyRequestOverrides;
       meta.managedNexusPresetVersion = activePreset.managedNexusPresetVersion;
     }
-    if (managedNexusChanged) {
+    if (managedNexusProtocolChanged) {
       delete settingsConfig.modelCatalog;
       delete meta.providerType;
       delete meta.managedNexusPresetVersion;
       delete meta.localProxyRequestOverrides;
+    } else if (managedNexusEndpointChanged) {
+      delete meta.managedNexusPresetVersion;
     }
     meta.authBinding =
       activeProviderType === "github_copilot"
