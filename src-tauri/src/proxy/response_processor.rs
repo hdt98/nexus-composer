@@ -336,7 +336,103 @@ pub async fn process_response(
 // SSE 使用量收集器
 // ============================================================================
 
-type UsageCallbackWithTiming = Arc<dyn Fn(Vec<Value>, Option<u64>) + Send + Sync + 'static>;
+type UsageCallbackWithTiming =
+    Arc<dyn Fn(Vec<Value>, Option<u64>, StreamOutcome) + Send + Sync + 'static>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StreamOutcome {
+    pub status_code: u16,
+    pub error_message: Option<String>,
+}
+
+impl StreamOutcome {
+    fn complete(status_code: u16) -> Self {
+        Self {
+            status_code,
+            error_message: None,
+        }
+    }
+
+    fn incomplete(status_code: u16, reason: &'static str) -> Self {
+        Self {
+            status_code,
+            error_message: Some(format!("upstream_response_incomplete:{reason}")),
+        }
+    }
+
+    fn failed(status_code: u16, category: &'static str) -> Self {
+        Self {
+            status_code,
+            error_message: Some(category.to_string()),
+        }
+    }
+
+    fn client_cancelled() -> Self {
+        Self::failed(499, "client_stream_cancelled")
+    }
+}
+
+fn is_http_success(status_code: u16) -> bool {
+    (200..300).contains(&status_code)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutcomeKind {
+    Complete,
+    Incomplete(&'static str),
+    Failed,
+}
+
+impl OutcomeKind {
+    fn merge(self, other: Self) -> Self {
+        if other.priority() > self.priority() {
+            other
+        } else {
+            self
+        }
+    }
+
+    fn priority(self) -> u8 {
+        match self {
+            Self::Complete => 0,
+            Self::Incomplete(_) => 1,
+            Self::Failed => 2,
+        }
+    }
+
+    fn into_outcome(self, status_code: u16) -> StreamOutcome {
+        if !is_http_success(status_code) {
+            return StreamOutcome::failed(status_code, "upstream_response_failed");
+        }
+        match self {
+            Self::Complete => StreamOutcome::complete(status_code),
+            Self::Incomplete(reason) => StreamOutcome::incomplete(status_code, reason),
+            Self::Failed => StreamOutcome::failed(502, "upstream_response_failed"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SseSignal {
+    outcome: OutcomeKind,
+    terminal: bool,
+}
+
+impl SseSignal {
+    fn pending(outcome: OutcomeKind) -> Self {
+        Self {
+            outcome,
+            terminal: false,
+        }
+    }
+
+    fn terminal(outcome: OutcomeKind) -> Self {
+        Self {
+            outcome,
+            terminal: true,
+        }
+    }
+}
 
 /// SSE 使用量收集器
 #[derive(Clone)]
@@ -349,6 +445,7 @@ struct SseUsageCollectorInner {
     first_event_time: Mutex<Option<std::time::Instant>>,
     first_event_set: AtomicBool,
     start_time: std::time::Instant,
+    status_code: u16,
     on_complete: UsageCallbackWithTiming,
     should_collect: Option<StreamUsageEventFilter>,
     finished: AtomicBool,
@@ -359,7 +456,8 @@ impl SseUsageCollector {
     pub fn new(
         start_time: std::time::Instant,
         should_collect: Option<StreamUsageEventFilter>,
-        callback: impl Fn(Vec<Value>, Option<u64>) + Send + Sync + 'static,
+        status_code: u16,
+        callback: impl Fn(Vec<Value>, Option<u64>, StreamOutcome) + Send + Sync + 'static,
     ) -> Self {
         let on_complete: UsageCallbackWithTiming = Arc::new(callback);
         Self {
@@ -368,6 +466,7 @@ impl SseUsageCollector {
                 first_event_time: Mutex::new(None),
                 first_event_set: AtomicBool::new(false),
                 start_time,
+                status_code,
                 on_complete,
                 should_collect,
                 finished: AtomicBool::new(false),
@@ -402,7 +501,7 @@ impl SseUsageCollector {
     }
 
     /// 完成收集并触发回调
-    pub async fn finish(&self) {
+    pub async fn finish(&self, outcome: StreamOutcome) {
         if self.inner.finished.swap(true, Ordering::SeqCst) {
             return;
         }
@@ -417,7 +516,16 @@ impl SseUsageCollector {
             first_time.map(|t| (t - self.inner.start_time).as_millis() as u64)
         };
 
-        (self.inner.on_complete)(events, first_token_ms);
+        (self.inner.on_complete)(events, first_token_ms, outcome);
+    }
+
+    async fn finish_on_drop(&self) {
+        let outcome = if is_http_success(self.inner.status_code) {
+            StreamOutcome::client_cancelled()
+        } else {
+            StreamOutcome::failed(self.inner.status_code, "upstream_response_failed")
+        };
+        self.finish(outcome).await;
     }
 }
 
@@ -442,12 +550,48 @@ impl Drop for SseUsageFinishGuard {
         if let Some(collector) = self.collector.take() {
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
-                    collector.finish().await;
+                    collector.finish_on_drop().await;
                 });
             } else {
                 log::warn!("SSE 用量收尾保护触发时 Tokio runtime 不可用，跳过异步 finish");
             }
         }
+    }
+}
+
+async fn finish_stream_accounting(
+    collector: &mut Option<SseUsageCollector>,
+    finish_guard: &mut Option<SseUsageFinishGuard>,
+    outcome: StreamOutcome,
+) {
+    if let Some(collector) = collector.take() {
+        collector.finish(outcome).await;
+    }
+    if let Some(guard) = finish_guard {
+        guard.disarm();
+    }
+}
+
+async fn account_sse_signal(
+    signal: Option<SseSignal>,
+    pending: &mut Option<OutcomeKind>,
+    collector: &mut Option<SseUsageCollector>,
+    finish_guard: &mut Option<SseUsageFinishGuard>,
+) {
+    let Some(signal) = signal else {
+        return;
+    };
+    let merged = pending.map_or(signal.outcome, |current| current.merge(signal.outcome));
+    if signal.terminal {
+        let Some(status_code) = collector
+            .as_ref()
+            .map(|collector| collector.inner.status_code)
+        else {
+            return;
+        };
+        finish_stream_accounting(collector, finish_guard, merged.into_outcome(status_code)).await;
+    } else {
+        *pending = Some(merged);
     }
 }
 
@@ -494,66 +638,41 @@ fn create_usage_collector(
     Some(SseUsageCollector::new(
         start_time,
         parser_config.stream_event_filter,
-        move |events, first_token_ms| {
-            if let Some(usage) = stream_parser(&events) {
-                let model = model_extractor(&events, &fallback_model);
-                let latency_ms = start_time.elapsed().as_millis() as u64;
+        status_code,
+        move |events, first_token_ms, outcome| {
+            let usage = stream_parser(&events).unwrap_or_else(|| {
+                log::debug!("[{tag}] 流式响应缺少 usage 统计，记录空 usage");
+                TokenUsage::default()
+            });
+            let model = model_extractor(&events, &fallback_model);
+            let latency_ms = start_time.elapsed().as_millis() as u64;
 
-                let state = state.clone();
-                let provider_id = provider_id.clone();
-                let session_id = session_id.clone();
-                let request_model = request_model.clone();
-                let outbound_model = fallback_model.clone();
-                let correlation_id = correlation_id.clone();
+            let state = state.clone();
+            let provider_id = provider_id.clone();
+            let session_id = session_id.clone();
+            let request_model = request_model.clone();
+            let outbound_model = fallback_model.clone();
+            let correlation_id = correlation_id.clone();
 
-                tokio::spawn(async move {
-                    log_usage_internal(
-                        &state,
-                        correlation_id,
-                        &provider_id,
-                        app_type_str,
-                        &model,
-                        &request_model,
-                        &outbound_model,
-                        usage,
-                        latency_ms,
-                        first_token_ms,
-                        true, // is_streaming
-                        status_code,
-                        Some(session_id),
-                    )
-                    .await;
-                });
-            } else {
-                let model = model_extractor(&events, &fallback_model);
-                let latency_ms = start_time.elapsed().as_millis() as u64;
-                let state = state.clone();
-                let provider_id = provider_id.clone();
-                let session_id = session_id.clone();
-                let request_model = request_model.clone();
-                let outbound_model = fallback_model.clone();
-                let correlation_id = correlation_id.clone();
-
-                tokio::spawn(async move {
-                    log_usage_internal(
-                        &state,
-                        correlation_id,
-                        &provider_id,
-                        app_type_str,
-                        &model,
-                        &request_model,
-                        &outbound_model,
-                        TokenUsage::default(),
-                        latency_ms,
-                        first_token_ms,
-                        true, // is_streaming
-                        status_code,
-                        Some(session_id),
-                    )
-                    .await;
-                });
-                log::debug!("[{tag}] 流式响应缺少 usage 统计，跳过消费记录");
-            }
+            tokio::spawn(async move {
+                log_usage_internal(
+                    &state,
+                    correlation_id,
+                    &provider_id,
+                    app_type_str,
+                    &model,
+                    &request_model,
+                    &outbound_model,
+                    usage,
+                    latency_ms,
+                    first_token_ms,
+                    true, // is_streaming
+                    outcome.status_code,
+                    Some(session_id),
+                    outcome.error_message,
+                )
+                .await;
+            });
         },
     ))
 }
@@ -604,6 +723,7 @@ fn spawn_log_usage(
             is_streaming,
             status_code,
             Some(session_id),
+            None,
         )
         .await;
     });
@@ -638,6 +758,7 @@ async fn log_usage_internal(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    error_message: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -674,6 +795,7 @@ async fn log_usage_internal(
         latency_ms,
         first_token_ms,
         status_code,
+        error_message,
         session_id,
         None, // provider_type
         is_streaming,
@@ -690,12 +812,14 @@ pub fn create_logged_passthrough_stream(
     timeout_config: StreamingTimeoutConfig,
     connection_guard: Option<ActiveConnectionGuard>,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    let finish_guard = usage_collector.clone().map(SseUsageFinishGuard::new);
     async_stream::stream! {
         let _conn_guard = connection_guard;
         let mut buffer = String::new();
         let mut utf8_remainder: Vec<u8> = Vec::new();
         let mut collector = usage_collector;
-        let mut finish_guard = collector.clone().map(SseUsageFinishGuard::new);
+        let mut finish_guard = finish_guard;
+        let mut pending_outcome = None;
         let inspect_sse_events =
             collector.is_some() || log::log_enabled!(log::Level::Debug);
         let mut is_first_chunk = true;
@@ -731,6 +855,17 @@ pub fn create_logged_passthrough_stream(
                             // 超时
                             let timeout_type = if is_first_chunk { "首字节" } else { "静默期" };
                             log::error!("[{tag}] 流式响应{}超时 ({}秒)", timeout_type, duration.as_secs());
+                            let category = if is_first_chunk {
+                                "upstream_stream_first_byte_timeout"
+                            } else {
+                                "upstream_stream_idle_timeout"
+                            };
+                            finish_stream_accounting(
+                                &mut collector,
+                                &mut finish_guard,
+                                StreamOutcome::failed(504, category),
+                            )
+                            .await;
                             yield Err(std::io::Error::other(format!("流式响应{timeout_type}超时")));
                             break;
                         }
@@ -753,34 +888,14 @@ pub fn create_logged_passthrough_stream(
 
                         // 尝试解析并记录完整的 SSE 事件
                         while let Some(event_text) = take_sse_block(&mut buffer) {
-                            if !event_text.trim().is_empty() {
-                                // 提取 data 部分；只有 usage collector 存在时才解析 JSON。
-                                for line in event_text.lines() {
-                                    if let Some(data) = strip_sse_field(line, "data") {
-                                        if data.trim() != "[DONE]" {
-                                            let collected = match &collector {
-                                                Some(c) if c.should_collect(data) => {
-                                                    match serde_json::from_str::<Value>(data) {
-                                                        Ok(json_value) => {
-                                                            c.push(json_value).await;
-                                                            true
-                                                        }
-                                                        Err(_) => false,
-                                                    }
-                                                }
-                                                _ => false,
-                                            };
-                                            if collected {
-                                                log::debug!("[{tag}] <<< SSE 事件: {data}");
-                                            } else {
-                                                log::debug!("[{tag}] <<< SSE 数据: {data}");
-                                            }
-                                        } else {
-                                            log::debug!("[{tag}] <<< SSE: [DONE]");
-                                        }
-                                    }
-                                }
-                            }
+                            let signal = inspect_sse_block(&event_text, collector.as_ref(), tag).await;
+                            account_sse_signal(
+                                signal,
+                                &mut pending_outcome,
+                                &mut collector,
+                                &mut finish_guard,
+                            )
+                            .await;
                         }
                     }
 
@@ -788,22 +903,215 @@ pub fn create_logged_passthrough_stream(
                 }
                 Some(Err(e)) => {
                     log::error!("[{tag}] 流错误: {e}");
+                    finish_stream_accounting(
+                        &mut collector,
+                        &mut finish_guard,
+                        StreamOutcome::failed(502, "upstream_stream_io_error"),
+                    )
+                    .await;
                     yield Err(std::io::Error::other(e.to_string()));
                     break;
                 }
                 None => {
                     // 流正常结束
+                    if inspect_sse_events && !buffer.trim().is_empty() {
+                        let signal = inspect_sse_block(&buffer, collector.as_ref(), tag).await;
+                        account_sse_signal(
+                            signal,
+                            &mut pending_outcome,
+                            &mut collector,
+                            &mut finish_guard,
+                        )
+                        .await;
+                    }
                     break;
                 }
             }
         }
 
-        if let Some(c) = collector.take() {
-            c.finish().await;
+        if let Some(status_code) = collector
+            .as_ref()
+            .map(|collector| collector.inner.status_code)
+        {
+            let outcome = if let Some(kind) = pending_outcome {
+                kind.into_outcome(status_code)
+            } else if is_http_success(status_code) {
+                StreamOutcome::failed(502, "upstream_stream_truncated")
+            } else {
+                StreamOutcome::failed(status_code, "upstream_response_failed")
+            };
+            finish_stream_accounting(&mut collector, &mut finish_guard, outcome).await;
         }
-        if let Some(guard) = &mut finish_guard {
-            guard.disarm();
+    }
+}
+
+async fn inspect_sse_block(
+    block: &str,
+    collector: Option<&SseUsageCollector>,
+    tag: &'static str,
+) -> Option<SseSignal> {
+    if block.trim().is_empty() {
+        return None;
+    }
+    let event_is_error = block.lines().any(|line| {
+        strip_sse_field(line.trim_start(), "event").is_some_and(|event| event.trim() == "error")
+    });
+
+    let data = block
+        .lines()
+        .filter_map(|line| strip_sse_field(line.trim_start(), "data"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if data.trim().is_empty() {
+        return if event_is_error {
+            Some(SseSignal::terminal(OutcomeKind::Failed))
+        } else {
+            None
+        };
+    }
+    let signal = if event_is_error {
+        Some(SseSignal::terminal(OutcomeKind::Failed))
+    } else {
+        sse_signal(&data)
+    };
+    if data.trim() == "[DONE]" {
+        log::debug!("[{tag}] <<< SSE: [DONE]");
+        return signal;
+    }
+
+    let collected = match collector {
+        Some(collector) if collector.should_collect(&data) => {
+            match serde_json::from_str::<Value>(&data) {
+                Ok(event) => {
+                    collector.push(event).await;
+                    true
+                }
+                Err(_) => false,
+            }
         }
+        _ => false,
+    };
+    if collected {
+        log::debug!("[{tag}] <<< SSE 事件: {data}");
+    } else {
+        log::debug!("[{tag}] <<< SSE 数据: {data}");
+    }
+    signal
+}
+
+fn sse_signal(data: &str) -> Option<SseSignal> {
+    let data = data.trim();
+    if data == "[DONE]" {
+        return Some(SseSignal::terminal(OutcomeKind::Complete));
+    }
+
+    if !data.contains("finish_reason")
+        && !data.contains("finishReason")
+        && !data.contains("stop_reason")
+        && !data.contains("response.completed")
+        && !data.contains("response.incomplete")
+        && !data.contains("response.failed")
+        && !data.contains("message_stop")
+        && !data.contains("\"error\"")
+    {
+        return None;
+    }
+
+    let Ok(event) = serde_json::from_str::<Value>(data) else {
+        return None;
+    };
+    if event.get("error").is_some_and(|error| !error.is_null()) {
+        return Some(SseSignal::terminal(OutcomeKind::Failed));
+    }
+    let event_type = event.get("type").and_then(Value::as_str);
+    match event_type {
+        Some("response.failed" | "error") => {
+            return Some(SseSignal::terminal(OutcomeKind::Failed));
+        }
+        Some("response.incomplete") => {
+            return Some(SseSignal::terminal(OutcomeKind::Incomplete(
+                incomplete_reason(&event),
+            )));
+        }
+        Some("response.completed") => {
+            let response = event.get("response").unwrap_or(&event);
+            return Some(match response.get("status").and_then(Value::as_str) {
+                Some("failed") => SseSignal::terminal(OutcomeKind::Failed),
+                Some("incomplete") => {
+                    SseSignal::terminal(OutcomeKind::Incomplete(incomplete_reason(response)))
+                }
+                _ => SseSignal::terminal(OutcomeKind::Complete),
+            });
+        }
+        Some("message_stop") => return Some(SseSignal::terminal(OutcomeKind::Complete)),
+        Some("message_delta") => {
+            if let Some(reason) = event
+                .pointer("/delta/stop_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.trim().is_empty())
+            {
+                return if reason == "max_tokens" {
+                    Some(SseSignal::pending(OutcomeKind::Incomplete(
+                        "max_output_tokens",
+                    )))
+                } else {
+                    Some(SseSignal::pending(OutcomeKind::Complete))
+                };
+            }
+        }
+        _ => {}
+    }
+
+    if let Some(signal) = event
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| {
+            choices.iter().find_map(|choice| {
+                choice
+                    .get("finish_reason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.trim().is_empty())
+                    .map(|reason| {
+                        if reason == "length" {
+                            SseSignal::pending(OutcomeKind::Incomplete("max_output_tokens"))
+                        } else {
+                            SseSignal::pending(OutcomeKind::Complete)
+                        }
+                    })
+            })
+        })
+    {
+        return Some(signal);
+    }
+
+    event
+        .get("candidates")
+        .and_then(Value::as_array)
+        .and_then(|candidates| {
+            candidates.iter().find_map(|candidate| {
+                candidate
+                    .get("finishReason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.trim().is_empty())
+                    .map(|reason| {
+                        if reason == "MAX_TOKENS" {
+                            SseSignal::terminal(OutcomeKind::Incomplete("max_output_tokens"))
+                        } else {
+                            SseSignal::terminal(OutcomeKind::Complete)
+                        }
+                    })
+            })
+        })
+}
+
+fn incomplete_reason(value: &Value) -> &'static str {
+    let reason = value
+        .pointer("/incomplete_details/reason")
+        .or_else(|| value.pointer("/response/incomplete_details/reason"))
+        .and_then(Value::as_str);
+    match reason {
+        Some("max_output_tokens" | "max_tokens") => "max_output_tokens",
+        _ => "unknown",
     }
 }
 
@@ -833,8 +1141,300 @@ mod tests {
     use rust_decimal::Decimal;
     use std::collections::HashMap;
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex as StdMutex};
     use tokio::sync::RwLock;
+
+    type RecordedCompletion = (Vec<Value>, Option<u64>, StreamOutcome);
+    type CompletionLog = Arc<StdMutex<Vec<RecordedCompletion>>>;
+    const NO_TIMEOUTS: StreamingTimeoutConfig = StreamingTimeoutConfig {
+        first_byte_timeout: 0,
+        idle_timeout: 0,
+    };
+
+    fn outcome_collector(status_code: u16) -> (SseUsageCollector, CompletionLog) {
+        let completions = Arc::new(StdMutex::new(Vec::new()));
+        let callback_completions = completions.clone();
+        let collector = SseUsageCollector::new(
+            std::time::Instant::now(),
+            None,
+            status_code,
+            move |events, first_token_ms, outcome| {
+                callback_completions
+                    .lock()
+                    .unwrap()
+                    .push((events, first_token_ms, outcome));
+            },
+        );
+        (collector, completions)
+    }
+
+    async fn wait_for_completion(completions: &CompletionLog) {
+        for _ in 0..20 {
+            if !completions.lock().unwrap().is_empty() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("stream accounting callback did not run");
+    }
+
+    async fn collect_stream<S>(
+        source: S,
+        timeout_config: StreamingTimeoutConfig,
+    ) -> (Vec<Result<Bytes, std::io::Error>>, Vec<RecordedCompletion>)
+    where
+        S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    {
+        collect_stream_with_status(source, timeout_config, 200).await
+    }
+
+    async fn collect_stream_with_status<S>(
+        source: S,
+        timeout_config: StreamingTimeoutConfig,
+        status_code: u16,
+    ) -> (Vec<Result<Bytes, std::io::Error>>, Vec<RecordedCompletion>)
+    where
+        S: Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+    {
+        let (collector, completions) = outcome_collector(status_code);
+        let output =
+            create_logged_passthrough_stream(source, "test", Some(collector), timeout_config, None)
+                .collect()
+                .await;
+        let completions = completions.lock().unwrap().clone();
+        (output, completions)
+    }
+
+    async fn collect_body(body: &str) -> RecordedCompletion {
+        let source = futures::stream::iter([Ok(Bytes::from(body.to_string()))]);
+        let (_, completions) = collect_stream(source, NO_TIMEOUTS).await;
+        assert_eq!(completions.len(), 1, "{body}");
+        completions.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn classifies_supported_protocol_terminal_events() {
+        for (data, expected) in [
+            ("[DONE]", Some(SseSignal::terminal(OutcomeKind::Complete))),
+            (
+                r#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#,
+                Some(SseSignal::terminal(OutcomeKind::Incomplete(
+                    "max_output_tokens",
+                ))),
+            ),
+            (
+                r#"{"type":"response.failed"}"#,
+                Some(SseSignal::terminal(OutcomeKind::Failed)),
+            ),
+            (
+                r#"{"choices":[{"finish_reason":"length"}]}"#,
+                Some(SseSignal::pending(OutcomeKind::Incomplete(
+                    "max_output_tokens",
+                ))),
+            ),
+            (
+                r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+                Some(SseSignal::pending(OutcomeKind::Incomplete(
+                    "max_output_tokens",
+                ))),
+            ),
+            (
+                r#"{"candidates":[{"finishReason":"STOP"}]}"#,
+                Some(SseSignal::terminal(OutcomeKind::Complete)),
+            ),
+            (
+                r#"{"candidates":[{"finishReason":"MAX_TOKENS"}]}"#,
+                Some(SseSignal::terminal(OutcomeKind::Incomplete(
+                    "max_output_tokens",
+                ))),
+            ),
+            (
+                r#"{"error":{}}"#,
+                Some(SseSignal::terminal(OutcomeKind::Failed)),
+            ),
+        ] {
+            assert_eq!(sse_signal(data), expected, "{data}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_terminal_matrix_records_one_sanitized_outcome() {
+        let complete = StreamOutcome::complete(200);
+        let incomplete = StreamOutcome::incomplete(200, "max_output_tokens");
+        let failed = StreamOutcome::failed(502, "upstream_response_failed");
+        let truncated = StreamOutcome::failed(502, "upstream_stream_truncated");
+        for (body, expected) in [
+            ("data: [DONE]\n", complete.clone()),
+            (
+                "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\"}}\n",
+                complete.clone(),
+            ),
+            (
+                "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+                incomplete,
+            ),
+            ("data: {\"type\":\"response.failed\"}\n\n", failed.clone()),
+            (
+                "data: {\"type\":\"response.completed\"}\n\ndata: {\"type\":\"response.failed\"}\n\n",
+                complete,
+            ),
+            (
+                "data: {\"type\":\"response.failed\"}\n\ndata: {\"type\":\"response.completed\"}\n\n",
+                failed.clone(),
+            ),
+            (
+                "event: error\ndata: {\"message\":\"private\"}\n\ndata: [DONE]\n\n",
+                failed,
+            ),
+            (
+                "data: {\"choices\":[{\"finish_reason\":\"  \"}]}\n\n",
+                truncated.clone(),
+            ),
+            ("data: {\"type\":\"response.completed\"", truncated),
+        ] {
+            assert_eq!(collect_body(body).await.2, expected, "{body}");
+        }
+    }
+
+    #[tokio::test]
+    async fn clean_finish_collects_usage_before_done() {
+        let body = concat!(
+            "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7}}\n\n",
+            "data: [DONE]\n\n"
+        );
+        let completion = collect_body(body).await;
+        assert_eq!(completion.0.len(), 2);
+        assert_eq!(completion.2, StreamOutcome::complete(200));
+    }
+
+    #[tokio::test]
+    async fn non_success_stream_status_is_preserved_after_terminal_event() {
+        for status_code in [302, 503] {
+            let source = futures::stream::iter([Ok(Bytes::from_static(b"data: [DONE]\n\n"))]);
+            let (_, completions) =
+                collect_stream_with_status(source, NO_TIMEOUTS, status_code).await;
+            assert_eq!(
+                completions[0].2,
+                StreamOutcome::failed(status_code, "upstream_response_failed")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn multiline_sse_data_is_joined_before_parsing() {
+        let completion = collect_body(
+            "data: {\"type\":\"response.completed\",\ndata: \"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7}}}\n\n",
+        )
+        .await;
+        assert_eq!(
+            completion.0[0].pointer("/response/usage/input_tokens"),
+            Some(&Value::from(7))
+        );
+        assert_eq!(completion.2, StreamOutcome::complete(200));
+    }
+
+    #[tokio::test]
+    async fn terminal_outcome_survives_late_transport_error() {
+        let source = futures::stream::iter([
+            Ok(Bytes::from_static(b"data: [DONE]\n\n")),
+            Err(std::io::Error::other("private socket detail")),
+        ]);
+        let (output, completions) = collect_stream(source, NO_TIMEOUTS).await;
+        assert!(output[1].is_err());
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].2, StreamOutcome::complete(200));
+    }
+
+    #[tokio::test]
+    async fn dropping_partial_or_semantically_finished_stream_is_cancelled() {
+        for body in [
+            b"data: {\"delta\":\"partial\"}\n\n".as_slice(),
+            b"data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n\n".as_slice(),
+        ] {
+            let (collector, completions) = outcome_collector(200);
+            let source =
+                futures::stream::iter([Ok::<_, std::io::Error>(Bytes::copy_from_slice(body))]);
+            let mut stream = Box::pin(create_logged_passthrough_stream(
+                source,
+                "test",
+                Some(collector),
+                NO_TIMEOUTS,
+                None,
+            ));
+            assert!(stream.as_mut().next().await.unwrap().is_ok());
+            drop(stream);
+            wait_for_completion(&completions).await;
+            assert_eq!(
+                completions.lock().unwrap()[0].2,
+                StreamOutcome::client_cancelled()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dropping_unread_stream_is_cancelled() {
+        let (collector, completions) = outcome_collector(200);
+        let stream = create_logged_passthrough_stream(
+            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+            "test",
+            Some(collector),
+            NO_TIMEOUTS,
+            None,
+        );
+        drop(stream);
+        wait_for_completion(&completions).await;
+        assert_eq!(
+            completions.lock().unwrap()[0].2,
+            StreamOutcome::client_cancelled()
+        );
+    }
+
+    #[tokio::test]
+    async fn io_and_timeout_failures_are_distinct_and_sanitized() {
+        let (output, completions) = collect_stream(
+            futures::stream::iter([Err::<Bytes, _>(std::io::Error::other("private"))]),
+            NO_TIMEOUTS,
+        )
+        .await;
+        assert!(output[0].is_err());
+        assert_eq!(
+            completions[0].2,
+            StreamOutcome::failed(502, "upstream_stream_io_error")
+        );
+
+        for (source, timeouts, expected) in [
+            (
+                futures::stream::pending::<Result<Bytes, std::io::Error>>().boxed(),
+                StreamingTimeoutConfig {
+                    first_byte_timeout: 1,
+                    idle_timeout: 0,
+                },
+                "upstream_stream_first_byte_timeout",
+            ),
+            (
+                futures::stream::once(async {
+                    Ok(Bytes::from_static(
+                        b"data: {\"usage\":{\"prompt_tokens\":7}}\n\n",
+                    ))
+                })
+                .chain(futures::stream::pending())
+                .boxed(),
+                StreamingTimeoutConfig {
+                    first_byte_timeout: 0,
+                    idle_timeout: 1,
+                },
+                "upstream_stream_idle_timeout",
+            ),
+        ] {
+            let (_, completions) = collect_stream(source, timeouts).await;
+            assert_eq!(completions.len(), 1);
+            assert_eq!(completions[0].2, StreamOutcome::failed(504, expected));
+            if expected == "upstream_stream_idle_timeout" {
+                assert_eq!(completions[0].0.len(), 1);
+            }
+        }
+    }
 
     #[test]
     fn test_strip_sse_field_accepts_optional_space() {
@@ -1031,6 +1631,7 @@ mod tests {
             false,
             200,
             None,
+            None,
         )
         .await;
 
@@ -1101,6 +1702,7 @@ mod tests {
             None,
             false,
             200,
+            None,
             None,
         )
         .await;
@@ -1182,6 +1784,7 @@ mod tests {
             None,
             false,
             200,
+            None,
             None,
         )
         .await;

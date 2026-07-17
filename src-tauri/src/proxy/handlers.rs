@@ -388,42 +388,41 @@ async fn handle_claude_transform(
             Some(SseUsageCollector::new(
                 start_time,
                 Some(claude_stream_usage_event_filter),
-                move |events, first_token_ms| {
-                    if let Some(usage) = TokenUsage::from_claude_stream_events(&events) {
-                        let model = usage
-                            .model
-                            .clone()
-                            .filter(|m| !m.is_empty())
-                            .unwrap_or_else(|| fallback_model.clone());
-                        let latency_ms = start_time.elapsed().as_millis() as u64;
-                        let state = state.clone();
-                        let provider_id = provider_id.clone();
-                        let session_id = session_id.clone();
-                        let request_model = request_model.clone();
-                        let outbound_model = fallback_model.clone();
-                        let correlation_id = correlation_id.clone();
+                status_code,
+                move |events, first_token_ms, outcome| {
+                    let usage = TokenUsage::from_claude_stream_events(&events).unwrap_or_default();
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| fallback_model.clone());
+                    let latency_ms = start_time.elapsed().as_millis() as u64;
+                    let state = state.clone();
+                    let provider_id = provider_id.clone();
+                    let session_id = session_id.clone();
+                    let request_model = request_model.clone();
+                    let outbound_model = fallback_model.clone();
+                    let correlation_id = correlation_id.clone();
 
-                        tokio::spawn(async move {
-                            log_usage(
-                                &state,
-                                correlation_id,
-                                &provider_id,
-                                app_type_str,
-                                &model,
-                                &request_model,
-                                &outbound_model,
-                                usage,
-                                latency_ms,
-                                first_token_ms,
-                                true,
-                                status_code,
-                                Some(session_id),
-                            )
-                            .await;
-                        });
-                    } else {
-                        log::debug!("[Claude] OpenRouter 流式响应缺少 usage 统计，跳过消费记录");
-                    }
+                    tokio::spawn(async move {
+                        log_usage(
+                            &state,
+                            correlation_id,
+                            &provider_id,
+                            app_type_str,
+                            &model,
+                            &request_model,
+                            &outbound_model,
+                            usage,
+                            latency_ms,
+                            first_token_ms,
+                            true,
+                            outcome.status_code,
+                            Some(session_id),
+                            outcome.error_message,
+                        )
+                        .await;
+                    });
                 },
             ))
         } else {
@@ -572,6 +571,7 @@ async fn handle_claude_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    None,
                 )
                 .await;
             }
@@ -933,18 +933,10 @@ async fn handle_codex_chat_to_responses_transform(
             Some(SseUsageCollector::new(
                 start_time,
                 Some(codex_stream_usage_event_filter),
-                move |events, first_token_ms| {
+                status.as_u16(),
+                move |events, first_token_ms, outcome| {
                     let usage =
                         TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
-                    // 上游遵守 OpenAI 语义省略 usage 时，Chat→Responses 转换器会合成一个
-                    // 全 0 的 response.completed，from_codex_response 对 input/output 字段
-                    // 存在（哪怕=0）即返回 Some。缺 nonzero 闸门会让全 0 usage 也被写入：
-                    // message_id=None → dedup_request_id 退化为随机 UUID，无法去重，每笔
-                    // 请求插入一条无意义空行、虚增请求数。对齐 Claude transform handler 的 skip。
-                    if !usage.has_billable_tokens() {
-                        log::debug!("[Codex] 流式响应 usage 全 0 或缺失，跳过消费记录");
-                        return;
-                    }
                     let model = usage
                         .model
                         .clone()
@@ -972,8 +964,9 @@ async fn handle_codex_chat_to_responses_transform(
                             latency_ms,
                             first_token_ms,
                             true,
-                            status.as_u16(),
+                            outcome.status_code,
                             Some(session_id),
+                            outcome.error_message,
                         )
                         .await;
                     });
@@ -1096,6 +1089,7 @@ async fn handle_codex_chat_to_responses_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    None,
                 )
                 .await;
             }
@@ -2095,10 +2089,8 @@ fn log_forward_error(
     let logger = UsageLogger::new(&state.db);
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
-    let request_id = uuid::Uuid::new_v4().to_string();
-
     if let Err(e) = logger.log_error_with_context(
-        request_id,
+        ctx.request_id().to_string(),
         ctx.correlation_id(),
         ctx.provider.id.clone(),
         ctx.app_type_str.to_string(),
@@ -2133,6 +2125,7 @@ async fn log_usage(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    error_message: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -2165,6 +2158,7 @@ async fn log_usage(
         latency_ms,
         first_token_ms,
         status_code,
+        error_message,
         session_id,
         None, // provider_type
         is_streaming,
@@ -2177,12 +2171,132 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_sse_to_response_value,
-        chat_sse_to_response_value_for_normalization, codex_proxy_error_json,
+        chat_sse_to_response_value_for_normalization, codex_proxy_error_json, log_forward_error,
         normalize_chat_fallback, normalize_chat_value, responses_sse_to_response_value,
         should_emit_anthropic_reasoning, should_use_claude_transform_streaming, transform,
         upstream_body_parse_error,
     };
-    use crate::proxy::ProxyError;
+    use crate::{
+        app_config::AppType,
+        database::Database,
+        provider::{Provider, ProviderMeta},
+        proxy::{
+            failover_switch::FailoverSwitchManager,
+            handler_context::RequestContext,
+            provider_router::ProviderRouter,
+            providers::{
+                codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
+            },
+            server::ProxyState,
+            types::{ProxyConfig, ProxyStatus},
+            ProxyError,
+        },
+        AppError,
+    };
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::RwLock;
+
+    fn build_state(db: Arc<Database>) -> ProxyState {
+        ProxyState {
+            db: db.clone(),
+            config: Arc::new(RwLock::new(ProxyConfig::default())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            start_time: Arc::new(RwLock::new(None)),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            app_handle: None,
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_error_usage_uses_harness_request_id() -> Result<(), AppError> {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut provider = Provider::with_id(
+            "nexus-provider".to_string(),
+            "Nexus GLM-5.2".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+                    "ANTHROPIC_AUTH_TOKEN": "dummy"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("nexus".to_string()),
+            ..ProviderMeta::default()
+        });
+        db.save_provider("claude-desktop", &provider)
+            .expect("save provider");
+        db.set_current_provider("claude-desktop", &provider.id)
+            .expect("set current provider");
+
+        let state = build_state(db.clone());
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "stream": true,
+            "messages": []
+        });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-request-id", "req-from-harness".parse().unwrap());
+        headers.insert(
+            "x-claude-code-session-id",
+            "session-from-harness".parse().unwrap(),
+        );
+
+        let ctx = RequestContext::new(
+            &state,
+            &body,
+            &headers,
+            AppType::ClaudeDesktop,
+            "Claude Desktop",
+            "claude-desktop",
+        )
+        .await
+        .expect("request context");
+
+        log_forward_error(
+            &state,
+            &ctx,
+            true,
+            &ProxyError::Timeout("provider did not respond".to_string()),
+        );
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (request_id, correlation_id, session_id, status_code, is_streaming): (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT request_id, correlation_id, session_id, status_code, is_streaming
+                 FROM proxy_request_logs
+                 WHERE request_id = 'req-from-harness'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("failed forward usage row");
+
+        assert_eq!(request_id, "req-from-harness");
+        assert_eq!(correlation_id.as_deref(), Some("req-from-harness"));
+        assert_eq!(session_id.as_deref(), Some("session-from-harness"));
+        assert_eq!(status_code, 504);
+        assert_eq!(is_streaming, 1);
+        Ok(())
+    }
 
     #[test]
     fn anthropic_reasoning_visibility_honors_omitted_display() {
