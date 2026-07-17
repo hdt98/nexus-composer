@@ -388,42 +388,41 @@ async fn handle_claude_transform(
             Some(SseUsageCollector::new(
                 start_time,
                 Some(claude_stream_usage_event_filter),
-                move |events, first_token_ms| {
-                    if let Some(usage) = TokenUsage::from_claude_stream_events(&events) {
-                        let model = usage
-                            .model
-                            .clone()
-                            .filter(|m| !m.is_empty())
-                            .unwrap_or_else(|| fallback_model.clone());
-                        let latency_ms = start_time.elapsed().as_millis() as u64;
-                        let state = state.clone();
-                        let provider_id = provider_id.clone();
-                        let session_id = session_id.clone();
-                        let request_model = request_model.clone();
-                        let outbound_model = fallback_model.clone();
-                        let correlation_id = correlation_id.clone();
+                status_code,
+                move |events, first_token_ms, outcome| {
+                    let usage = TokenUsage::from_claude_stream_events(&events).unwrap_or_default();
+                    let model = usage
+                        .model
+                        .clone()
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or_else(|| fallback_model.clone());
+                    let latency_ms = start_time.elapsed().as_millis() as u64;
+                    let state = state.clone();
+                    let provider_id = provider_id.clone();
+                    let session_id = session_id.clone();
+                    let request_model = request_model.clone();
+                    let outbound_model = fallback_model.clone();
+                    let correlation_id = correlation_id.clone();
 
-                        tokio::spawn(async move {
-                            log_usage(
-                                &state,
-                                correlation_id,
-                                &provider_id,
-                                app_type_str,
-                                &model,
-                                &request_model,
-                                &outbound_model,
-                                usage,
-                                latency_ms,
-                                first_token_ms,
-                                true,
-                                status_code,
-                                Some(session_id),
-                            )
-                            .await;
-                        });
-                    } else {
-                        log::debug!("[Claude] OpenRouter 流式响应缺少 usage 统计，跳过消费记录");
-                    }
+                    tokio::spawn(async move {
+                        log_usage(
+                            &state,
+                            correlation_id,
+                            &provider_id,
+                            app_type_str,
+                            &model,
+                            &request_model,
+                            &outbound_model,
+                            usage,
+                            latency_ms,
+                            first_token_ms,
+                            true,
+                            outcome.status_code,
+                            Some(session_id),
+                            outcome.error_message,
+                        )
+                        .await;
+                    });
                 },
             ))
         } else {
@@ -572,6 +571,7 @@ async fn handle_claude_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    None,
                 )
                 .await;
             }
@@ -933,18 +933,10 @@ async fn handle_codex_chat_to_responses_transform(
             Some(SseUsageCollector::new(
                 start_time,
                 Some(codex_stream_usage_event_filter),
-                move |events, first_token_ms| {
+                status.as_u16(),
+                move |events, first_token_ms, outcome| {
                     let usage =
                         TokenUsage::from_codex_stream_events_auto(&events).unwrap_or_default();
-                    // 上游遵守 OpenAI 语义省略 usage 时，Chat→Responses 转换器会合成一个
-                    // 全 0 的 response.completed，from_codex_response 对 input/output 字段
-                    // 存在（哪怕=0）即返回 Some。缺 nonzero 闸门会让全 0 usage 也被写入：
-                    // message_id=None → dedup_request_id 退化为随机 UUID，无法去重，每笔
-                    // 请求插入一条无意义空行、虚增请求数。对齐 Claude transform handler 的 skip。
-                    if !usage.has_billable_tokens() {
-                        log::debug!("[Codex] 流式响应 usage 全 0 或缺失，跳过消费记录");
-                        return;
-                    }
                     let model = usage
                         .model
                         .clone()
@@ -972,8 +964,9 @@ async fn handle_codex_chat_to_responses_transform(
                             latency_ms,
                             first_token_ms,
                             true,
-                            status.as_u16(),
+                            outcome.status_code,
                             Some(session_id),
+                            outcome.error_message,
                         )
                         .await;
                     });
@@ -1096,6 +1089,7 @@ async fn handle_codex_chat_to_responses_transform(
                     false,
                     status.as_u16(),
                     Some(session_id),
+                    None,
                 )
                 .await;
             }
@@ -2133,6 +2127,7 @@ async fn log_usage(
     is_streaming: bool,
     status_code: u16,
     session_id: Option<String>,
+    error_message: Option<String>,
 ) {
     use super::usage::logger::UsageLogger;
 
@@ -2165,6 +2160,7 @@ async fn log_usage(
         latency_ms,
         first_token_ms,
         status_code,
+        error_message,
         session_id,
         None, // provider_type
         is_streaming,

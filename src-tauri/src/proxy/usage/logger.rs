@@ -323,6 +323,7 @@ impl<'a> UsageLogger<'a> {
         latency_ms: u64,
         first_token_ms: Option<u64>,
         status_code: u16,
+        error_message: Option<String>,
         session_id: Option<String>,
         provider_type: Option<String>,
         is_streaming: bool,
@@ -358,7 +359,7 @@ impl<'a> UsageLogger<'a> {
             latency_ms,
             first_token_ms,
             status_code,
-            error_message: None,
+            error_message,
             session_id,
             provider_type,
             is_streaming,
@@ -413,6 +414,7 @@ mod tests {
             None,
             200,
             None,
+            None,
             Some("claude".to_string()),
             false,
         )?;
@@ -430,6 +432,70 @@ mod tests {
         assert_eq!(count, 1);
         assert_eq!(request_model, "req-model");
         assert_eq!(correlation_id.as_deref(), Some("server-request-id"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_log_with_calculation_preserves_stream_failure() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let logger = UsageLogger::new(&db);
+
+        logger.log_with_calculation(
+            "req-stream-error".to_string(),
+            Some("server-request-id".to_string()),
+            "provider-1".to_string(),
+            "claude-desktop".to_string(),
+            "test-model".to_string(),
+            "test-model".to_string(),
+            "test-model".to_string(),
+            TokenUsage {
+                input_tokens: 120,
+                output_tokens: 7,
+                cache_read_tokens: 40,
+                cache_creation_tokens: 3,
+                model: None,
+                message_id: None,
+            },
+            Decimal::ONE,
+            6000,
+            None,
+            499,
+            Some("client_stream_cancelled".to_string()),
+            Some("session-1".to_string()),
+            None,
+            true,
+        )?;
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (status, error, correlation_id, input, output, cache_read, cache_creation): (
+            i64,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT status_code, error_message, correlation_id, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens FROM proxy_request_logs WHERE request_id = 'req-stream-error'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(status, 499);
+        assert_eq!(error.as_deref(), Some("client_stream_cancelled"));
+        assert_eq!(correlation_id.as_deref(), Some("server-request-id"));
+        assert_eq!((input, output, cache_read, cache_creation), (120, 7, 40, 3));
         Ok(())
     }
 
