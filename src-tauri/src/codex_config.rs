@@ -1650,8 +1650,8 @@ pub fn restore_codex_settings_for_backfill(
 /// Supported fields:
 /// - `"base_url"`: writes to `[model_providers.<current>].base_url` if `model_provider` exists,
 ///   otherwise falls back to top-level `base_url`.
-/// - `"wire_api"`: writes to `[model_providers.<current>].wire_api` if `model_provider` exists,
-///   otherwise falls back to top-level `wire_api`.
+/// - `"wire_api"` / `"name"`: writes to the matching field in
+///   `[model_providers.<current>]` if `model_provider` exists, otherwise falls back to top level.
 /// - `"model"` / `"model_catalog_json"`: writes to top-level field.
 ///
 /// Empty value removes the field.
@@ -1663,7 +1663,7 @@ pub fn update_codex_toml_field(toml_str: &str, field: &str, value: &str) -> Resu
     let trimmed = value.trim();
 
     match field {
-        "base_url" | "wire_api" => {
+        "base_url" | "wire_api" | "name" => {
             let model_provider = doc
                 .get("model_provider")
                 .and_then(|item| item.as_str())

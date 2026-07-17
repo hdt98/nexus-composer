@@ -4393,12 +4393,10 @@ stream_idle_timeout_ms = 900000
                 .and_then(|v| v.as_integer()),
             Some(900000)
         );
-        assert!(
-            parsed
-                .get("model_providers")
-                .and_then(|v| v.get("Nexus"))
-                .is_none()
-        );
+        assert!(parsed
+            .get("model_providers")
+            .and_then(|v| v.get("Nexus"))
+            .is_none());
         assert!(output.contains("# keep selector comment"));
     }
 
@@ -5439,9 +5437,7 @@ requires_openai_auth = true
             "restored Codex live config should preserve the provider's model_provider"
         );
         assert_eq!(
-            parsed_live
-                .get("appearanceTheme")
-                .and_then(|v| v.as_str()),
+            parsed_live.get("appearanceTheme").and_then(|v| v.as_str()),
             Some("dark"),
             "restored Codex live config should preserve the user's appearance"
         );
