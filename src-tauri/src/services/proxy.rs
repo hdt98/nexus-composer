@@ -343,7 +343,7 @@ impl ProxyService {
         )
         .map_err(|e| format!("构建 codex 有效配置失败: {e}"))?;
         if let Some(existing_live) = existing_live.as_ref() {
-            Self::preserve_codex_mcp_servers_from_existing_config(
+            Self::preserve_codex_user_config_from_existing_config(
                 &mut effective_settings,
                 existing_live,
             )?;
@@ -2026,8 +2026,14 @@ impl ProxyService {
                 })
                 .transpose()?;
 
+            if let Ok(existing_live) = self.read_codex_live() {
+                Self::preserve_codex_user_config_from_existing_config(
+                    &mut effective_settings,
+                    &existing_live,
+                )?;
+            }
             if let Some(existing_value) = existing_backup_value.as_ref() {
-                Self::preserve_codex_mcp_servers_from_existing_config(
+                Self::preserve_codex_user_config_from_existing_config(
                     &mut effective_settings,
                     existing_value,
                 )?;
@@ -2175,7 +2181,7 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
-    fn preserve_codex_mcp_servers_from_existing_config(
+    fn preserve_codex_user_config_from_existing_config(
         target_settings: &mut Value,
         existing_config: &Value,
     ) -> Result<(), String> {
@@ -2207,6 +2213,12 @@ impl ProxyService {
         let existing_doc = existing_config
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("解析现有 Codex 备份失败: {e}"))?;
+
+        for (key, item) in existing_doc.as_table().iter() {
+            if target_doc.get(key).is_none() {
+                target_doc.insert(key, item.clone());
+            }
+        }
 
         if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
             match target_doc.get_mut("mcp_servers") {
@@ -5124,7 +5136,7 @@ base_url = "https://codex.example/v1"
 
     #[tokio::test]
     #[serial]
-    async fn update_live_backup_from_provider_preserves_codex_mcp_servers() {
+    async fn update_live_backup_from_provider_preserves_codex_user_config() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -5142,6 +5154,10 @@ model = "gpt-4"
 
 [model_providers.any]
 base_url = "https://old.example/v1"
+
+[desktop]
+appearanceTheme = "dark"
+dock-icon-preference = "codex-system"
 
 [mcp_servers.echo]
 command = "npx"
@@ -5192,6 +5208,11 @@ base_url = "https://new.example/v1"
             "existing Codex MCP section should survive proxy hot-switch backup update"
         );
         assert!(
+            config.contains("appearanceTheme = \"dark\"")
+                && config.contains("dock-icon-preference = \"codex-system\""),
+            "existing Codex desktop preferences should survive backup update"
+        );
+        assert!(
             config.contains("https://new.example/v1"),
             "provider-specific base_url should still update to the new provider"
         );
@@ -5221,6 +5242,10 @@ name = "RightCode"
 base_url = "https://rightcode.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
+
+[desktop]
+appearanceTheme = "light"
+dock-icon-preference = "classic"
 "#
             }),
             None,
@@ -5272,6 +5297,10 @@ name = "RightCode"
 base_url = "http://127.0.0.1:15721/v1"
 wire_api = "responses"
 requires_openai_auth = true
+
+[desktop]
+appearanceTheme = "dark"
+dock-icon-preference = "codex-system"
 "#
             }))
             .expect("seed taken-over Codex live config");
@@ -5312,6 +5341,21 @@ requires_openai_auth = true
             Some("https://aihubmix.example/v1"),
             "provider id should point at the hot-switched provider endpoint"
         );
+        assert_eq!(
+            parsed_backup
+                .get("desktop")
+                .and_then(|v| v.get("appearanceTheme"))
+                .and_then(|v| v.as_str()),
+            Some("dark"),
+            "restore backup should capture desktop preferences changed during takeover"
+        );
+        assert_eq!(
+            parsed_backup
+                .get("desktop")
+                .and_then(|v| v.get("dock-icon-preference"))
+                .and_then(|v| v.as_str()),
+            Some("codex-system")
+        );
 
         let live = service.read_codex_live().expect("read Codex live config");
         let live_config = live
@@ -5342,6 +5386,14 @@ requires_openai_auth = true
             Some("http://127.0.0.1:15721/v1"),
             "taken-over live config should stay pointed at the local proxy"
         );
+        assert_eq!(
+            parsed_live
+                .get("desktop")
+                .and_then(|v| v.get("appearanceTheme"))
+                .and_then(|v| v.as_str()),
+            Some("dark"),
+            "hot-switch synchronization should preserve desktop preferences"
+        );
 
         service
             .restore_live_config_for_app_with_fallback(&AppType::Codex)
@@ -5358,6 +5410,21 @@ requires_openai_auth = true
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
             Some("aihubmix"),
             "restored Codex live config should preserve the provider's model_provider"
+        );
+        assert_eq!(
+            parsed_live
+                .get("desktop")
+                .and_then(|v| v.get("appearanceTheme"))
+                .and_then(|v| v.as_str()),
+            Some("dark"),
+            "restored Codex live config should preserve desktop preferences"
+        );
+        assert_eq!(
+            parsed_live
+                .get("desktop")
+                .and_then(|v| v.get("dock-icon-preference"))
+                .and_then(|v| v.as_str()),
+            Some("codex-system")
         );
         assert_eq!(
             live.get("auth")
