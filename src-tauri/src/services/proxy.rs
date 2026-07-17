@@ -2294,6 +2294,15 @@ impl ProxyService {
             .unwrap_or_else(|_| toml_str.to_string())
     }
 
+    fn nexus_codex_provider_display_name(provider: &Provider) -> Option<&'static str> {
+        let is_nexus = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.provider_type.as_deref())
+            == Some("nexus");
+        is_nexus.then_some("Nexus")
+    }
+
     /// 接管 Codex 时，本地客户端必须继续以 Responses wire API 访问代理。
     /// 真实上游是否走 Chat Completions 由 provider 配置决定，并在代理内部转换。
     fn apply_codex_proxy_toml_config_for_provider(
@@ -2312,6 +2321,11 @@ impl ProxyService {
             updated =
                 crate::codex_config::update_codex_toml_field(&updated, "model", &upstream_model)
                     .unwrap_or(updated);
+        }
+
+        if let Some(display_name) = provider.and_then(Self::nexus_codex_provider_display_name) {
+            updated = crate::codex_config::update_codex_toml_field(&updated, "name", display_name)
+                .unwrap_or(updated);
         }
 
         updated
@@ -4207,19 +4221,19 @@ wire_api = "chat"
     }
 
     #[test]
-    fn apply_codex_proxy_toml_config_keeps_upstream_model_for_chat_provider() {
+    fn apply_codex_proxy_toml_config_keeps_model_and_normalizes_nexus_name() {
         let input = r#"
-model_provider = "deepseek"
-model = "deepseek-v4-flash"
+model_provider = "nexus"
+model = "GLM-5.2-FP8"
 
-[model_providers.deepseek]
-name = "DeepSeek"
-base_url = "https://api.deepseek.com/v1"
+[model_providers.nexus]
+name = "nexus_glm"
+base_url = "https://example.invalid/v1"
 wire_api = "responses"
 "#;
         let mut provider = Provider::with_id(
-            "deepseek".to_string(),
-            "DeepSeek".to_string(),
+            "nexus-glm-5-2".to_string(),
+            "Nexus GLM-5.2".to_string(),
             json!({
                 "config": input
             }),
@@ -4227,6 +4241,7 @@ wire_api = "responses"
         );
         provider.meta = Some(ProviderMeta {
             api_format: Some("openai_chat".to_string()),
+            provider_type: Some("nexus".to_string()),
             ..Default::default()
         });
 
@@ -4241,15 +4256,23 @@ wire_api = "responses"
 
         assert_eq!(
             parsed.get("model").and_then(|v| v.as_str()),
-            Some("deepseek-v4-flash")
+            Some("GLM-5.2-FP8")
         );
         assert_eq!(
             parsed
                 .get("model_providers")
-                .and_then(|v| v.get("deepseek"))
+                .and_then(|v| v.get("nexus"))
                 .and_then(|v| v.get("base_url"))
                 .and_then(|v| v.as_str()),
             Some(proxy_url)
+        );
+        assert_eq!(
+            parsed
+                .get("model_providers")
+                .and_then(|v| v.get("nexus"))
+                .and_then(|v| v.get("name"))
+                .and_then(|v| v.as_str()),
+            Some("Nexus")
         );
     }
 
