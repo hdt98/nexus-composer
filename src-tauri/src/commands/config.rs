@@ -17,28 +17,25 @@ pub async fn get_claude_config_status() -> Result<ConfigStatus, String> {
 
 use std::str::FromStr;
 
+fn format_invalid_config(language: &str, format: &str, error: &dyn std::fmt::Display) -> String {
+    match language {
+        "vi" => format!("Định dạng {format} không hợp lệ: {error}"),
+        _ => format!("Invalid {format} format: {error}"),
+    }
+}
+
 fn invalid_json_format_error(error: serde_json::Error) -> String {
     let lang = settings::get_settings()
         .language
-        .unwrap_or_else(|| "zh".to_string());
-
-    match lang.as_str() {
-        "en" => format!("Invalid JSON format: {error}"),
-        "ja" => format!("JSON形式が無効です: {error}"),
-        _ => format!("无效的 JSON 格式: {error}"),
-    }
+        .unwrap_or_else(|| "en".to_string());
+    format_invalid_config(&lang, "JSON", &error)
 }
 
 fn invalid_toml_format_error(error: toml_edit::TomlError) -> String {
     let lang = settings::get_settings()
         .language
-        .unwrap_or_else(|| "zh".to_string());
-
-    match lang.as_str() {
-        "en" => format!("Invalid TOML format: {error}"),
-        "ja" => format!("TOML形式が無効です: {error}"),
-        _ => format!("无效的 TOML 格式: {error}"),
-    }
+        .unwrap_or_else(|| "en".to_string());
+    format_invalid_config(&lang, "TOML", &error)
 }
 
 fn validate_common_config_snippet(app_type: &str, snippet: &str) -> Result<(), String> {
@@ -355,7 +352,19 @@ pub async fn set_common_config_snippet(
 
 #[cfg(test)]
 mod tests {
-    use super::validate_common_config_snippet;
+    use super::{format_invalid_config, validate_common_config_snippet};
+
+    #[test]
+    fn invalid_config_copy_supports_vietnamese_and_defaults_to_english() {
+        assert_eq!(
+            format_invalid_config("vi", "JSON", &"details"),
+            "Định dạng JSON không hợp lệ: details"
+        );
+        assert_eq!(
+            format_invalid_config("unsupported", "TOML", &"details"),
+            "Invalid TOML format: details"
+        );
+    }
 
     #[test]
     fn validate_common_config_snippet_accepts_comment_only_codex_snippet() {

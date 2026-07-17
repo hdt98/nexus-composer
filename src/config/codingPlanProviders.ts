@@ -22,7 +22,7 @@ export const CODING_PLAN_PROVIDERS: readonly CodingPlanProviderEntry[] = [
   { id: "kimi", label: "Kimi For Coding", pattern: /api\.kimi\.com\/coding/i },
   {
     id: "zhipu",
-    label: "Zhipu GLM (智谱)",
+    label: "Zhipu GLM",
     pattern: /bigmodel\.cn|api\.z\.ai/i,
   },
   {
@@ -40,7 +40,7 @@ export const CODING_PLAN_PROVIDERS: readonly CodingPlanProviderEntry[] = [
     // ark.cn-beijing.volces.com/api/coding[/v3]；与后端 detect_provider 的
     // `volces.com/api/coding` 子串判断同效。
     id: "volcengine",
-    label: "火山方舟 (Volcengine)",
+    label: "Volcengine Ark",
     pattern: /volces\.com\/api\/coding/i,
   },
 ] as const;

@@ -507,13 +507,13 @@ export const opencodeProviderPresets: OpenCodeProviderPreset[] = [
     },
   },
   {
-    name: "火山Agentplan",
+    name: "Volcengine Agent Plan",
     websiteUrl: "https://www.volcengine.com/product/ark",
     apiKeyUrl:
       "https://www.volcengine.com/activity/codingplan?ac=MMAP8JTTCAQ2&rc=6J6FV5N2&utm_campaign=hw&utm_content=ccswitch&utm_medium=devrel_tool_web&utm_source=OWO&utm_term=ccswitch",
     settingsConfig: {
       npm: "@ai-sdk/openai-compatible",
-      name: "火山Agentplan",
+      name: "Volcengine Agent Plan",
       options: {
         baseURL: "https://ark.cn-beijing.volces.com/api/coding/v3",
         apiKey: "",

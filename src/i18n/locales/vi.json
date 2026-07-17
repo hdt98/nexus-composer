@@ -44,8 +44,8 @@
   },
   "firstRunNotice": {
     "title": "Chào mừng đến với Nexus Composer",
-    "bodyDefault": "Nexus Composer kết nối các trợ lý lập trình nội bộ (Codex và Claude Code) với một endpoint mô hình GLM-5.2 được phục vụ bởi SGLang. Chọn preset Nexus GLM-5.2 cho mỗi trợ lý để bắt đầu.",
-    "bodyOfficial": "Preset Nexus GLM-5.2 trỏ tới http://127.0.0.1:30000/v1 và tái sử dụng lớp chuyển đổi giao thức nội bộ để Codex (Responses) và Claude Code (Anthropic Messages) đều có thể giao tiếp với endpoint tương thích OpenAI của SGLang.",
+    "bodyDefault": "Nexus Composer kết nối các trợ lý lập trình với endpoint Nexus. Chọn preset Nexus cho từng ứng dụng để bắt đầu.",
+    "bodyOfficial": "Nexus tự xử lý khác biệt giao thức để Codex và Claude Code cùng kết nối qua Nexus.",
     "confirm": "Đã hiểu"
   },
   "apiKeyInput": {
