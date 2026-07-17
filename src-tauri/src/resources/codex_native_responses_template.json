@@ -12,8 +12,14 @@
     {
       "effort": "high",
       "description": "Enabled Thinking"
+    },
+    {
+      "effort": "ultra",
+      "description": "Maximum reasoning with automatic task delegation"
     }
   ],
+  "multi_agent_version": "v2",
+  "tool_mode": "direct",
   "shell_type": "shell_command",
   "visibility": "list",
   "supported_in_api": true,

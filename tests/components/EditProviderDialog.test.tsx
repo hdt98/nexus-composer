@@ -98,66 +98,84 @@ describe("EditProviderDialog", () => {
     apiMocks.getOpenClawLiveProvider.mockReset();
   });
 
-  it("保留 Codex 数据库中的 modelCatalog，避免 live 配置缺字段时清空模型映射", async () => {
-    const dbModelCatalog = {
-      models: [
-        {
-          model: "deepseek-v4-flash",
-          displayName: "DeepSeek V4 Flash",
-          contextWindow: 1000000,
+  it.each([
+    {
+      catalogPath: "/Users/me/.codex/nexus-model-catalog.json",
+      expectedPointer: "",
+    },
+    {
+      catalogPath: "/Users/me/.codex/cc-switch-model-catalog.json",
+      expectedPointer: "",
+    },
+    {
+      catalogPath: "/Users/me/.codex/glm-catalog.json",
+      expectedPointer:
+        'model_catalog_json = "/Users/me/.codex/glm-catalog.json"\n',
+    },
+  ])(
+    "preserves the DB model catalog and removes only Nexus-managed $catalogPath",
+    async ({ catalogPath, expectedPointer }) => {
+      const dbModelCatalog = {
+        models: [
+          {
+            model: "deepseek-v4-flash",
+            displayName: "DeepSeek V4 Flash",
+            contextWindow: 1000000,
+          },
+        ],
+      };
+      const provider: Provider = {
+        id: "deepseek",
+        name: "DeepSeek",
+        category: "aggregator",
+        settingsConfig: {
+          auth: {
+            OPENAI_API_KEY: "db-key",
+          },
+          config: 'model_provider = "custom"\nmodel = "deepseek-v4-flash"\n',
+          modelCatalog: dbModelCatalog,
         },
-      ],
-    };
-    const provider: Provider = {
-      id: "deepseek",
-      name: "DeepSeek",
-      category: "aggregator",
-      settingsConfig: {
+      };
+      const liveSettings = {
         auth: {
-          OPENAI_API_KEY: "db-key",
+          OPENAI_API_KEY: "live-key",
         },
-        config: 'model_provider = "custom"\nmodel = "deepseek-v4-flash"\n',
-        modelCatalog: dbModelCatalog,
-      },
-    };
-    const liveSettings = {
-      auth: {
-        OPENAI_API_KEY: "live-key",
-      },
-      config: 'model_provider = "custom"\nmodel = "deepseek-v4-pro"\n',
-    };
-    const handleSubmit = vi.fn().mockResolvedValue(undefined);
-
-    apiMocks.getCurrent.mockResolvedValue(provider.id);
-    apiMocks.getLiveProviderSettings.mockResolvedValue(liveSettings);
-
-    render(
-      <EditProviderDialog
-        open
-        provider={provider}
-        onOpenChange={vi.fn()}
-        onSubmit={handleSubmit}
-        appId="codex"
-      />,
-    );
-
-    await waitFor(() => {
-      expect(
-        JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
-      ).toEqual({
+        config: `model_catalog_json = "${catalogPath}"\nmodel_provider = "custom"\nmodel = "deepseek-v4-pro"\n`,
+      };
+      const expectedSettings = {
         ...liveSettings,
+        config: `${expectedPointer}model_provider = "custom"\nmodel = "deepseek-v4-pro"\n`,
         modelCatalog: dbModelCatalog,
+      };
+      const handleSubmit = vi.fn().mockResolvedValue(undefined);
+
+      apiMocks.getCurrent.mockResolvedValue(provider.id);
+      apiMocks.getLiveProviderSettings.mockResolvedValue(liveSettings);
+
+      render(
+        <EditProviderDialog
+          open
+          provider={provider}
+          onOpenChange={vi.fn()}
+          onSubmit={handleSubmit}
+          appId="codex"
+        />,
+      );
+
+      await waitFor(() => {
+        expect(
+          JSON.parse(screen.getByTestId("settings-config").textContent ?? "{}"),
+        ).toEqual(expectedSettings);
       });
-    });
 
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+      fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
-    await waitFor(() => expect(handleSubmit).toHaveBeenCalledTimes(1));
-    expect(handleSubmit.mock.calls[0][0].provider.settingsConfig).toEqual({
-      ...liveSettings,
-      modelCatalog: dbModelCatalog,
-    });
-  });
+      await waitFor(() => expect(handleSubmit).toHaveBeenCalledTimes(1));
+      expect(handleSubmit.mock.calls[0][0].provider.settingsConfig).toEqual(
+        expectedSettings,
+      );
+    },
+  );
 
   it("代理接管中编辑 Codex 供应商时展示数据库配置而不是读取 live 代理配置", async () => {
     const provider: Provider = {
