@@ -688,12 +688,22 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                             }
 
                             // ================================================
-                            // response.completed → message_delta + message_stop
+                            // response.completed / response.incomplete → message_delta + message_stop
                             // ================================================
-                            "response.completed" => {
+                            "response.completed" | "response.incomplete" => {
                                 let response_obj = response_object_from_event(&data);
+                                let status = response_obj
+                                    .get("status")
+                                    .and_then(|s| s.as_str())
+                                    .or_else(|| {
+                                        if event_name == "response.incomplete" {
+                                            Some("incomplete")
+                                        } else {
+                                            None
+                                        }
+                                    });
                                 let stop_reason = map_responses_stop_reason(
-                                    response_obj.get("status").and_then(|s| s.as_str()),
+                                    status,
                                     has_tool_use,
                                     response_obj
                                         .pointer("/incomplete_details/reason")
@@ -746,6 +756,27 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                                 yield Ok(Bytes::from(stop_sse));
                             }
 
+                            // ================================================
+                            // response.failed → error
+                            // ================================================
+                            "response.failed" => {
+                                let response_obj = response_object_from_event(&data);
+                                let error = response_obj.get("error").cloned().unwrap_or_else(|| {
+                                    json!({
+                                        "type": "upstream_response_failed",
+                                        "message": "Upstream response failed"
+                                    })
+                                });
+                                let error_event = json!({
+                                    "type": "error",
+                                    "error": error
+                                });
+                                let sse = format!("event: error\ndata: {}\n\n",
+                                    serde_json::to_string(&error_event).unwrap_or_default());
+                                log::debug!("[Claude/Responses] >>> Anthropic SSE: error");
+                                yield Ok(Bytes::from(sse));
+                            }
+
                             // Lifecycle events that don't need Anthropic counterparts.
                             // Listed explicitly so new events trigger a match-completeness review.
                             "response.output_text.done" => {
@@ -794,9 +825,18 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::handler_config::claude_stream_usage_event_filter;
+    use crate::proxy::handler_context::StreamingTimeoutConfig;
+    use crate::proxy::response_processor::{create_logged_passthrough_stream, SseUsageCollector};
     use futures::stream;
     use futures::StreamExt;
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex as StdMutex};
+
+    const NO_TIMEOUTS: StreamingTimeoutConfig = StreamingTimeoutConfig {
+        first_byte_timeout: 0,
+        idle_timeout: 0,
+    };
 
     #[test]
     fn test_map_responses_stop_reason_tool_use() {
@@ -868,6 +908,93 @@ mod tests {
         assert!(merged.contains("\"input_tokens\":12"));
         assert!(merged.contains("\"output_tokens\":3"));
         assert!(merged.contains("\"type\":\"message_stop\""));
+    }
+
+    #[tokio::test]
+    async fn response_incomplete_survives_claude_conversion_and_accounting() {
+        let input = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_incomplete\",\"model\":\"glm-5.2\",\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n",
+            "event: response.incomplete\n",
+            "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":7,\"output_tokens\":131072}}}\n\n"
+        );
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
+            input.as_bytes().to_vec(),
+        ))]);
+        let converted = create_anthropic_sse_stream_from_responses(upstream);
+        let completions = Arc::new(StdMutex::new(Vec::new()));
+        let callback_completions = completions.clone();
+        let collector = SseUsageCollector::new(
+            std::time::Instant::now(),
+            Some(claude_stream_usage_event_filter),
+            200,
+            move |events, _first_token_ms, outcome| {
+                callback_completions.lock().unwrap().push((events, outcome));
+            },
+        );
+
+        let logged =
+            create_logged_passthrough_stream(converted, "test", Some(collector), NO_TIMEOUTS, None);
+        let merged = logged
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>();
+
+        assert!(merged.contains("\"stop_reason\":\"max_tokens\""));
+        assert!(merged.contains("\"type\":\"message_stop\""));
+        let completions = completions.lock().unwrap();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].0.len(), 2);
+        assert_eq!(completions[0].0[1]["usage"]["output_tokens"], 131072);
+        assert_eq!(completions[0].1.status_code, 200);
+        assert_eq!(
+            completions[0].1.error_message.as_deref(),
+            Some("upstream_response_incomplete:max_output_tokens")
+        );
+    }
+
+    #[tokio::test]
+    async fn response_failed_survives_claude_conversion_and_accounting() {
+        let input = concat!(
+            "event: response.failed\n",
+            "data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"type\":\"server_error\",\"message\":\"failed\"}}}\n\n"
+        );
+        let upstream = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
+            input.as_bytes().to_vec(),
+        ))]);
+        let converted = create_anthropic_sse_stream_from_responses(upstream);
+        let completions = Arc::new(StdMutex::new(Vec::new()));
+        let callback_completions = completions.clone();
+        let collector = SseUsageCollector::new(
+            std::time::Instant::now(),
+            Some(claude_stream_usage_event_filter),
+            200,
+            move |events, _first_token_ms, outcome| {
+                callback_completions.lock().unwrap().push((events, outcome));
+            },
+        );
+
+        let logged =
+            create_logged_passthrough_stream(converted, "test", Some(collector), NO_TIMEOUTS, None);
+        let merged = logged
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
+            .collect::<String>();
+
+        assert!(merged.contains("event: error"));
+        assert!(!merged.contains("\"type\":\"message_stop\""));
+        let completions = completions.lock().unwrap();
+        assert_eq!(completions.len(), 1);
+        assert!(completions[0].0.is_empty());
+        assert_eq!(completions[0].1.status_code, 502);
+        assert_eq!(
+            completions[0].1.error_message.as_deref(),
+            Some("upstream_response_failed")
+        );
     }
 
     #[tokio::test]
