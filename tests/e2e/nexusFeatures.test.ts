@@ -9,6 +9,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { providerPresets } from "@/config/claudeProviderPresets";
+import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
@@ -153,6 +154,32 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
     expect(nexus.modelCatalog![0].displayName).toBe("GLM-5.2");
     expect(nexus.modelCatalog![0].contextWindow).toBe(NEXUS_CONTEXT_WINDOW);
     expect(nexus.modelCatalog![0].inputModalities).toEqual(["text"]);
+  });
+});
+
+describe("Nexus GLM-5.2 Claude Desktop preset config", () => {
+  const nexus = claudeDesktopProviderPresets.find(
+    (preset) => preset.name === "Nexus GLM-5.2",
+  )!;
+
+  it("routes the text-only hosted model through the local Chat adapter", () => {
+    expect(nexus).toBeDefined();
+    expect(nexus.baseUrl).toBe(NEXUS_ENDPOINT);
+    expect(nexus.mode).toBe("proxy");
+    expect(nexus.apiFormat).toBe("openai_chat");
+    expect(nexus.modelCatalog).toEqual(NEXUS_TEXT_MODEL_CATALOG);
+    expect(nexus.localProxyRequestOverrides).toEqual(NEXUS_REQUEST_OVERRIDES);
+  });
+
+  it("declares one 1M GLM route that the form expands across Desktop roles", () => {
+    expect(nexus.modelRoutes).toEqual([
+      expect.objectContaining({
+        upstreamModel: NEXUS_MODEL,
+        supports1m: true,
+      }),
+    ]);
+    expect(nexus.providerType).toBe("nexus");
+    expect(nexus.managedNexusPresetVersion).toBeDefined();
   });
 });
 

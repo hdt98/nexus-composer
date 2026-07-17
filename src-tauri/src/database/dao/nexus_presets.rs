@@ -57,6 +57,24 @@ fn has_hosted_signature(app: &AppType, settings: &Value) -> bool {
                     .and_then(Value::as_str)
                     .is_some_and(recognized_model)
         }
+        AppType::ClaudeDesktop => {
+            let Some(env) = settings.get("env") else {
+                return false;
+            };
+            env.get("ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str)
+                .is_some_and(recognized_endpoint)
+                && settings["modelCatalog"]["models"]
+                    .as_array()
+                    .is_some_and(|models| {
+                        models.iter().any(|entry| {
+                            entry
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .is_some_and(recognized_model)
+                        })
+                    })
+        }
         _ => false,
     }
 }
@@ -182,6 +200,30 @@ fn merge_request_defaults(meta: &mut Value) -> Result<(), AppError> {
     Ok(())
 }
 
+fn merge_desktop_routes(meta: &mut Value) -> Result<(), AppError> {
+    let meta = meta
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus metadata must be an object".into()))?;
+    let routes = meta
+        .entry("claudeDesktopModelRoutes")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| AppError::Message("Nexus Desktop routes must be an object".into()))?;
+    for route in [
+        "claude-sonnet-5",
+        "claude-opus-4-8",
+        "claude-fable-5",
+        "claude-haiku-4-5",
+    ] {
+        routes.insert(
+            route.into(),
+            json!({"model": MODEL, "labelOverride": MODEL, "supports1m": true}),
+        );
+    }
+    meta.insert("claudeDesktopMode".into(), json!("proxy"));
+    Ok(())
+}
+
 fn upgrade_settings(app: &AppType, settings: &mut Value, meta: &mut Value) -> Result<(), AppError> {
     match app {
         AppType::Codex => {
@@ -231,6 +273,16 @@ fn upgrade_settings(app: &AppType, settings: &mut Value, meta: &mut Value) -> Re
                 env.insert(key.into(), json!(value));
             }
         }
+        AppType::ClaudeDesktop => {
+            let env = settings
+                .get_mut("env")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AppError::Message("Nexus Claude Desktop env must be an object".into())
+                })?;
+            env.insert("ANTHROPIC_BASE_URL".into(), json!(HOSTED_ENDPOINT));
+            merge_desktop_routes(meta)?;
+        }
         _ => return Ok(()),
     }
     merge_text_only_catalog(settings, app)?;
@@ -243,7 +295,10 @@ impl Database {
         app: &AppType,
         current_id: Option<&str>,
     ) -> Result<bool, AppError> {
-        if !matches!(app, AppType::Claude | AppType::Codex) {
+        if !matches!(
+            app,
+            AppType::Claude | AppType::ClaudeDesktop | AppType::Codex
+        ) {
             return Ok(false);
         }
         let app_name = app.as_str();
@@ -322,6 +377,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use super::MANAGED_VERSION;
     use crate::app_config::AppType;
     use crate::database::Database;
     use crate::provider::Provider;
@@ -520,5 +576,81 @@ mod tests {
         assert!(!db
             .migrate_managed_nexus_for_app(&AppType::Claude, Some("managed"))
             .unwrap());
+    }
+
+    #[test]
+    fn migrates_managed_claude_desktop_preset() {
+        let db = Database::memory().unwrap();
+        save_provider(
+            &db,
+            AppType::ClaudeDesktop,
+            "desktop",
+            "Nexus GLM-5.2",
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
+                    "ANTHROPIC_AUTH_TOKEN": "user-key"
+                },
+                "modelCatalog": {"models": [{"model": "GLM-5.2-FP8"}]}
+            }),
+            json!({
+                "providerType": "nexus",
+                "managedNexusPresetVersion": 6,
+                "apiFormat": "openai_chat",
+                "claudeDesktopMode": "proxy",
+                "claudeDesktopModelRoutes": {
+                    "claude-sonnet-5": {"model": "GLM-5.2-FP8", "supports1m": true}
+                }
+            }),
+        );
+
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("desktop"))
+            .unwrap());
+        let provider = db
+            .get_provider_by_id("desktop", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "user-key"
+        );
+        assert_eq!(
+            provider.settings_config["env"]["ANTHROPIC_BASE_URL"],
+            HOSTED_ENDPOINT
+        );
+        assert_eq!(
+            provider.settings_config["modelCatalog"]["models"][0]["inputModalities"],
+            json!(["text"])
+        );
+        let meta = provider.meta.unwrap();
+        assert_eq!(
+            meta.managed_nexus_preset_version,
+            Some(MANAGED_VERSION as u32)
+        );
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+        assert_eq!(
+            meta.claude_desktop_mode.as_ref(),
+            Some(&crate::provider::ClaudeDesktopMode::Proxy)
+        );
+        for route in [
+            "claude-sonnet-5",
+            "claude-opus-4-8",
+            "claude-fable-5",
+            "claude-haiku-4-5",
+        ] {
+            let route = meta
+                .claude_desktop_model_routes
+                .get(route)
+                .expect("managed Desktop route");
+            assert_eq!(route.model, "GLM-5.2-FP8");
+            assert_eq!(route.supports_1m, Some(true));
+        }
+        let body = meta
+            .local_proxy_request_overrides
+            .as_ref()
+            .and_then(|overrides| overrides.body.as_ref())
+            .expect("managed request defaults");
+        assert_eq!(body["chat_template_kwargs"]["clear_thinking"], false);
     }
 }

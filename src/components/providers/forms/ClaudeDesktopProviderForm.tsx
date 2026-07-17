@@ -286,14 +286,9 @@ export function ClaudeDesktopProviderForm({
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
     "custom",
   );
-  const [activePreset, setActivePreset] = useState<{
-    id: string;
-    category?: ProviderCategory;
-    isPartner?: boolean;
-    partnerPromotionKey?: string;
-    providerType?: string;
-    requiresOAuth?: boolean;
-  } | null>(null);
+  const [activePreset, setActivePreset] = useState<
+    (ClaudeDesktopProviderPreset & { id: string }) | null
+  >(null);
   const [routes, setRoutes] = useState<RouteRow[]>(() => {
     const rows = initialRouteRows(initialData?.meta?.claudeDesktopModelRoutes);
     // proxy 模式归一化成固定三档；但初始无任何 route 时保持空数组，交给 seed
@@ -375,11 +370,12 @@ export function ClaudeDesktopProviderForm({
     }),
     [t],
   );
-  const activeProviderType =
-    activePreset?.providerType ?? initialData?.meta?.providerType;
-  const isOfficial =
-    initialData?.category === "official" ||
-    activePreset?.category === "official";
+  const activeProviderType = activePreset
+    ? activePreset.providerType
+    : initialData?.meta?.providerType;
+  const isOfficial = activePreset
+    ? activePreset.category === "official"
+    : initialData?.category === "official";
   const usesManagedOAuth =
     activePreset?.requiresOAuth === true ||
     activeProviderType === "github_copilot" ||
@@ -451,14 +447,7 @@ export function ClaudeDesktopProviderForm({
     const entry = presetEntries.find((item) => item.id === value);
     if (!entry) return;
 
-    setActivePreset({
-      id: value,
-      category: entry.preset.category,
-      isPartner: entry.preset.isPartner,
-      partnerPromotionKey: entry.preset.partnerPromotionKey,
-      providerType: entry.preset.providerType,
-      requiresOAuth: entry.preset.requiresOAuth,
-    });
+    setActivePreset({ ...entry.preset, id: value });
     applyDesktopPreset(entry.preset);
   };
 
@@ -550,12 +539,16 @@ export function ClaudeDesktopProviderForm({
       // 与启动 seed 的 OFFICIAL_SEEDS 占位语义一致。
       const settingsConfig = clonePlainRecord(initialData?.settingsConfig);
       settingsConfig.env = {};
+      delete settingsConfig.modelCatalog;
       const meta: ProviderMeta = { ...(initialData?.meta ?? {}) };
       delete meta.claudeDesktopMode;
       delete meta.claudeDesktopModelRoutes;
       delete meta.apiFormat;
       delete meta.endpointAutoSelect;
       delete meta.isFullUrl;
+      delete meta.providerType;
+      delete meta.localProxyRequestOverrides;
+      delete meta.managedNexusPresetVersion;
       await onSubmit({
         ...values,
         name: values.name.trim(),
@@ -649,6 +642,13 @@ export function ClaudeDesktopProviderForm({
           ANTHROPIC_BASE_URL: baseUrl.trim().replace(/\/+$/, ""),
           [apiKeyField]: apiKey.trim(),
         };
+    if (activePreset) {
+      if (activePreset.modelCatalog) {
+        settingsConfig.modelCatalog = activePreset.modelCatalog;
+      } else {
+        delete settingsConfig.modelCatalog;
+      }
+    }
 
     const routeMap = routeEntries.reduce<
       Record<string, ClaudeDesktopModelRoute>
@@ -670,6 +670,10 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    if (activePreset) {
+      meta.localProxyRequestOverrides = activePreset.localProxyRequestOverrides;
+      meta.managedNexusPresetVersion = activePreset.managedNexusPresetVersion;
+    }
     meta.authBinding =
       activeProviderType === "github_copilot"
         ? {

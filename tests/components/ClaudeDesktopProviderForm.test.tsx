@@ -3,6 +3,11 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
+import {
+  NEXUS_MANAGED_PRESET_VERSION,
+  NEXUS_REQUEST_OVERRIDES,
+  NEXUS_TEXT_MODEL_CATALOG,
+} from "@/config/nexus";
 import { createTestQueryClient } from "../utils/testQueryClient";
 
 vi.mock("@/lib/api/providers", () => ({
@@ -30,6 +35,42 @@ function renderForm(
 }
 
 describe("ClaudeDesktopProviderForm", () => {
+  it("persists the managed Nexus preset metadata and request defaults", async () => {
+    const onSubmit = vi.fn();
+    renderForm(undefined, onSubmit);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /providerForm\.presets\.nexus|Nexus GLM-5\.2/i,
+      }),
+    );
+    fireEvent.change(screen.getByLabelText("API Key"), {
+      target: { value: "test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(JSON.parse(submitted.settingsConfig).modelCatalog).toEqual(
+      NEXUS_TEXT_MODEL_CATALOG,
+    );
+    expect(submitted.meta).toMatchObject({
+      providerType: "nexus",
+      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+      localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
+    });
+    const routes = Object.values(submitted.meta.claudeDesktopModelRoutes) as {
+      model: string;
+      supports1m?: boolean;
+    }[];
+    expect(routes).toHaveLength(4);
+    expect(
+      routes.every(
+        (route) => route.model === "GLM-5.2-FP8" && route.supports1m,
+      ),
+    ).toBe(true);
+  });
+
   it("编辑模型映射的菜单显示名时保持输入框焦点", () => {
     renderForm({
       name: "Proxy Provider",
