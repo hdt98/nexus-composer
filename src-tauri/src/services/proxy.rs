@@ -1063,7 +1063,8 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn stop_server(&self) -> Result<(), String> {
+    /// Stop the listener without changing persisted proxy or provider state.
+    pub(crate) async fn stop_server(&self) -> Result<(), String> {
         if let Some(server) = self.server.write().await.take() {
             server
                 .stop()
@@ -3067,9 +3068,15 @@ mod tests {
         );
         state
             .proxy_service
-            .stop()
+            .stop_server()
             .await
-            .expect("stop existing proxy");
+            .expect("stop existing proxy listener");
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("read preserved proxy state after listener stop")
+                .proxy_enabled
+        );
     }
 
     #[tokio::test]

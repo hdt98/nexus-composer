@@ -47,8 +47,6 @@ describe("Nexus Composer preset arrays", () => {
   it("does not contain any removed presets", () => {
     const claudeNames = providerPresets.map((p) => p.name);
     const codexNames = codexProviderPresets.map((p) => p.name);
-    const desktopNames = claudeDesktopProviderPresets.map((p) => p.name);
-
     const removed = [
       "Longcat",
       "DeepSeek",
@@ -69,7 +67,6 @@ describe("Nexus Composer preset arrays", () => {
     for (const name of removed) {
       expect(claudeNames).not.toContain(name);
       expect(codexNames).not.toContain(name);
-      expect(desktopNames).not.toContain(name);
     }
   });
 

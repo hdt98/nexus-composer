@@ -1752,7 +1752,7 @@ pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
         // 非接管模式：代理在运行则仅停止代理
         if proxy_service.is_running().await {
             log::info!("检测到代理服务器正在运行，开始停止...");
-            if let Err(e) = proxy_service.stop_with_restore_keep_state().await {
+            if let Err(e) = proxy_service.stop_server().await {
                 log::error!("退出时停止代理失败: {e}");
             }
             log::info!("代理服务器清理完成");
