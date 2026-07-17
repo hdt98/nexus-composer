@@ -117,6 +117,48 @@ fn redact_url_for_log(url_str: &str) -> String {
     }
 }
 
+/// Restore the main window after the app has been hidden in the tray.
+pub(crate) fn present_main_window(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| format!("main window not found while handling {reason}"))?;
+
+    let mut errors = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    if let Err(e) = window.set_skip_taskbar(false) {
+        errors.push(format!("failed to restore taskbar entry: {e}"));
+    }
+
+    // A close-to-tray switches macOS to Accessory. Restore Regular before
+    // presenting the window; showing it while still Accessory can leave it
+    // absent from both CoreGraphics and Accessibility despite returning Ok.
+    #[cfg(target_os = "macos")]
+    if let Err(e) = tray::apply_tray_policy(app, true) {
+        errors.push(e);
+    }
+
+    if let Err(e) = window.unminimize() {
+        errors.push(format!("failed to unminimize: {e}"));
+    }
+    if let Err(e) = window.show() {
+        errors.push(format!("failed to show: {e}"));
+    }
+    if let Err(e) = window.set_focus() {
+        errors.push(format!("failed to focus: {e}"));
+    }
+
+    #[cfg(target_os = "linux")]
+    linux_fix::nudge_main_window(window);
+
+    if !errors.is_empty() {
+        return Err(format!("{reason}: {}", errors.join("; ")));
+    }
+
+    log::info!("Main window presented: {reason}");
+    Ok(())
+}
+
 /// 统一处理 nexus:// 深链接 URL
 ///
 /// - 解析 URL
@@ -152,15 +194,8 @@ fn handle_deeplink_url(
             }
 
             if focus_main_window {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.unminimize();
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                    #[cfg(target_os = "linux")]
-                    {
-                        linux_fix::nudge_main_window(window.clone());
-                    }
-                    log::info!("✓ Window shown and focused");
+                if let Err(e) = present_main_window(app, "deep link") {
+                    log::error!("Failed to present main window for deep link: {e}");
                 }
             }
         }
@@ -253,14 +288,8 @@ pub fn run() {
             }
 
             // Show and focus window regardless
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-                #[cfg(target_os = "linux")]
-                {
-                    linux_fix::nudge_main_window(window.clone());
-                }
+            if let Err(e) = present_main_window(app, "single-instance activation") {
+                log::error!("Failed to present main window after activation: {e}");
             }
         }));
     }
@@ -292,7 +321,9 @@ pub fn run() {
                     }
                     #[cfg(target_os = "macos")]
                     {
-                        tray::apply_tray_policy(window.app_handle(), false);
+                        if let Err(e) = tray::apply_tray_policy(window.app_handle(), false) {
+                            log::warn!("Failed to apply close-to-tray policy: {e}");
+                        }
                     }
                 } else {
                     api.prevent_close();
@@ -1194,7 +1225,9 @@ pub fn run() {
                     #[cfg(target_os = "windows")]
                     let _ = window.set_skip_taskbar(true);
                     #[cfg(target_os = "macos")]
-                    tray::apply_tray_policy(app.handle(), false);
+                    if let Err(e) = tray::apply_tray_policy(app.handle(), false) {
+                        log::warn!("Failed to apply silent-startup tray policy: {e}");
+                    }
                     log::info!("静默启动模式：主窗口已隐藏");
                 } else {
                     // 正常启动模式：显示窗口
@@ -1599,15 +1632,10 @@ pub fn run() {
             match event {
                 // macOS 在 Dock 图标被点击并重新激活应用时会触发 Reopen 事件，这里手动恢复主窗口
                 RunEvent::Reopen { .. } => {
-                    if let Some(window) = app_handle.get_webview_window("main") {
-                        #[cfg(target_os = "windows")]
-                        {
-                            let _ = window.set_skip_taskbar(false);
+                    if app_handle.get_webview_window("main").is_some() {
+                        if let Err(e) = present_main_window(app_handle, "macOS reopen") {
+                            log::error!("Failed to present main window after reopen: {e}");
                         }
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                        tray::apply_tray_policy(app_handle, true);
                     } else if crate::lightweight::is_lightweight_mode() {
                         if let Err(e) = crate::lightweight::exit_lightweight_mode(app_handle) {
                             log::error!("退出轻量模式重建窗口失败: {e}");
@@ -1665,10 +1693,8 @@ pub fn run() {
                             }
 
                             // 确保主窗口可见
-                            if let Some(window) = app_handle.get_webview_window("main") {
-                                let _ = window.unminimize();
-                                let _ = window.show();
-                                let _ = window.set_focus();
+                            if let Err(e) = present_main_window(app_handle, "opened URL") {
+                                log::error!("Failed to present main window for opened URL: {e}");
                             }
                         }
                     }

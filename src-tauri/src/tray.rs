@@ -664,7 +664,7 @@ pub fn refresh_tray_menu(app: &tauri::AppHandle) {
 }
 
 #[cfg(target_os = "macos")]
-pub fn apply_tray_policy(app: &tauri::AppHandle, dock_visible: bool) {
+pub fn apply_tray_policy(app: &tauri::AppHandle, dock_visible: bool) -> Result<(), String> {
     use tauri::ActivationPolicy;
 
     let desired_policy = if dock_visible {
@@ -672,13 +672,19 @@ pub fn apply_tray_policy(app: &tauri::AppHandle, dock_visible: bool) {
     } else {
         ActivationPolicy::Accessory
     };
-
-    if let Err(err) = app.set_dock_visibility(dock_visible) {
-        log::warn!("设置 Dock 显示状态失败: {err}");
-    }
+    let mut errors = Vec::new();
 
     if let Err(err) = app.set_activation_policy(desired_policy) {
-        log::warn!("设置激活策略失败: {err}");
+        errors.push(format!("failed to set activation policy: {err}"));
+    }
+    if let Err(err) = app.set_dock_visibility(dock_visible) {
+        errors.push(format!("failed to set Dock visibility: {err}"));
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
     }
 }
 
@@ -688,21 +694,9 @@ pub fn handle_tray_menu_event(app: &tauri::AppHandle, event_id: &str) {
 
     match event_id {
         "show_main" => {
-            if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = window.set_skip_taskbar(false);
-                }
-                let _ = window.unminimize();
-                let _ = window.show();
-                let _ = window.set_focus();
-                #[cfg(target_os = "linux")]
-                {
-                    crate::linux_fix::nudge_main_window(window.clone());
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    apply_tray_policy(app, true);
+            if app.get_webview_window("main").is_some() {
+                if let Err(e) = crate::present_main_window(app, "tray menu") {
+                    log::error!("Failed to present main window from tray: {e}");
                 }
             } else if crate::lightweight::is_lightweight_mode() {
                 if let Err(e) = crate::lightweight::exit_lightweight_mode(app) {
