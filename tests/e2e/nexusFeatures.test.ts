@@ -43,6 +43,17 @@ describe("Nexus Composer preset arrays", () => {
       expect(codexNames).not.toContain(name);
     }
   });
+
+  it("ships Nexus presets without hosted credentials", () => {
+    const claude = providerPresets.find((preset) => preset.name === "Nexus")!;
+    const codex = codexProviderPresets.find(
+      (preset) => preset.name === "Nexus",
+    )!;
+
+    expect((claude.settingsConfig as any).env.ANTHROPIC_AUTH_TOKEN).toBe("");
+    expect((codex.auth as any).OPENAI_API_KEY).toBe("");
+    expect(JSON.stringify({ claude, codex })).not.toContain("onenx_");
+  });
 });
 
 describe("Nexus GLM-5.2 Claude preset config", () => {
