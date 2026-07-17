@@ -303,7 +303,7 @@ pub fn extract_session_id(
     body: &serde_json::Value,
     client_format: &str,
 ) -> SessionIdResult {
-    if client_format == "claude" {
+    if client_format == "claude" || client_format == "claude-desktop" {
         if let Some(result) = extract_claude_session(headers, body) {
             return result;
         }
@@ -624,6 +624,25 @@ mod tests {
         let result = extract_session_id(&headers, &body, "claude");
 
         assert_eq!(result.session_id, "d937243f-2702-4f20-97b6-c9682235ab81");
+        assert_eq!(result.source, SessionIdSource::Header);
+        assert!(result.client_provided);
+    }
+
+    #[test]
+    fn test_extract_session_from_claude_desktop_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-claude-code-session-id",
+            "desktop-session-123".parse().unwrap(),
+        );
+        let body = json!({
+            "model": "claude-haiku-4-5",
+            "messages": [{"role": "user", "content": "Hello"}]
+        });
+
+        let result = extract_session_id(&headers, &body, "claude-desktop");
+
+        assert_eq!(result.session_id, "desktop-session-123");
         assert_eq!(result.source, SessionIdSource::Header);
         assert!(result.client_provided);
     }

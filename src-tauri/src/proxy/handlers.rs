@@ -2089,10 +2089,8 @@ fn log_forward_error(
     let logger = UsageLogger::new(&state.db);
     let status_code = map_proxy_error_to_status(error);
     let error_message = get_error_message(error);
-    let request_id = uuid::Uuid::new_v4().to_string();
-
     if let Err(e) = logger.log_error_with_context(
-        request_id,
+        ctx.request_id().to_string(),
         ctx.correlation_id(),
         ctx.provider.id.clone(),
         ctx.app_type_str.to_string(),
@@ -2173,12 +2171,132 @@ async fn log_usage(
 mod tests {
     use super::{
         body_looks_like_sse, body_snippet, chat_sse_to_response_value,
-        chat_sse_to_response_value_for_normalization, codex_proxy_error_json,
+        chat_sse_to_response_value_for_normalization, codex_proxy_error_json, log_forward_error,
         normalize_chat_fallback, normalize_chat_value, responses_sse_to_response_value,
         should_emit_anthropic_reasoning, should_use_claude_transform_streaming, transform,
         upstream_body_parse_error,
     };
-    use crate::proxy::ProxyError;
+    use crate::{
+        app_config::AppType,
+        database::Database,
+        provider::{Provider, ProviderMeta},
+        proxy::{
+            failover_switch::FailoverSwitchManager,
+            handler_context::RequestContext,
+            provider_router::ProviderRouter,
+            providers::{
+                codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
+            },
+            server::ProxyState,
+            types::{ProxyConfig, ProxyStatus},
+            ProxyError,
+        },
+        AppError,
+    };
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::RwLock;
+
+    fn build_state(db: Arc<Database>) -> ProxyState {
+        ProxyState {
+            db: db.clone(),
+            config: Arc::new(RwLock::new(ProxyConfig::default())),
+            status: Arc::new(RwLock::new(ProxyStatus::default())),
+            start_time: Arc::new(RwLock::new(None)),
+            current_providers: Arc::new(RwLock::new(HashMap::new())),
+            provider_router: Arc::new(ProviderRouter::new(db.clone())),
+            gemini_shadow: Arc::new(GeminiShadowStore::default()),
+            codex_chat_history: Arc::new(CodexChatHistoryStore::default()),
+            app_handle: None,
+            failover_manager: Arc::new(FailoverSwitchManager::new(db)),
+        }
+    }
+
+    #[tokio::test]
+    async fn forward_error_usage_uses_harness_request_id() -> Result<(), AppError> {
+        let db = Arc::new(Database::memory().expect("memory db"));
+        let mut provider = Provider::with_id(
+            "nexus-provider".to_string(),
+            "Nexus GLM-5.2".to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "http://127.0.0.1:9",
+                    "ANTHROPIC_AUTH_TOKEN": "dummy"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("nexus".to_string()),
+            ..ProviderMeta::default()
+        });
+        db.save_provider("claude-desktop", &provider)
+            .expect("save provider");
+        db.set_current_provider("claude-desktop", &provider.id)
+            .expect("set current provider");
+
+        let state = build_state(db.clone());
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5",
+            "stream": true,
+            "messages": []
+        });
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("x-request-id", "req-from-harness".parse().unwrap());
+        headers.insert(
+            "x-claude-code-session-id",
+            "session-from-harness".parse().unwrap(),
+        );
+
+        let ctx = RequestContext::new(
+            &state,
+            &body,
+            &headers,
+            AppType::ClaudeDesktop,
+            "Claude Desktop",
+            "claude-desktop",
+        )
+        .await
+        .expect("request context");
+
+        log_forward_error(
+            &state,
+            &ctx,
+            true,
+            &ProxyError::Timeout("provider did not respond".to_string()),
+        );
+
+        let conn = crate::database::lock_conn!(db.conn);
+        let (request_id, correlation_id, session_id, status_code, is_streaming): (
+            String,
+            Option<String>,
+            Option<String>,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT request_id, correlation_id, session_id, status_code, is_streaming
+                 FROM proxy_request_logs
+                 WHERE request_id = 'req-from-harness'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("failed forward usage row");
+
+        assert_eq!(request_id, "req-from-harness");
+        assert_eq!(correlation_id.as_deref(), Some("req-from-harness"));
+        assert_eq!(session_id.as_deref(), Some("session-from-harness"));
+        assert_eq!(status_code, 504);
+        assert_eq!(is_streaming, 1);
+        Ok(())
+    }
 
     #[test]
     fn anthropic_reasoning_visibility_honors_omitted_display() {

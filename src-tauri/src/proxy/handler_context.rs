@@ -269,6 +269,12 @@ impl RequestContext {
             .then(|| self.request_id.clone())
     }
 
+    /// Canonical request ID extracted from the harness request headers, or a
+    /// generated fallback when the client did not provide one.
+    pub(crate) fn request_id(&self) -> &str {
+        &self.request_id
+    }
+
     /// 计算请求延迟（毫秒）
     #[inline]
     pub fn latency_ms(&self) -> u64 {
