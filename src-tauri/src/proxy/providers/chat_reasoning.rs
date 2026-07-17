@@ -558,6 +558,54 @@ fn take_stream_tools(payload: &mut Map<String, Value>) -> Result<(bool, usize), 
     Ok((output, added))
 }
 
+fn safe_reasoning_only_chunk(chunk: &Value) -> Result<bool, ProtocolError> {
+    let Some(choice) = chunk
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+    else {
+        return Ok(false);
+    };
+    let terminal = optional_string(choice.get("finish_reason"))?
+        .as_deref()
+        .is_some_and(|reason| !reason.trim().is_empty());
+    if terminal {
+        return Ok(false);
+    }
+    let payload = if choice.get("delta").is_some_and(Value::is_object) {
+        choice.get("delta")
+    } else if choice.get("message").is_some_and(Value::is_object) {
+        choice.get("message")
+    } else {
+        None
+    }
+    .and_then(Value::as_object);
+    let Some(payload) = payload else {
+        return Ok(false);
+    };
+    let Some(reasoning) = extract_reasoning_field_text(&Value::Object(payload.clone())) else {
+        return Ok(false);
+    };
+    if payload
+        .get("content")
+        .is_some_and(|value| !matches!(value, Value::Null) && value.as_str() != Some(""))
+        || payload
+            .get("refusal")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty())
+        || payload
+            .get("tool_calls")
+            .is_some_and(|value| !matches!(value, Value::Null))
+        || payload
+            .get("function_call")
+            .is_some_and(|value| !matches!(value, Value::Null))
+        || has_trailing_partial_marker(&reasoning)
+    {
+        return Ok(false);
+    }
+    Ok(markers(&reasoning).is_ok_and(|found| found.is_empty()))
+}
+
 fn inspect_stream_chunk(chunk: &mut Value, state: &mut StreamState) -> Result<bool, ProtocolError> {
     let Some(choice) = chunk
         .get_mut("choices")
@@ -671,6 +719,10 @@ fn process_sse_block(block: &str, state: &mut StreamState) -> Result<SseBlock, P
     let mut chunk = serde_json::from_str(&data).map_err(|_| ProtocolError::Stream)?;
     if sanitize_error_field(&mut chunk) {
         return Ok(SseBlock::Error);
+    }
+    if safe_reasoning_only_chunk(&chunk)? {
+        state.seen = true;
+        return Ok(SseBlock::Data(chunk, false));
     }
     state.record(block)?;
     let terminal = inspect_stream_chunk(&mut chunk, state)?;
@@ -1185,6 +1237,38 @@ mod tests {
         assert!(legacy.contains(r#""name":"read""#), "{legacy}");
         assert!(legacy.contains(r#""arguments":"{}""#), "{legacy}");
         assert!(!legacy.contains("tool_calls"), "{legacy}");
+    }
+
+    #[test]
+    fn pure_reasoning_deltas_do_not_consume_boundary_buffer() {
+        let mut state = StreamState::new(3);
+        let block = format!(
+            "data: {}\n\n",
+            json!({"choices": [{"delta": {"reasoning_content": "abcd"}}]})
+        );
+
+        let parsed = process_sse_block(&block, &mut state).unwrap();
+
+        assert!(matches!(parsed, SseBlock::Data(_, false)));
+        assert_eq!(state.len, 0);
+        assert!(state.source.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_forwards_safe_reasoning_deltas_before_terminal_chunk() {
+        let output = normalized_stream(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"abcd\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            ),
+            true,
+        )
+        .await;
+
+        assert!(output.contains(r#""reasoning_content":"abcd""#), "{output}");
+        assert!(output.contains(r#""finish_reason":"stop""#), "{output}");
+        assert!(!output.contains("event: error"), "{output}");
     }
 
     #[tokio::test]
