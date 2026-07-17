@@ -503,7 +503,7 @@ impl Default for AppSettings {
             usage_confirmed: None,
             stream_check_confirmed: None,
             enable_failover_toggle: false,
-            preserve_codex_official_auth_on_switch: false,
+            preserve_codex_official_auth_on_switch: true,
             unify_codex_session_history: false,
             unify_codex_migrate_existing: None,
             failover_confirmed: None,

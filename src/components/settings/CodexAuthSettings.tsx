@@ -99,7 +99,7 @@ export function CodexAuthSettings({
         icon={<KeyRound className="h-4 w-4 text-emerald-500" />}
         title={t("settings.preserveCodexOfficialAuthOnSwitch")}
         description={t("settings.preserveCodexOfficialAuthOnSwitchDescription")}
-        checked={settings.preserveCodexOfficialAuthOnSwitch ?? false}
+        checked={settings.preserveCodexOfficialAuthOnSwitch ?? true}
         onCheckedChange={(value) =>
           onChange({ preserveCodexOfficialAuthOnSwitch: value })
         }
