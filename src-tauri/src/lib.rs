@@ -600,6 +600,38 @@ pub fn run() {
                 Err(e) => log::warn!("✗ Failed to seed official providers: {e}"),
             }
 
+            for app_type in [app_config::AppType::Claude, app_config::AppType::Codex] {
+                let current_id = services::provider::ProviderService::current(
+                    &app_state,
+                    app_type.clone(),
+                )
+                .ok()
+                .filter(|id| !id.is_empty());
+                match app_state
+                    .db
+                    .migrate_managed_nexus_for_app(&app_type, current_id.as_deref())
+                {
+                    Ok(true) => {
+                        if let Err(error) =
+                            services::provider::ProviderService::sync_current_provider_for_app(
+                                &app_state,
+                                app_type.clone(),
+                            )
+                        {
+                            log::warn!(
+                                "Failed to apply updated {} Nexus provider: {error}",
+                                app_type.as_str()
+                            );
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => log::warn!(
+                        "Skipped {} Nexus provider migration: {error}",
+                        app_type.as_str()
+                    ),
+                }
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {
