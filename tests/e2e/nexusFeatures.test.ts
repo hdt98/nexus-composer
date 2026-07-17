@@ -2,9 +2,9 @@
  * Nexus Composer E2E feature tests.
  *
  * These tests verify the actual Nexus Composer customizations:
- * - Preset arrays contain only Nexus GLM-5.2 + Official
+ * - Claude Code and Codex contain only Nexus GLM-5.2 + Official
+ * - Claude Desktop preserves its existing catalog and adds Nexus GLM-5.2
  * - Nexus GLM-5.2 preset config is correct (endpoint, model, format)
- * - Sponsor filter works (no sponsors visible even if added later)
  * - Claude Official has empty env (resets to native API)
  */
 import { describe, expect, it } from "vitest";
@@ -39,6 +39,7 @@ describe("Nexus Composer preset arrays", () => {
 
   it("adds Nexus without replacing the Claude Desktop preset catalog", () => {
     const names = claudeDesktopProviderPresets.map((preset) => preset.name);
+    expect(names).toHaveLength(68);
     expect(names).toContain("Nexus GLM-5.2");
     expect(names).toContain("Claude Desktop Official");
     expect(names).toContain("Shengsuanyun");

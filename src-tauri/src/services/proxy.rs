@@ -11,7 +11,7 @@ use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
-    build_effective_settings_with_common_config, write_live_with_common_config, ProviderService,
+    build_effective_settings_with_common_config, write_live_with_common_config,
 };
 use crate::store::AppState;
 use serde_json::{json, Map, Value};
@@ -67,22 +67,34 @@ pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
 }
 
-pub(crate) fn sync_current_claude_desktop_proxy_profile(state: &AppState) -> Result<(), AppError> {
+fn current_claude_desktop_proxy_provider(db: &Database) -> Result<Option<Provider>, AppError> {
     let app = AppType::ClaudeDesktop;
-    let Some(current_id) = crate::settings::get_effective_current_provider(&state.db, &app)? else {
-        return Ok(());
+    let Some(current_id) = crate::settings::get_effective_current_provider(db, &app)? else {
+        return Ok(None);
     };
-    let Some(provider) = state.db.get_provider_by_id(&current_id, app.as_str())? else {
-        return Ok(());
+    let Some(provider) = db.get_provider_by_id(&current_id, app.as_str())? else {
+        return Ok(None);
     };
     if !matches!(
         crate::claude_desktop_config::provider_mode(&provider),
         ClaudeDesktopMode::Proxy
     ) {
-        return Ok(());
+        return Ok(None);
     }
 
-    ProviderService::sync_current_provider_for_app(state, app)
+    Ok(Some(provider))
+}
+
+fn current_claude_desktop_uses_proxy(db: &Database) -> Result<bool, AppError> {
+    Ok(current_claude_desktop_proxy_provider(db)?.is_some())
+}
+
+pub(crate) fn sync_current_claude_desktop_proxy_profile(state: &AppState) -> Result<(), AppError> {
+    let Some(provider) = current_claude_desktop_proxy_provider(state.db.as_ref())? else {
+        return Ok(());
+    };
+
+    write_live_with_common_config(state.db.as_ref(), &AppType::ClaudeDesktop, &provider)
 }
 
 impl ProxyService {
@@ -805,8 +817,15 @@ impl ProxyService {
         if !any_enabled {
             let _ = self.db.set_live_takeover_active(false).await;
 
-            if self.is_running().await {
-                // 此时没有任何 app 处于接管状态，停止服务即可
+            let desktop_uses_proxy = current_claude_desktop_uses_proxy(self.db.as_ref())
+                .unwrap_or_else(|error| {
+                    log::warn!(
+                        "Failed to inspect the Claude Desktop route; keeping the proxy listener: {error}"
+                    );
+                    true
+                });
+            if !desktop_uses_proxy && self.is_running().await {
+                // 此时没有任何 app 处于接管状态，也没有 Claude Desktop 使用本地路由。
                 let _ = self.stop().await;
             }
         }
@@ -2925,21 +2944,7 @@ mod tests {
             .expect("select local Desktop provider");
     }
 
-    #[tokio::test]
-    #[serial]
-    async fn manual_start_resolves_desktop_profile_and_startup_restores_it() {
-        let _home = TempHome::new();
-        crate::settings::reload_settings().expect("reload settings");
-
-        let db = Arc::new(Database::memory().expect("init db"));
-        let state = crate::store::AppState::new(db.clone());
-        use_ephemeral_proxy_port(&db).await;
-        let global = db
-            .get_global_proxy_config()
-            .await
-            .expect("get global proxy config");
-        assert!(!global.proxy_enabled);
-
+    fn select_desktop_proxy_provider(db: &Arc<Database>) {
         let mut provider = Provider::with_id(
             "desktop".to_string(),
             "Nexus GLM-5.2".to_string(),
@@ -2970,6 +2975,45 @@ mod tests {
             .expect("select Desktop provider");
         crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some(&provider.id))
             .expect("select local Desktop provider");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn manual_start_isolated_from_mcp_sync_and_restores_desktop_profile() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        use_ephemeral_proxy_port(&db).await;
+        let global = db
+            .get_global_proxy_config()
+            .await
+            .expect("get global proxy config");
+        assert!(!global.proxy_enabled);
+
+        select_desktop_proxy_provider(&db);
+
+        std::fs::write(crate::config::get_default_claude_mcp_path(), "{invalid")
+            .expect("seed unrelated invalid MCP config");
+        db.save_mcp_server(&crate::app_config::McpServer {
+            id: "unrelated".to_string(),
+            name: "Unrelated MCP".to_string(),
+            server: json!({"command": "true"}),
+            apps: crate::app_config::McpApps {
+                claude: true,
+                ..Default::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        })
+        .expect("save MCP fixture");
+        assert!(
+            crate::services::mcp::McpService::sync_all_enabled(&state).is_err(),
+            "fixture must prove unrelated MCP synchronization is failing"
+        );
 
         crate::services::provider::ProviderService::sync_current_provider_for_app(
             &state,
@@ -4070,7 +4114,8 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let state = crate::store::AppState::new(db.clone());
+        let service = state.proxy_service.clone();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -4115,6 +4160,10 @@ wire_api = "responses"
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("deepseek"))
             .expect("set local current provider");
+        select_desktop_proxy_provider(&db);
+        crate::commands::start_proxy_server_inner(&state)
+            .await
+            .expect("start listener and apply Desktop profile");
 
         service
             .set_takeover_for_app("codex", true)
@@ -4133,6 +4182,27 @@ wire_api = "responses"
             .set_takeover_for_app("codex", false)
             .await
             .expect("disable Codex takeover");
+        assert!(
+            service.is_running().await,
+            "disabling the final takeover must keep the listener used by Claude Desktop"
+        );
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("read mixed-use proxy state")
+                .proxy_enabled,
+            "the listener's persisted enabled state must remain true"
+        );
+        let desktop_status = crate::claude_desktop_config::get_status(&db, true)
+            .expect("read mixed-use Desktop status");
+        assert_eq!(
+            desktop_status.actual_base_url, desktop_status.expected_base_url,
+            "the active Desktop profile must still target the running listener"
+        );
+        service
+            .stop_server()
+            .await
+            .expect("stop mixed-use test listener");
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
     }
