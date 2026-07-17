@@ -1,10 +1,13 @@
 import { useTranslation } from "react-i18next";
+import { Copy, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
+import { copyText } from "@/lib/clipboard";
 import { useRequestDetail } from "@/lib/query/usage";
 import { getFreshInputTokens, isUnpricedUsage } from "@/types/usage";
 
@@ -13,19 +16,39 @@ interface RequestDetailPanelProps {
   onClose: () => void;
 }
 
+function RequestDetailCloseButton({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation();
+
+  return (
+    <Button
+      type="button"
+      variant="ghost"
+      size="icon"
+      className="absolute right-4 top-4"
+      aria-label={t("common.close")}
+      onClick={onClose}
+    >
+      <X className="size-4" />
+    </Button>
+  );
+}
+
 export function RequestDetailPanel({
   requestId,
   onClose,
 }: RequestDetailPanelProps) {
   const { t, i18n } = useTranslation();
   const { data: request, isLoading } = useRequestDetail(requestId);
-  const dateLocale =
-    i18n.language === "vi" ? "vi-VN" : "en-US";
+  const dateLocale = i18n.language === "vi" ? "vi-VN" : "en-US";
+  const handleOpenChange = (open: boolean) => {
+    if (!open) onClose();
+  };
 
   if (isLoading) {
     return (
-      <Dialog open onOpenChange={onClose}>
+      <Dialog open onOpenChange={handleOpenChange}>
         <DialogContent className="max-w-2xl">
+          <RequestDetailCloseButton onClose={onClose} />
           <div className="h-[400px] animate-pulse rounded bg-gray-100" />
         </DialogContent>
       </Dialog>
@@ -34,13 +57,14 @@ export function RequestDetailPanel({
 
   if (!request) {
     return (
-      <Dialog open onOpenChange={onClose}>
+      <Dialog open onOpenChange={handleOpenChange}>
         <DialogContent className="max-w-2xl">
+          <RequestDetailCloseButton onClose={onClose} />
           <DialogHeader>
-            <DialogTitle>{t("usage.requestDetail", "请求详情")}</DialogTitle>
+            <DialogTitle>{t("usage.requestDetail")}</DialogTitle>
           </DialogHeader>
           <div className="text-center text-muted-foreground">
-            {t("usage.requestNotFound", "请求未找到")}
+            {t("usage.requestNotFound")}
           </div>
         </DialogContent>
       </Dialog>
@@ -50,31 +74,49 @@ export function RequestDetailPanel({
   const freshInput = getFreshInputTokens(request);
   const isCacheInclusive = request.inputTokens !== freshInput;
   const unpriced = isUnpricedUsage(request);
+  const correlationId = request.correlationId;
 
   return (
-    <Dialog open onOpenChange={onClose}>
+    <Dialog open onOpenChange={handleOpenChange}>
       <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
+        <RequestDetailCloseButton onClose={onClose} />
         <DialogHeader>
-          <DialogTitle>{t("usage.requestDetail", "请求详情")}</DialogTitle>
+          <DialogTitle>{t("usage.requestDetail")}</DialogTitle>
         </DialogHeader>
 
         <div className="space-y-4">
-          {/* 基本信息 */}
+          {/* Basic information */}
           <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.basicInfo", "基本信息")}
-            </h3>
+            <h3 className="mb-3 font-semibold">{t("usage.basicInfo")}</h3>
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.requestId", "请求ID")}
+                  {t("usage.requestId")}
                 </dt>
                 <dd className="font-mono">{request.requestId}</dd>
               </div>
+              {correlationId && (
+                <div>
+                  <dt className="text-muted-foreground">
+                    {t("usage.correlationId")}
+                  </dt>
+                  <dd className="flex items-center gap-1 font-mono">
+                    <span className="min-w-0 break-all">{correlationId}</span>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="size-7 shrink-0"
+                      aria-label={t("usage.copyCorrelationId")}
+                      onClick={() => void copyText(correlationId)}
+                    >
+                      <Copy className="size-3.5" />
+                    </Button>
+                  </dd>
+                </div>
+              )}
               <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.time", "时间")}
-                </dt>
+                <dt className="text-muted-foreground">{t("usage.time")}</dt>
                 <dd>
                   {new Date(request.createdAt * 1000).toLocaleString(
                     dateLocale,
@@ -82,12 +124,10 @@ export function RequestDetailPanel({
                 </dd>
               </div>
               <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.provider", "供应商")}
-                </dt>
+                <dt className="text-muted-foreground">{t("usage.provider")}</dt>
                 <dd className="text-sm">
                   <span className="font-medium">
-                    {request.providerName || t("usage.unknownProvider", "未知")}
+                    {request.providerName || t("usage.unknownProvider")}
                   </span>
                   <span className="ml-2 font-mono text-xs text-muted-foreground">
                     {request.providerId}
@@ -95,21 +135,17 @@ export function RequestDetailPanel({
                 </dd>
               </div>
               <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.appType", "应用类型")}
-                </dt>
+                <dt className="text-muted-foreground">{t("usage.appType")}</dt>
                 <dd>{request.appType}</dd>
               </div>
               <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.model", "模型")}
-                </dt>
+                <dt className="text-muted-foreground">{t("usage.model")}</dt>
                 <dd className="font-mono">{request.model}</dd>
                 {request.requestModel &&
                   request.requestModel !== request.model && (
                     <>
                       <dt className="mt-1 text-muted-foreground">
-                        {t("usage.requestModel", "请求模型")}
+                        {t("usage.requestModel")}
                       </dt>
                       <dd className="font-mono text-xs">
                         {request.requestModel}
@@ -120,7 +156,7 @@ export function RequestDetailPanel({
                   request.pricingModel !== request.model && (
                     <>
                       <dt className="mt-1 text-muted-foreground">
-                        {t("usage.pricingModel", "计价模型")}
+                        {t("usage.pricingModel")}
                       </dt>
                       <dd className="font-mono text-xs">
                         {request.pricingModel}
@@ -129,9 +165,7 @@ export function RequestDetailPanel({
                   )}
               </div>
               <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.status", "状态")}
-                </dt>
+                <dt className="text-muted-foreground">{t("usage.status")}</dt>
                 <dd>
                   <span
                     className={`inline-flex rounded-full px-2 py-1 text-xs ${
@@ -147,21 +181,19 @@ export function RequestDetailPanel({
             </dl>
           </div>
 
-          {/* Token 使用量 */}
+          {/* Token usage */}
           <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.tokenUsage", "Token 使用量")}
-            </h3>
+            <h3 className="mb-3 font-semibold">{t("usage.tokenUsage")}</h3>
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.inputTokens", "输入 Tokens")}
+                  {t("usage.inputTokens")}
                 </dt>
                 <dd className="font-mono">
                   {freshInput.toLocaleString()}
                   {isCacheInclusive && (
                     <span className="ml-2 text-xs text-muted-foreground/70 font-normal">
-                      ({t("usage.rawInputLabel", "原始")}:{" "}
+                      ({t("usage.rawInputLabel")}:{" "}
                       {request.inputTokens.toLocaleString()})
                     </span>
                   )}
@@ -169,7 +201,7 @@ export function RequestDetailPanel({
               </div>
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.outputTokens", "输出 Tokens")}
+                  {t("usage.outputTokens")}
                 </dt>
                 <dd className="font-mono">
                   {request.outputTokens.toLocaleString()}
@@ -177,7 +209,7 @@ export function RequestDetailPanel({
               </div>
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.cacheReadTokens", "缓存读取")}
+                  {t("usage.cacheReadTokens")}
                 </dt>
                 <dd className="font-mono">
                   {request.cacheReadTokens.toLocaleString()}
@@ -185,7 +217,7 @@ export function RequestDetailPanel({
               </div>
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.cacheCreationTokens", "缓存写入")}
+                  {t("usage.cacheCreationTokens")}
                 </dt>
                 <dd className="font-mono">
                   {request.cacheCreationTokens.toLocaleString()}
@@ -193,7 +225,7 @@ export function RequestDetailPanel({
               </div>
               <div className="col-span-2">
                 <dt className="text-muted-foreground">
-                  {t("usage.totalTokens", "总计")}
+                  {t("usage.totalTokens")}
                 </dt>
                 <dd className="text-lg font-semibold">
                   {(freshInput + request.outputTokens).toLocaleString()}
@@ -202,18 +234,14 @@ export function RequestDetailPanel({
             </dl>
           </div>
 
-          {/* 成本明细 */}
+          {/* Cost breakdown */}
           <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.costBreakdown", "成本明细")}
-            </h3>
+            <h3 className="mb-3 font-semibold">{t("usage.costBreakdown")}</h3>
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.inputCost", "输入成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
+                  {t("usage.inputCost")}
+                  <span className="ml-1 text-xs">({t("usage.baseCost")})</span>
                 </dt>
                 <dd className="font-mono">
                   ${parseFloat(request.inputCostUsd).toFixed(6)}
@@ -221,10 +249,8 @@ export function RequestDetailPanel({
               </div>
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.outputCost", "输出成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
+                  {t("usage.outputCost")}
+                  <span className="ml-1 text-xs">({t("usage.baseCost")})</span>
                 </dt>
                 <dd className="font-mono">
                   ${parseFloat(request.outputCostUsd).toFixed(6)}
@@ -232,10 +258,8 @@ export function RequestDetailPanel({
               </div>
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.cacheReadCost", "缓存读取成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
+                  {t("usage.cacheReadCost")}
+                  <span className="ml-1 text-xs">({t("usage.baseCost")})</span>
                 </dt>
                 <dd className="font-mono">
                   ${parseFloat(request.cacheReadCostUsd).toFixed(6)}
@@ -243,21 +267,19 @@ export function RequestDetailPanel({
               </div>
               <div>
                 <dt className="text-muted-foreground">
-                  {t("usage.cacheCreationCost", "缓存写入成本")}
-                  <span className="ml-1 text-xs">
-                    ({t("usage.baseCost", "基础")})
-                  </span>
+                  {t("usage.cacheCreationCost")}
+                  <span className="ml-1 text-xs">({t("usage.baseCost")})</span>
                 </dt>
                 <dd className="font-mono">
                   ${parseFloat(request.cacheCreationCostUsd).toFixed(6)}
                 </dd>
               </div>
-              {/* 显示成本倍率（如果不等于1） */}
+              {/* Show a non-default cost multiplier. */}
               {request.costMultiplier &&
                 parseFloat(request.costMultiplier) !== 1 && (
                   <div className="col-span-2 border-t pt-3">
                     <dt className="text-muted-foreground">
-                      {t("usage.costMultiplier", "成本倍率")}
+                      {t("usage.costMultiplier")}
                     </dt>
                     <dd className="font-mono">×{request.costMultiplier}</dd>
                   </div>
@@ -266,11 +288,11 @@ export function RequestDetailPanel({
                 className={`col-span-2 ${request.costMultiplier && parseFloat(request.costMultiplier) !== 1 ? "" : "border-t"} pt-3`}
               >
                 <dt className="text-muted-foreground">
-                  {t("usage.totalCost", "总成本")}
+                  {t("usage.totalCost")}
                   {request.costMultiplier &&
                     parseFloat(request.costMultiplier) !== 1 && (
                       <span className="ml-1 text-xs">
-                        ({t("usage.withMultiplier", "含倍率")})
+                        ({t("usage.withMultiplier")})
                       </span>
                     )}
                 </dt>
@@ -280,33 +302,29 @@ export function RequestDetailPanel({
                   }`}
                 >
                   {unpriced
-                    ? t("usage.unpriced", "未定价")
+                    ? t("usage.unpriced")
                     : `$${parseFloat(request.totalCostUsd).toFixed(6)}`}
                 </dd>
               </div>
             </dl>
           </div>
 
-          {/* 性能信息 */}
+          {/* Performance */}
           <div className="rounded-lg border p-4">
-            <h3 className="mb-3 font-semibold">
-              {t("usage.performance", "性能信息")}
-            </h3>
+            <h3 className="mb-3 font-semibold">{t("usage.performance")}</h3>
             <dl className="grid grid-cols-2 gap-3 text-sm">
               <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.latency", "延迟")}
-                </dt>
+                <dt className="text-muted-foreground">{t("usage.latency")}</dt>
                 <dd className="font-mono">{request.latencyMs}ms</dd>
               </div>
             </dl>
           </div>
 
-          {/* 错误信息 */}
+          {/* Error information */}
           {request.errorMessage && (
             <div className="rounded-lg border border-red-200 bg-red-50 p-4">
               <h3 className="mb-2 font-semibold text-red-800">
-                {t("usage.errorMessage", "错误信息")}
+                {t("usage.errorMessage")}
               </h3>
               <p className="text-sm text-red-700">{request.errorMessage}</p>
             </div>

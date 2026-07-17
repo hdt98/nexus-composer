@@ -9,6 +9,8 @@ export interface TokenUsage {
 
 export interface RequestLog {
   requestId: string;
+  /** Stable request ID sent to the upstream model server. */
+  correlationId?: string;
   providerId: string;
   providerName?: string;
   appType: string;

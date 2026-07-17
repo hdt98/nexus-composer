@@ -101,6 +101,18 @@ impl Provider {
             .unwrap_or(false)
     }
 
+    /// Whether Nexus may replace correlation headers with its canonical request IDs.
+    ///
+    /// Correlation is an explicit Nexus provider capability. A protocol such as
+    /// OpenAI Chat is not sufficient because unrelated providers use it too.
+    pub(crate) fn uses_server_request_correlation(&self) -> bool {
+        !self.uses_managed_account_auth()
+            && self
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.provider_type.as_deref() == Some("nexus"))
+    }
+
     pub fn has_usage_script_enabled(&self) -> bool {
         self.meta
             .as_ref()

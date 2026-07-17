@@ -12,6 +12,7 @@ use std::str::FromStr;
 #[derive(Debug, Clone)]
 pub struct RequestLog {
     pub request_id: String,
+    pub correlation_id: Option<String>,
     pub provider_id: String,
     pub app_type: String,
     pub model: String,
@@ -73,14 +74,15 @@ impl<'a> UsageLogger<'a> {
 
         conn.execute(
             "INSERT OR REPLACE INTO proxy_request_logs (
-                request_id, provider_id, app_type, model, request_model, pricing_model,
+                request_id, correlation_id, provider_id, app_type, model, request_model, pricing_model,
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                 latency_ms, first_token_ms, status_code, error_message, session_id,
                 provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
             rusqlite::params![
                 log.request_id,
+                log.correlation_id,
                 log.provider_id,
                 log.app_type,
                 log.model,
@@ -131,6 +133,7 @@ impl<'a> UsageLogger<'a> {
         let request_model = model.clone();
         let log = RequestLog {
             request_id,
+            correlation_id: None,
             provider_id,
             app_type,
             model,
@@ -159,6 +162,7 @@ impl<'a> UsageLogger<'a> {
     pub fn log_error_with_context(
         &self,
         request_id: String,
+        correlation_id: Option<String>,
         provider_id: String,
         app_type: String,
         model: String,
@@ -172,6 +176,7 @@ impl<'a> UsageLogger<'a> {
         let request_model = model.clone();
         let log = RequestLog {
             request_id,
+            correlation_id,
             provider_id,
             app_type,
             model,
@@ -307,6 +312,7 @@ impl<'a> UsageLogger<'a> {
     pub fn log_with_calculation(
         &self,
         request_id: String,
+        correlation_id: Option<String>,
         provider_id: String,
         app_type: String,
         model: String,
@@ -341,6 +347,7 @@ impl<'a> UsageLogger<'a> {
 
         let log = RequestLog {
             request_id,
+            correlation_id,
             provider_id,
             app_type,
             model,
@@ -394,6 +401,7 @@ mod tests {
 
         logger.log_with_calculation(
             "req-123".to_string(),
+            Some("server-request-id".to_string()),
             "provider-1".to_string(),
             "claude".to_string(),
             "test-model".to_string(),
@@ -411,15 +419,17 @@ mod tests {
 
         // 验证记录已插入
         let conn = crate::database::lock_conn!(db.conn);
-        let (count, request_model): (i64, String) = conn
+        let (count, request_model, correlation_id): (i64, String, Option<String>) = conn
             .query_row(
-                "SELECT COUNT(*), request_model FROM proxy_request_logs WHERE request_id = 'req-123'",
+                "SELECT COUNT(*), request_model, correlation_id
+                 FROM proxy_request_logs WHERE request_id = 'req-123'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(request_model, "req-model");
+        assert_eq!(correlation_id.as_deref(), Some("server-request-id"));
         Ok(())
     }
 

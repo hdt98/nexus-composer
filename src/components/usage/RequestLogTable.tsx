@@ -32,6 +32,7 @@ import {
   getLocaleFromLanguage,
   parseFiniteNumber,
 } from "./format";
+import { RequestDetailPanel } from "./RequestDetailPanel";
 
 interface RequestLogTableProps {
   range: UsageRangeSelection;
@@ -54,11 +55,12 @@ export function RequestLogTable({
 }: RequestLogTableProps) {
   const { t, i18n } = useTranslation();
 
-  // 应用/Provider/模型筛选已上移到 Dashboard 顶栏（全局生效）；
-  // 这里只保留日志特有的状态码筛选。
+  // App, provider, and model filters live in the dashboard header.
+  // Only the log-specific status filter remains here.
   const [statusCode, setStatusCode] = useState<number | undefined>(undefined);
   const [page, setPage] = useState(0);
   const [pageInput, setPageInput] = useState("");
+  const [selectedRequestId, setSelectedRequestId] = useState<string>();
   const pageSize = 20;
 
   const effectiveFilters: LogFilters = {
@@ -197,7 +199,21 @@ export function RequestLogTable({
                   logs.map((log) => {
                     const unpriced = isUnpricedUsage(log);
                     return (
-                      <TableRow key={log.requestId}>
+                      <TableRow
+                        key={log.requestId}
+                        className="cursor-pointer"
+                        tabIndex={0}
+                        aria-label={t("usage.viewRequestDetail", {
+                          defaultValue: "View request details",
+                        })}
+                        onClick={() => setSelectedRequestId(log.requestId)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            event.preventDefault();
+                            setSelectedRequestId(log.requestId);
+                          }
+                        }}
+                      >
                         <TableCell className="text-center whitespace-nowrap text-xs px-1.5">
                           {new Date(log.createdAt * 1000).toLocaleString(
                             locale,
@@ -277,7 +293,7 @@ export function RequestLogTable({
                             }`}
                           >
                             {unpriced
-                              ? t("usage.unpriced", "未定价")
+                              ? t("usage.unpriced")
                               : fmtUsd(log.totalCostUsd, 4)}
                           </div>
                           {parseFiniteNumber(log.costMultiplier) != null &&
@@ -398,6 +414,12 @@ export function RequestLogTable({
             </div>
           </div>
         </>
+      )}
+      {selectedRequestId && (
+        <RequestDetailPanel
+          requestId={selectedRequestId}
+          onClose={() => setSelectedRequestId(undefined)}
+        />
       )}
     </div>
   );

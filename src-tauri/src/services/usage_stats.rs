@@ -123,6 +123,8 @@ pub struct PaginatedLogs {
 #[serde(rename_all = "camelCase")]
 pub struct RequestLogDetail {
     pub request_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
     pub provider_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_name: Option<String>,
@@ -154,15 +156,15 @@ pub struct RequestLogDetail {
     pub pricing_model: Option<String>,
 }
 
-/// 把 25 列的查询结果映射为 `RequestLogDetail`。
+/// 把 26 列的查询结果映射为 `RequestLogDetail`。
 ///
-/// 调用方的 SELECT **必须**按以下顺序返回 25 列：
+/// 调用方的 SELECT **必须**按以下顺序返回 26 列：
 /// `request_id, provider_id, provider_name, app_type, model, request_model,
 ///  cost_multiplier, input_tokens, output_tokens, cache_read_tokens,
 ///  cache_creation_tokens, input_cost_usd, output_cost_usd, cache_read_cost_usd,
 ///  cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
 ///  first_token_ms, duration_ms, status_code, error_message, created_at,
-///  data_source, pricing_model`
+///  data_source, pricing_model, correlation_id`
 ///
 /// 不需要 provider_name 时（如 backfill）SELECT `NULL AS provider_name` 占位即可。
 fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestLogDetail> {
@@ -194,6 +196,7 @@ fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<Reques
         created_at: row.get(22)?,
         data_source: row.get(23)?,
         pricing_model: row.get(24)?,
+        correlation_id: row.get(25)?,
     })
 }
 
@@ -1526,7 +1529,8 @@ impl Database {
                     l.input_tokens, l.output_tokens, l.cache_read_tokens, l.cache_creation_tokens,
                     l.input_cost_usd, l.output_cost_usd, l.cache_read_cost_usd, l.cache_creation_cost_usd, l.total_cost_usd,
                     l.is_streaming, l.latency_ms, l.first_token_ms, l.duration_ms,
-                    l.status_code, l.error_message, l.created_at, l.data_source, l.pricing_model
+                    l.status_code, l.error_message, l.created_at, l.data_source, l.pricing_model,
+                    l.correlation_id
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              {where_clause}
@@ -1569,7 +1573,8 @@ impl Database {
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                     input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
                     is_streaming, latency_ms, first_token_ms, duration_ms,
-                    status_code, error_message, created_at, l.data_source, l.pricing_model
+                    status_code, error_message, l.created_at, l.data_source, l.pricing_model,
+                    l.correlation_id
              FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
              WHERE l.request_id = ?"
@@ -1725,7 +1730,7 @@ impl Database {
                         input_cost_usd, output_cost_usd, cache_read_cost_usd,
                         cache_creation_cost_usd, total_cost_usd, is_streaming, latency_ms,
                         first_token_ms, duration_ms, status_code, error_message, created_at,
-                        data_source, pricing_model
+                        data_source, pricing_model, correlation_id
              FROM proxy_request_logs
              WHERE CAST(total_cost_usd AS REAL) <= 0
                AND (input_tokens > 0 OR output_tokens > 0
@@ -2314,6 +2319,46 @@ mod tests {
                 data_source
             ],
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn request_log_queries_return_correlation_id() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "response-id",
+                "codex",
+                "provider-1",
+                "glm-5.2",
+                "proxy",
+                1_710_000_000,
+                10,
+                2,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+            conn.execute(
+                "UPDATE proxy_request_logs SET correlation_id = 'server-request-id'
+                 WHERE request_id = 'response-id'",
+                [],
+            )?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.data[0].request_id, "response-id");
+        assert_eq!(
+            logs.data[0].correlation_id.as_deref(),
+            Some("server-request-id")
+        );
+        let detail = db
+            .get_request_detail("response-id")?
+            .expect("request detail");
+        assert_eq!(detail.correlation_id.as_deref(), Some("server-request-id"));
         Ok(())
     }
 

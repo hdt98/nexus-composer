@@ -489,6 +489,7 @@ fn create_usage_collector(
     let stream_parser = parser_config.stream_parser;
     let model_extractor = parser_config.model_extractor;
     let session_id = ctx.session_id.clone();
+    let correlation_id = ctx.correlation_id();
 
     Some(SseUsageCollector::new(
         start_time,
@@ -503,10 +504,12 @@ fn create_usage_collector(
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let correlation_id = correlation_id.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
                         &state,
+                        correlation_id,
                         &provider_id,
                         app_type_str,
                         &model,
@@ -529,10 +532,12 @@ fn create_usage_collector(
                 let session_id = session_id.clone();
                 let request_model = request_model.clone();
                 let outbound_model = fallback_model.clone();
+                let correlation_id = correlation_id.clone();
 
                 tokio::spawn(async move {
                     log_usage_internal(
                         &state,
+                        correlation_id,
                         &provider_id,
                         app_type_str,
                         &model,
@@ -582,10 +587,12 @@ fn spawn_log_usage(
         .unwrap_or_else(|| ctx.request_model.clone());
     let latency_ms = ctx.latency_ms();
     let session_id = ctx.session_id.clone();
+    let correlation_id = ctx.correlation_id();
 
     tokio::spawn(async move {
         log_usage_internal(
             &state,
+            correlation_id,
             &provider_id,
             &app_type_str,
             &model,
@@ -619,6 +626,7 @@ pub(crate) fn usage_logging_enabled(state: &ProxyState) -> bool {
 #[allow(clippy::too_many_arguments)]
 async fn log_usage_internal(
     state: &ProxyState,
+    correlation_id: Option<String>,
     provider_id: &str,
     app_type: &str,
     model: &str,
@@ -655,6 +663,7 @@ async fn log_usage_internal(
 
     if let Err(e) = logger.log_with_calculation(
         request_id,
+        correlation_id,
         provider_id.to_string(),
         app_type.to_string(),
         model.to_string(),
@@ -1010,6 +1019,7 @@ mod tests {
 
         log_usage_internal(
             &state,
+            None,
             "provider-1",
             app_type,
             "resp-model",
@@ -1080,6 +1090,7 @@ mod tests {
         // （$4/M），上游回显 resp-model。「按请求计价」必须锚定实际发出的模型。
         log_usage_internal(
             &state,
+            None,
             "provider-3",
             app_type,
             "resp-model",
@@ -1160,6 +1171,7 @@ mod tests {
 
         log_usage_internal(
             &state,
+            None,
             "provider-2",
             app_type,
             "resp-model",
