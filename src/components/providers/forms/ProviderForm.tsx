@@ -23,6 +23,7 @@ import type {
   CodexCatalogModel,
   CodexChatReasoning,
   ClaudeApiKeyField,
+  LocalProxyRequestOverrides,
 } from "@/types";
 import {
   providerPresets,
@@ -60,6 +61,7 @@ import {
 } from "@/utils/providerConfigUtils";
 import { mergeProviderMeta } from "@/utils/providerMetaUtils";
 import {
+  extractCodexModelName,
   extractCodexWireApi,
   setCodexWireApi,
   setCodexModelName as setCodexModelNameInConfig,
@@ -117,6 +119,11 @@ import {
 } from "./helpers/opencodeFormUtils";
 import { HERMES_DEFAULT_CONFIG } from "./hooks/useHermesFormState";
 import { resolveManagedAccountId } from "@/lib/authBinding";
+import {
+  NEXUS_CLAUDE_MODEL,
+  NEXUS_ENDPOINT,
+  NEXUS_MODEL,
+} from "@/config/nexus";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
 
@@ -659,7 +666,11 @@ function ProviderFormFull({
   const isSponsorPreset = (preset: any): boolean => {
     if (preset.isOfficial || preset.category === "official") return false;
     if (preset.name === "Nexus GLM-5.2") return false;
-    return !!(preset.isPartner || preset.primePartner || preset.partnerPromotionKey);
+    return !!(
+      preset.isPartner ||
+      preset.primePartner ||
+      preset.partnerPromotionKey
+    );
   };
 
   const presetEntries = useMemo(() => {
@@ -669,24 +680,38 @@ function ProviderFormFull({
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "gemini") {
       return geminiProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `gemini-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `gemini-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "opencode") {
       return opencodeProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `opencode-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `opencode-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "openclaw") {
       return openclawProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `openclaw-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `openclaw-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     } else if (appId === "hermes") {
       return hermesProviderPresets
-        .map<PresetEntry>((preset, index) => ({ id: `hermes-${index}`, preset }))
+        .map<PresetEntry>((preset, index) => ({
+          id: `hermes-${index}`,
+          preset,
+        }))
         .filter(({ preset }) => !isSponsorPreset(preset));
     }
     return providerPresets
       .map<PresetEntry>((preset, index) => ({ id: `claude-${index}`, preset }))
-      .filter(({ preset }) => !(preset as any).hidden && !isSponsorPreset(preset));
+      .filter(
+        ({ preset }) => !(preset as any).hidden && !isSponsorPreset(preset),
+      );
   }, [appId]);
 
   const {
@@ -1433,9 +1458,32 @@ function ProviderFormFull({
     const baseMeta: ProviderMeta | undefined =
       payload.meta ?? (initialData?.meta ? { ...initialData.meta } : undefined);
 
-    // 确定 providerType（新建时从预设获取，编辑时从现有数据获取）
-    const providerType =
-      templatePreset?.providerType || initialData?.meta?.providerType;
+    const normalizedEndpoint = (value: string) =>
+      value.trim().replace(/\/+$/, "");
+    const selectedPreset = presetEntries.find(
+      (entry) => entry.id === selectedPresetId,
+    )?.preset as
+      | { providerType?: string; managedNexusPresetVersion?: number }
+      | undefined;
+    const presetProviderType = selectedPreset?.providerType;
+    const managedNexus =
+      (presetProviderType === "nexus" ||
+        initialData?.meta?.providerType === "nexus") &&
+      ((appId === "codex" &&
+        normalizedEndpoint(codexBaseUrl) ===
+          normalizedEndpoint(NEXUS_ENDPOINT) &&
+        extractCodexModelName(codexConfig) === NEXUS_MODEL) ||
+        (appId === "claude" &&
+          normalizedEndpoint(baseUrl) === normalizedEndpoint(NEXUS_ENDPOINT) &&
+          claudeModel === NEXUS_CLAUDE_MODEL));
+    const providerType = managedNexus
+      ? "nexus"
+      : presetProviderType === "nexus" ||
+          initialData?.meta?.providerType === "nexus"
+        ? undefined
+        : (presetProviderType ??
+          templatePreset?.providerType ??
+          initialData?.meta?.providerType);
 
     const nextMeta: ProviderMeta = {
       ...(baseMeta ?? {}),
@@ -1451,6 +1499,11 @@ function ProviderFormFull({
       claudeDesktopMode: undefined,
       // 保存 providerType（用于识别 Copilot / Codex OAuth 等特殊供应商）
       providerType,
+      managedNexusPresetVersion:
+        providerType === "nexus"
+          ? (selectedPreset?.managedNexusPresetVersion ??
+            initialData?.meta?.managedNexusPresetVersion)
+          : undefined,
       authBinding: isCopilotProvider
         ? {
             source: "managed_account",
@@ -1615,6 +1668,8 @@ function ProviderFormFull({
     setSelectedPresetId(value);
     if (value === "custom") {
       setActivePreset(null);
+      setLocalProxyHeadersOverride("");
+      setLocalProxyBodyOverride("");
       form.reset(defaultValues);
 
       if (appId === "codex") {
@@ -1647,6 +1702,18 @@ function ProviderFormFull({
     if (!entry) {
       return;
     }
+
+    const requestOverrides = (
+      entry.preset as {
+        localProxyRequestOverrides?: LocalProxyRequestOverrides;
+      }
+    ).localProxyRequestOverrides;
+    setLocalProxyHeadersOverride(
+      formatRequestOverrideObject(requestOverrides?.headers),
+    );
+    setLocalProxyBodyOverride(
+      formatRequestOverrideObject(requestOverrides?.body),
+    );
 
     setActivePreset({
       id: value,
