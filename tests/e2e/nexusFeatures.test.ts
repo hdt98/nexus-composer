@@ -37,11 +37,12 @@ describe("Nexus Composer preset arrays", () => {
     expect(names).toContain("OpenAI Official");
   });
 
-  it("Claude Desktop presets contain exactly Nexus GLM-5.2 and Claude Desktop Official", () => {
+  it("adds Nexus without replacing the Claude Desktop preset catalog", () => {
     const names = claudeDesktopProviderPresets.map((preset) => preset.name);
-    expect(names).toHaveLength(2);
     expect(names).toContain("Nexus GLM-5.2");
     expect(names).toContain("Claude Desktop Official");
+    expect(names).toContain("Shengsuanyun");
+    expect(new Set(names).size).toBe(names.length);
   });
 
   it("does not contain any removed presets", () => {
@@ -223,9 +224,10 @@ describe("Sponsor filter", () => {
     for (const p of codexProviderPresets) {
       expect(isSponsorPreset(p)).toBe(false);
     }
-    for (const p of claudeDesktopProviderPresets) {
-      expect(isSponsorPreset(p)).toBe(false);
-    }
+    const desktopNexus = claudeDesktopProviderPresets.find(
+      (preset) => preset.name === "Nexus GLM-5.2",
+    );
+    expect(isSponsorPreset(desktopNexus!)).toBe(false);
 
     const fakeSponsor = {
       name: "FakeProvider",
