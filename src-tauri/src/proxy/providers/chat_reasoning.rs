@@ -19,18 +19,21 @@ pub(crate) fn enabled_for_attempt(provider: &Provider, body: &Value) -> bool {
 }
 
 pub(crate) fn enabled_for_request(provider: &Provider, request_enabled: bool) -> bool {
-    let Some(meta) = provider
-        .meta
-        .as_ref()
-        .filter(|meta| meta.provider_type.as_deref() == Some("nexus"))
-    else {
+    let Some(meta) = provider.meta.as_ref() else {
         return false;
     };
-    meta.local_proxy_request_overrides
+    if !matches!(meta.provider_type.as_deref(), None | Some("nexus")) {
+        return false;
+    }
+    if let Some(enabled) = meta
+        .local_proxy_request_overrides
         .as_ref()
         .and_then(|overrides| overrides.body.as_ref())
         .and_then(|body| body.pointer("/chat_template_kwargs/enable_thinking"))
-        .map_or(request_enabled, |value| value == &Value::Bool(true))
+    {
+        return enabled == &Value::Bool(true);
+    }
+    meta.provider_type.as_deref() == Some("nexus") && request_enabled
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1124,6 +1127,27 @@ mod tests {
     }
 
     #[test]
+    fn trailing_reasoning_close_before_tool_call_is_not_visible() {
+        let prose = "Focus on the logical structure.";
+        let source = format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({"choices": [{"delta": {"content": format!("{prose}</think>")}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call-1",
+                "function": {"name": "spawn_agent", "arguments": "{}"}
+            }]}, "finish_reason": "tool_calls"}]})
+        );
+
+        let normalized = normalize_source_value(&source).unwrap();
+        let message = &normalized["choices"][0]["message"];
+        assert_eq!(message["reasoning_content"], prose);
+        assert_eq!(message["content"], "");
+        assert_eq!(message["tool_calls"][0]["function"]["name"], "spawn_agent");
+        assert!(!normalized.to_string().contains("</think>"));
+    }
+
+    #[test]
     fn nonstream_normalizes_first_choice_and_legacy_tool_boundaries() {
         let mut response = json!({"choices": [{"message": {
             "reasoning_content": "private",
@@ -1337,7 +1361,7 @@ mod tests {
     }
 
     #[test]
-    fn activation_is_nexus_only_and_override_is_authoritative() {
+    fn activation_requires_nexus_or_an_explicit_override() {
         fn provider(provider_type: Option<&str>, override_enabled: Option<bool>) -> Provider {
             let mut provider = Provider::with_id("p".into(), "test".into(), json!({}), None);
             provider.meta = Some(crate::provider::ProviderMeta {
@@ -1365,9 +1389,15 @@ mod tests {
             &provider(Some("nexus"), Some(true)),
             &json!({})
         ));
+        assert!(enabled_for_attempt(&provider(None, Some(true)), &json!({})));
         assert!(!enabled_for_attempt(
             &provider(Some("nexus"), Some(false)),
             &enabled
+        ));
+        assert!(!enabled_for_attempt(&provider(None, Some(false)), &enabled));
+        assert!(!enabled_for_attempt(
+            &provider(Some("github_copilot"), Some(true)),
+            &json!({})
         ));
     }
 }
