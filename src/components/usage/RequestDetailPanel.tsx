@@ -33,6 +33,35 @@ function RequestDetailCloseButton({ onClose }: { onClose: () => void }) {
   );
 }
 
+function CopyableId({
+  label,
+  value,
+  copyLabel,
+}: {
+  label: string;
+  value: string;
+  copyLabel: string;
+}) {
+  return (
+    <div>
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className="flex items-center gap-1 font-mono">
+        <span className="min-w-0 break-all">{value}</span>
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          className="size-7 shrink-0"
+          aria-label={copyLabel}
+          onClick={() => void copyText(value)}
+        >
+          <Copy className="size-3.5" />
+        </Button>
+      </dd>
+    </div>
+  );
+}
+
 export function RequestDetailPanel({
   requestId,
   onClose,
@@ -75,6 +104,7 @@ export function RequestDetailPanel({
   const isCacheInclusive = request.inputTokens !== freshInput;
   const unpriced = isUnpricedUsage(request);
   const correlationId = request.correlationId;
+  const sessionId = request.sessionId;
 
   return (
     <Dialog open onOpenChange={handleOpenChange}>
@@ -89,31 +119,24 @@ export function RequestDetailPanel({
           <div className="rounded-lg border p-4">
             <h3 className="mb-3 font-semibold">{t("usage.basicInfo")}</h3>
             <dl className="grid grid-cols-2 gap-3 text-sm">
-              <div>
-                <dt className="text-muted-foreground">
-                  {t("usage.requestId")}
-                </dt>
-                <dd className="font-mono">{request.requestId}</dd>
-              </div>
+              <CopyableId
+                label={t("usage.requestId")}
+                value={request.requestId}
+                copyLabel={t("usage.copyRequestId")}
+              />
               {correlationId && (
-                <div>
-                  <dt className="text-muted-foreground">
-                    {t("usage.correlationId")}
-                  </dt>
-                  <dd className="flex items-center gap-1 font-mono">
-                    <span className="min-w-0 break-all">{correlationId}</span>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="size-7 shrink-0"
-                      aria-label={t("usage.copyCorrelationId")}
-                      onClick={() => void copyText(correlationId)}
-                    >
-                      <Copy className="size-3.5" />
-                    </Button>
-                  </dd>
-                </div>
+                <CopyableId
+                  label={t("usage.correlationId")}
+                  value={correlationId}
+                  copyLabel={t("usage.copyCorrelationId")}
+                />
+              )}
+              {sessionId && (
+                <CopyableId
+                  label={t("usage.sessionId")}
+                  value={sessionId}
+                  copyLabel={t("usage.copySessionId")}
+                />
               )}
               <div>
                 <dt className="text-muted-foreground">{t("usage.time")}</dt>
