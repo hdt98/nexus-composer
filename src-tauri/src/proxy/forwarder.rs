@@ -38,6 +38,22 @@ use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+const UPSTREAM_ERROR_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn read_upstream_error_body(
+    response: ProxyResponse,
+    status: u16,
+    timeout: std::time::Duration,
+) -> Result<bytes::Bytes, ProxyError> {
+    tokio::time::timeout(timeout, response.bytes())
+        .await
+        .map_err(|_| {
+            log::warn!(
+                "[Forwarder] Upstream HTTP {status} error body did not complete within {timeout:?}"
+            );
+            ProxyError::UpstreamError { status, body: None }
+        })?
+}
 
 pub struct ForwardResult {
     pub response: ProxyResponse,
@@ -1975,7 +1991,8 @@ impl RequestForwarder {
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
             let encoding = get_content_encoding(response.headers());
-            let raw = response.bytes().await?;
+            let raw = read_upstream_error_body(response, status_code, UPSTREAM_ERROR_BODY_TIMEOUT)
+                .await?;
             let decoded = match encoding {
                 Some(encoding) => match decompress_body(&encoding, &raw) {
                     Ok(Some(decompressed)) => decompressed,
@@ -3282,6 +3299,57 @@ mod tests {
         };
 
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn stalled_upstream_error_body_hits_total_deadline() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let response = ProxyResponse::streamed(
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+        );
+
+        let err = read_upstream_error_body(
+            response,
+            StatusCode::BAD_REQUEST.as_u16(),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("a stalled upstream error body must not hang forever");
+
+        assert!(matches!(
+            err,
+            ProxyError::UpstreamError {
+                status: 400,
+                body: None
+            }
+        ));
+        assert!(matches!(
+            forwarder.categorize_proxy_error(&err),
+            ErrorCategory::NonRetryable
+        ));
+    }
+
+    #[tokio::test]
+    async fn upstream_error_body_before_deadline_is_preserved() {
+        let response = ProxyResponse::streamed(
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            futures::stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{\"error\":\"bad request\"}"))
+            }),
+        );
+
+        let body = read_upstream_error_body(
+            response,
+            StatusCode::BAD_REQUEST.as_u16(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("a completed upstream error body should be preserved");
+
+        assert_eq!(body, Bytes::from_static(b"{\"error\":\"bad request\"}"));
     }
 
     #[tokio::test]
