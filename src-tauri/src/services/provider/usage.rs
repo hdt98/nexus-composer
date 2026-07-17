@@ -4,10 +4,37 @@
 
 use crate::app_config::AppType;
 use crate::error::AppError;
-use crate::provider::{UsageData, UsageResult, UsageScript};
-use crate::settings;
+use crate::provider::{UsageResult, UsageScript};
 use crate::store::AppState;
 use crate::usage_script;
+
+fn user_facing_usage_error(error: AppError) -> String {
+    match error {
+        AppError::Localized { en, .. } => en,
+        other => other.to_string(),
+    }
+}
+
+fn format_usage_data(data: serde_json::Value) -> UsageResult {
+    let parsed = if data.is_array() {
+        serde_json::from_value(data)
+    } else {
+        serde_json::from_value(data).map(|single| vec![single])
+    };
+
+    match parsed {
+        Ok(data) => UsageResult {
+            success: true,
+            data: Some(data),
+            error: None,
+        },
+        Err(error) => UsageResult {
+            success: false,
+            data: None,
+            error: Some(format!("Data format error: {error}")),
+        },
+    }
+}
 
 /// Execute usage script and format result (private helper method)
 pub(crate) async fn execute_and_format_usage_result(
@@ -30,54 +57,12 @@ pub(crate) async fn execute_and_format_usage_result(
     )
     .await
     {
-        Ok(data) => {
-            let usage_list: Vec<UsageData> = if data.is_array() {
-                serde_json::from_value(data).map_err(|e| {
-                    AppError::localized(
-                        "usage_script.data_format_error",
-                        format!("数据格式错误: {e}"),
-                        format!("Data format error: {e}"),
-                    )
-                })?
-            } else {
-                let single: UsageData = serde_json::from_value(data).map_err(|e| {
-                    AppError::localized(
-                        "usage_script.data_format_error",
-                        format!("数据格式错误: {e}"),
-                        format!("Data format error: {e}"),
-                    )
-                })?;
-                vec![single]
-            };
-
-            Ok(UsageResult {
-                success: true,
-                data: Some(usage_list),
-                error: None,
-            })
-        }
-        Err(err) => {
-            let lang = settings::get_settings()
-                .language
-                .unwrap_or_else(|| "zh".to_string());
-
-            let msg = match err {
-                AppError::Localized { zh, en, .. } => {
-                    if lang == "en" {
-                        en
-                    } else {
-                        zh
-                    }
-                }
-                other => other.to_string(),
-            };
-
-            Ok(UsageResult {
-                success: false,
-                data: None,
-                error: Some(msg),
-            })
-        }
+        Ok(data) => Ok(format_usage_data(data)),
+        Err(err) => Ok(UsageResult {
+            success: false,
+            data: None,
+            error: Some(user_facing_usage_error(err)),
+        }),
     }
 }
 
@@ -235,8 +220,9 @@ pub(crate) fn validate_usage_script(script: &UsageScript) -> Result<(), AppError
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_script_credentials;
+    use super::{format_usage_data, resolve_script_credentials, user_facing_usage_error};
     use crate::app_config::AppType;
+    use crate::error::AppError;
     use crate::provider::Provider;
     use serde_json::json;
 
@@ -247,6 +233,30 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn localized_usage_errors_use_the_supported_english_fallback() {
+        let error = AppError::localized(
+            "usage_script.test",
+            "Chinese internal fallback",
+            "English user-facing error",
+        );
+
+        assert_eq!(user_facing_usage_error(error), "English user-facing error");
+    }
+
+    #[test]
+    fn malformed_usage_data_returns_a_supported_english_error() {
+        let result = format_usage_data(json!("not an object"));
+
+        assert!(!result.success);
+        assert!(result.data.is_none());
+        let error = result.error.expect("format error");
+        assert!(error.starts_with("Data format error:"));
+        assert!(!error
+            .chars()
+            .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)));
     }
 
     #[test]

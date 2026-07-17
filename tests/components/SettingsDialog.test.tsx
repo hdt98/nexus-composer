@@ -64,7 +64,7 @@ const createSettingsMock = (overrides: Partial<SettingsMock> = {}) => {
       showInTray: true,
       minimizeToTrayOnClose: true,
       enableClaudePluginIntegration: false,
-      language: "zh",
+      language: "vi",
       claudeConfigDir: "/claude",
       codexConfigDir: "/codex",
     },
@@ -325,7 +325,7 @@ describe("SettingsPage Component", () => {
 
     renderSettingsPage({ onOpenChange });
 
-    expect(screen.getByText("language:zh")).toBeInTheDocument();
+    expect(screen.getByText("language:vi")).toBeInTheDocument();
     expect(screen.getByText("theme-settings")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("change-language"));

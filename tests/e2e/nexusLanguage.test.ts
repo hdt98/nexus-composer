@@ -20,9 +20,9 @@ describe("Nexus Composer language system", () => {
     const config = readFileSync("src/i18n/index.ts", "utf-8");
     expect(config).toContain('import en from "./locales/en.json"');
     expect(config).toContain('import vi from "./locales/vi.json"');
-    expect(config).not.toContain('import ja from');
-    expect(config).not.toContain('import zh from');
-    expect(config).not.toContain('import zhTW from');
+    expect(config).not.toContain("import ja from");
+    expect(config).not.toContain("import zh from");
+    expect(config).not.toContain("import zhTW from");
   });
 
   it("i18n config has only en and vi in resources", () => {
@@ -38,20 +38,18 @@ describe("Nexus Composer language system", () => {
     expect(config).toContain('DEFAULT_LANGUAGE: Language = "en"');
   });
 
-  it("en.json has Vietnamese language option", () => {
+  it("spells the Vietnamese language name correctly in both locales", () => {
     const en = JSON.parse(readFileSync("src/i18n/locales/en.json", "utf-8"));
-    expect(en.settings.languageOptionVietnamese).toBeTruthy();
+    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
+
+    expect(en.settings.languageOptionVietnamese).toBe("Tiếng Việt");
+    expect(vi.settings.languageOptionVietnamese).toBe("Tiếng Việt");
   });
 
   it("en.json does not have Chinese or Japanese options", () => {
     const en = JSON.parse(readFileSync("src/i18n/locales/en.json", "utf-8"));
     expect(en.settings.languageOptionChinese).toBeUndefined();
     expect(en.settings.languageOptionJapanese).toBeUndefined();
-  });
-
-  it("vi.json has Vietnamese language option with diacritics", () => {
-    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
-    expect(vi.settings.languageOptionVietnamese).toBe("Tiếng Việt");
   });
 
   it("vi.json has English language option", () => {
@@ -69,5 +67,44 @@ describe("Nexus Composer language system", () => {
     expect(content).not.toContain('"zh"');
     expect(content).not.toContain('"zh-TW"');
     expect(content).not.toContain('"ja"');
+  });
+
+  it("keeps first-run copy implementation-neutral", () => {
+    const en = JSON.parse(readFileSync("src/i18n/locales/en.json", "utf-8"));
+    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
+    const implementationDetails =
+      /sglang|ssh|kubernetes|127\.0\.0\.1|30000|30001/i;
+
+    for (const notice of [en.firstRunNotice, vi.firstRunNotice]) {
+      const copy = `${notice.bodyDefault} ${notice.bodyOfficial}`;
+      expect(copy).toContain("Nexus");
+      expect(copy).not.toMatch(implementationDetails);
+    }
+  });
+
+  it("does not render Han-script preset labels", () => {
+    const files = [
+      "src/config/claudeDesktopProviderPresets.ts",
+      "src/config/opencodeProviderPresets.ts",
+      "src/config/openclawProviderPresets.ts",
+      "src/config/hermesProviderPresets.ts",
+      "src/config/geminiProviderPresets.ts",
+      "src/config/universalProviderPresets.ts",
+      "src/config/codingPlanProviders.ts",
+      "src/icons/extracted/metadata.ts",
+    ];
+
+    for (const file of files) {
+      const source = readFileSync(file, "utf-8");
+      const renderedValues = [
+        ...source.matchAll(
+          /(?:name|description|label|displayName):\s*"([^"]*)"/g,
+        ),
+      ].map((match) => match[1]);
+
+      expect(
+        renderedValues.filter((value) => /\p{Script=Han}/u.test(value)),
+      ).toEqual([]);
+    }
   });
 });

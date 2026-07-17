@@ -54,37 +54,21 @@ pub struct TrayTexts {
 impl TrayTexts {
     pub fn from_language(language: &str) -> Self {
         match language {
-            "en" => Self {
+            "vi" => Self {
+                show_main: "Mở cửa sổ chính",
+                open_website: "Mở trang web chính thức",
+                no_providers_label: "(chưa có nhà cung cấp)",
+                lightweight_mode: "Chế độ gọn nhẹ",
+                quit: "Thoát",
+                _auto_label: "Tự động (chuyển khi lỗi)",
+            },
+            _ => Self {
                 show_main: "Open main window",
                 open_website: "Open Official Website",
                 no_providers_label: "(no providers)",
                 lightweight_mode: "Lightweight Mode",
                 quit: "Quit",
                 _auto_label: "Auto (Failover)",
-            },
-            "ja" => Self {
-                show_main: "メインウィンドウを開く",
-                open_website: "公式サイトを開く",
-                no_providers_label: "(プロバイダーなし)",
-                lightweight_mode: "軽量モード",
-                quit: "終了",
-                _auto_label: "自動 (フェイルオーバー)",
-            },
-            "zh-TW" => Self {
-                show_main: "開啟主介面",
-                open_website: "開啟官方網站",
-                no_providers_label: "(無供應商)",
-                lightweight_mode: "輕量模式",
-                quit: "退出",
-                _auto_label: "自動 (故障轉移)",
-            },
-            _ => Self {
-                show_main: "打开主界面",
-                open_website: "打开官方网站",
-                no_providers_label: "(无供应商)",
-                lightweight_mode: "轻量模式",
-                quit: "退出",
-                _auto_label: "自动 (故障转移)",
             },
         }
     }
@@ -493,7 +477,7 @@ pub fn create_tray_menu(
     app_state: &AppState,
 ) -> Result<Menu<tauri::Wry>, AppError> {
     let app_settings = crate::settings::get_settings();
-    let tray_texts = TrayTexts::from_language(app_settings.language.as_deref().unwrap_or("zh"));
+    let tray_texts = TrayTexts::from_language(app_settings.language.as_deref().unwrap_or("en"));
 
     // Get visible apps setting, default to all visible
     let visible_apps = app_settings.visible_apps.unwrap_or_default();
@@ -880,7 +864,7 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_script_summary, format_subscription_summary, TRAY_ID};
+    use super::{format_script_summary, format_subscription_summary, TrayTexts, TRAY_ID};
     use crate::provider::{UsageData, UsageResult};
     use crate::services::subscription::{
         CredentialStatus, QuotaTier, SubscriptionQuota, TIER_FIVE_HOUR, TIER_GEMINI_FLASH,
@@ -892,6 +876,30 @@ mod tests {
     fn tray_id_is_unique_to_app() {
         assert_eq!(TRAY_ID, "nexus-composer");
         assert_ne!(TRAY_ID, "main");
+    }
+
+    #[test]
+    fn vietnamese_tray_labels_are_natural_and_complete() {
+        let texts = TrayTexts::from_language("vi");
+
+        assert_eq!(texts.show_main, "Mở cửa sổ chính");
+        assert_eq!(texts.open_website, "Mở trang web chính thức");
+        assert_eq!(texts.no_providers_label, "(chưa có nhà cung cấp)");
+        assert_eq!(texts.lightweight_mode, "Chế độ gọn nhẹ");
+        assert_eq!(texts.quit, "Thoát");
+        assert_eq!(texts._auto_label, "Tự động (chuyển khi lỗi)");
+    }
+
+    #[test]
+    fn unsupported_tray_language_falls_back_to_english() {
+        let texts = TrayTexts::from_language("zh");
+
+        assert_eq!(texts.show_main, "Open main window");
+        assert_eq!(texts.open_website, "Open Official Website");
+        assert_eq!(texts.no_providers_label, "(no providers)");
+        assert_eq!(texts.lightweight_mode, "Lightweight Mode");
+        assert_eq!(texts.quit, "Quit");
+        assert_eq!(texts._auto_label, "Auto (Failover)");
     }
 
     fn make_quota(tool: &str, success: bool, tiers: Vec<QuotaTier>) -> SubscriptionQuota {

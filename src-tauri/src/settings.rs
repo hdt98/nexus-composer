@@ -594,7 +594,7 @@ impl AppSettings {
             .language
             .as_ref()
             .map(|s| s.trim())
-            .filter(|s| matches!(*s, "en" | "zh" | "zh-TW" | "ja"))
+            .filter(|s| matches!(*s, "en" | "vi"))
             .map(|s| s.to_string());
 
         if let Some(sync) = &mut self.webdav_sync {
@@ -1142,5 +1142,24 @@ mod tests {
         .expect("visible apps");
 
         assert!(!visible.is_visible(&AppType::ClaudeDesktop));
+    }
+
+    #[test]
+    fn settings_accept_only_supported_languages() {
+        for language in ["en", "vi"] {
+            let mut settings = AppSettings {
+                language: Some(language.to_string()),
+                ..AppSettings::default()
+            };
+            settings.normalize_paths();
+            assert_eq!(settings.language.as_deref(), Some(language));
+        }
+
+        let mut unsupported = AppSettings {
+            language: Some("zh".to_string()),
+            ..AppSettings::default()
+        };
+        unsupported.normalize_paths();
+        assert_eq!(unsupported.language, None);
     }
 }

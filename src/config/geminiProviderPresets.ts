@@ -40,7 +40,7 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     settingsConfig: {
       env: {},
     },
-    description: "Google 官方 Gemini API (OAuth)",
+    description: "Official Google Gemini API (OAuth)",
     category: "official",
     partnerPromotionKey: "google-official",
     theme: {
@@ -447,7 +447,7 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
     endpointCandidates: ["https://api.therouter.ai"],
   },
   {
-    name: "自定义",
+    name: "Custom",
     websiteUrl: "",
     settingsConfig: {
       env: {
@@ -456,7 +456,7 @@ export const geminiProviderPresets: GeminiProviderPreset[] = [
       },
     },
     model: "gemini-3.5-flash",
-    description: "自定义 Gemini API 端点",
+    description: "Custom Gemini API endpoint",
     category: "custom",
   },
 ];

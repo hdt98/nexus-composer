@@ -128,7 +128,7 @@ export const iconMetadata: Record<string, IconMetadata> = {
   },
   huoshan: {
     name: "huoshan",
-    displayName: "火山方舟",
+    displayName: "Volcengine Ark",
     category: "ai-provider",
     keywords: ["huoshan", "volcengine", "ark", "agentplan", "byteplus"],
     defaultColor: "#3370FF",
@@ -580,7 +580,7 @@ export const iconMetadata: Record<string, IconMetadata> = {
   },
   qiniu: {
     name: "qiniu",
-    displayName: "七牛云",
+    displayName: "Qiniu Cloud",
     category: "ai-provider",
     keywords: [
       "qiniu",
