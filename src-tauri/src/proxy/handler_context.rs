@@ -261,6 +261,14 @@ impl RequestContext {
         self.providers.clone()
     }
 
+    /// ID sent upstream as `x-request-id`, when the selected provider declares
+    /// correlation support.
+    pub(crate) fn correlation_id(&self) -> Option<String> {
+        self.provider
+            .uses_server_request_correlation()
+            .then(|| self.request_id.clone())
+    }
+
     /// 计算请求延迟（毫秒）
     #[inline]
     pub fn latency_ms(&self) -> u64 {

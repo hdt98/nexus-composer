@@ -2717,12 +2717,7 @@ fn apply_nexus_correlation_headers(
     request_id: &str,
     harness_identity: Option<&HarnessIdentity>,
 ) {
-    if provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.provider_type.as_deref())
-        != Some("nexus")
-    {
+    if !provider.uses_server_request_correlation() {
         return;
     }
     for name in [
@@ -3211,6 +3206,51 @@ mod tests {
             Some(&claude),
         );
         assert_eq!(headers["x-claude-code-session-id"], "session-789");
+        assert!(!headers.contains_key("x-codex-thread-id"));
+    }
+
+    #[test]
+    fn external_openai_chat_provider_preserves_its_request_id() {
+        let mut provider = test_provider_with_type(None);
+        provider.meta = Some(crate::provider::ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-request-id",
+            HeaderValue::from_static("provider-request-id"),
+        );
+
+        apply_nexus_correlation_headers(
+            &mut headers,
+            &provider,
+            "request-123",
+            Some(&HarnessIdentity::CodexThread("thread-456".to_string())),
+        );
+
+        assert_eq!(headers["x-request-id"], "provider-request-id");
+        assert!(!headers.contains_key("x-codex-thread-id"));
+    }
+
+    #[test]
+    fn managed_account_provider_preserves_adapter_correlation() {
+        let mut provider = test_provider_with_type(Some("github_copilot"));
+        provider.meta.as_mut().unwrap().api_format = Some("openai_chat".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-request-id",
+            HeaderValue::from_static("adapter-fingerprint"),
+        );
+
+        apply_nexus_correlation_headers(
+            &mut headers,
+            &provider,
+            "request-123",
+            Some(&HarnessIdentity::CodexThread("thread-456".to_string())),
+        );
+
+        assert_eq!(headers["x-request-id"], "adapter-fingerprint");
         assert!(!headers.contains_key("x-codex-thread-id"));
     }
 

@@ -4,6 +4,7 @@ import { RequestLogTable } from "@/components/usage/RequestLogTable";
 import type { UsageRangeSelection } from "@/types/usage";
 
 const useRequestLogsMock = vi.hoisted(() => vi.fn());
+const requestDetailPropsMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -52,12 +53,20 @@ vi.mock("@/components/ui/table", () => ({
   TableCell: ({ children, ...props }: any) => <td {...props}>{children}</td>,
   TableHead: ({ children, ...props }: any) => <th {...props}>{children}</th>,
   TableHeader: ({ children }: any) => <thead>{children}</thead>,
-  TableRow: ({ children }: any) => <tr>{children}</tr>,
+  TableRow: ({ children, ...props }: any) => <tr {...props}>{children}</tr>,
+}));
+
+vi.mock("@/components/usage/RequestDetailPanel", () => ({
+  RequestDetailPanel: ({ requestId, onClose }: any) => {
+    requestDetailPropsMock({ requestId, onClose });
+    return <button onClick={onClose}>Close request detail</button>;
+  },
 }));
 
 describe("RequestLogTable", () => {
   beforeEach(() => {
     useRequestLogsMock.mockReset();
+    requestDetailPropsMock.mockReset();
     useRequestLogsMock.mockImplementation(
       ({ page = 0, pageSize = 20 }: { page?: number; pageSize?: number }) => ({
         data: {
@@ -69,6 +78,63 @@ describe("RequestLogTable", () => {
         isLoading: false,
       }),
     );
+  });
+
+  it("opens a request detail from a row and closes it", () => {
+    const range: UsageRangeSelection = { preset: "today" };
+    useRequestLogsMock.mockReturnValue({
+      data: {
+        data: [
+          {
+            requestId: "response-id",
+            providerId: "provider-1",
+            providerName: "Nexus",
+            appType: "codex",
+            model: "glm-5.2",
+            costMultiplier: "1",
+            inputTokens: 10,
+            outputTokens: 2,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            inputCostUsd: "0",
+            outputCostUsd: "0",
+            cacheReadCostUsd: "0",
+            cacheCreationCostUsd: "0",
+            totalCostUsd: "0",
+            isStreaming: true,
+            latencyMs: 100,
+            statusCode: 200,
+            createdAt: 1_710_000_000,
+            dataSource: "proxy",
+          },
+        ],
+        total: 1,
+        page: 0,
+        pageSize: 20,
+      },
+      isLoading: false,
+    });
+
+    render(
+      <RequestLogTable
+        range={range}
+        rangeLabel="Today"
+        appType="all"
+        refreshIntervalMs={0}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("row", { name: "View request details" }));
+    expect(requestDetailPropsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ requestId: "response-id" }),
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close request detail" }),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Close request detail" }),
+    ).toBeNull();
   });
 
   it("resets pagination when the dashboard range changes", async () => {

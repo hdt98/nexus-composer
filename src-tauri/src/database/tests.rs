@@ -289,6 +289,76 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
+
+    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
+    assert_eq!(correlation_id.r#type, "TEXT");
+    assert_eq!(correlation_id.notnull, 0);
+}
+
+#[test]
+fn migration_v11_to_v12_adds_nullable_correlation_without_changing_rows() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL
+        );
+        INSERT INTO proxy_request_logs (request_id, model)
+        VALUES ('response-1', 'glm-5.2'), ('response-2', 'glm-5.2');
+        "#,
+    )
+    .expect("seed v11 request logs");
+    Database::set_user_version(&conn, 11).expect("set user_version=11");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply v12 migration");
+
+    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
+    assert_eq!(correlation_id.r#type, "TEXT");
+    assert_eq!(correlation_id.notnull, 0);
+    let rows: (i64, i64, String) = conn
+        .query_row(
+            "SELECT COUNT(*), COUNT(correlation_id), group_concat(request_id, ',')
+             FROM proxy_request_logs",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read migrated rows");
+    assert_eq!(rows, (2, 0, "response-1,response-2".to_string()));
+    assert_eq!(
+        Database::get_user_version(&conn).expect("version after migration"),
+        SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn prerelease_v12_without_correlation_column_is_repaired() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            model TEXT NOT NULL
+        );
+        INSERT INTO proxy_request_logs (request_id, model)
+        VALUES ('response-1', 'glm-5.2');
+        "#,
+    )
+    .expect("seed prerelease v12 request logs");
+    Database::set_user_version(&conn, 12).expect("set user_version=12");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("repair v12 schema");
+
+    assert_eq!(
+        get_column_info(&conn, "proxy_request_logs", "correlation_id").r#type,
+        "TEXT"
+    );
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
+            .get::<_, i64>(0))
+            .expect("read preserved rows"),
+        1
+    );
 }
 
 #[test]
