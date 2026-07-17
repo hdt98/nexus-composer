@@ -2307,23 +2307,45 @@ impl ProxyService {
         let Ok(mut doc) = toml_str.parse::<toml_edit::DocumentMut>() else {
             return toml_str.to_string();
         };
-        let has_canonical_table = doc
-            .get("model_providers")
+        let Some(selector_key) = doc
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            .filter(|value| *value != "nexus" && value.eq_ignore_ascii_case("nexus"))
+            .map(str::to_string)
+        else {
+            return toml_str.to_string();
+        };
+        let Some(providers) = doc
+            .get_mut("model_providers")
+            .and_then(|item| item.as_table_mut())
+        else {
+            return toml_str.to_string();
+        };
+        if !providers.contains_key("nexus") {
+            return toml_str.to_string();
+        }
+        if let Some(case_variant) = providers
+            .get(&selector_key)
             .and_then(|item| item.as_table())
-            .is_some_and(|providers| providers.contains_key("nexus"));
+            .cloned()
+        {
+            if let Some(canonical) = providers
+                .get_mut("nexus")
+                .and_then(|item| item.as_table_mut())
+            {
+                for (key, item) in &case_variant {
+                    canonical.insert(key, item.clone());
+                }
+            }
+            providers.remove(&selector_key);
+        }
+
         let Some(selector) = doc
             .get_mut("model_provider")
             .and_then(|item| item.as_value_mut())
         else {
             return toml_str.to_string();
         };
-        let is_case_variant = selector
-            .as_str()
-            .is_some_and(|value| value != "nexus" && value.eq_ignore_ascii_case("nexus"));
-        if !has_canonical_table || !is_case_variant {
-            return toml_str.to_string();
-        }
-
         let decor = selector.decor().clone();
         *selector = toml_edit::Value::from("nexus");
         *selector.decor_mut() = decor;
@@ -4261,6 +4283,9 @@ model = "GLM-5.2-FP8"
 name = "nexus_glm"
 base_url = "https://example.invalid/v1"
 wire_api = "responses"
+
+[model_providers.Nexus]
+wire_api = "responses"
 stream_idle_timeout_ms = 900000
 "#;
         let mut provider = Provider::with_id(
@@ -4309,12 +4334,10 @@ stream_idle_timeout_ms = 900000
                 .and_then(|v| v.as_integer()),
             Some(900000)
         );
-        assert!(
-            parsed
-                .get("model_providers")
-                .and_then(|v| v.get("Nexus"))
-                .is_none()
-        );
+        assert!(parsed
+            .get("model_providers")
+            .and_then(|v| v.get("Nexus"))
+            .is_none());
         assert!(output.contains("# keep selector comment"));
     }
 
