@@ -273,52 +273,63 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
     Ok(())
 }
 
-/// 手动触发会话日志同步
+/// Manually synchronize session logs.
+fn merge_session_sync_result(
+    total: &mut crate::services::session_usage::SessionSyncResult,
+    error_prefix: &str,
+    next: Result<crate::services::session_usage::SessionSyncResult, AppError>,
+) {
+    match next {
+        Ok(next) => {
+            total.imported += next.imported;
+            total.skipped += next.skipped;
+            total.files_scanned += next.files_scanned;
+            total.errors.extend(next.errors);
+        }
+        Err(error) => total.errors.push(format!("{error_prefix}: {error}")),
+    }
+}
+
 #[tauri::command]
-pub fn sync_session_usage(
+pub async fn sync_session_usage(
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
-    // 同步 Claude 会话日志
-    let mut result = crate::services::session_usage::sync_claude_session_logs(&state.db)?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || sync_session_usage_from_db(&db))
+        .await
+        .map_err(|error| AppError::Message(format!("Session sync task failed: {error}")))?
+}
 
-    // 同步 Codex 使用数据
-    match crate::services::session_usage_codex::sync_codex_usage(&state.db) {
-        Ok(codex_result) => {
-            result.imported += codex_result.imported;
-            result.skipped += codex_result.skipped;
-            result.files_scanned += codex_result.files_scanned;
-            result.errors.extend(codex_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Codex 同步失败: {e}"));
-        }
-    }
+fn sync_session_usage_from_db(
+    db: &crate::database::Database,
+) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
+    let mut result = crate::services::session_usage::SessionSyncResult {
+        imported: 0,
+        skipped: 0,
+        files_scanned: 0,
+        errors: Vec::new(),
+    };
 
-    // 同步 Gemini 使用数据
-    match crate::services::session_usage_gemini::sync_gemini_usage(&state.db) {
-        Ok(gemini_result) => {
-            result.imported += gemini_result.imported;
-            result.skipped += gemini_result.skipped;
-            result.files_scanned += gemini_result.files_scanned;
-            result.errors.extend(gemini_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("Gemini 同步失败: {e}"));
-        }
-    }
-
-    // 同步 OpenCode 使用数据
-    match crate::services::session_usage_opencode::sync_opencode_usage(&state.db) {
-        Ok(opencode_result) => {
-            result.imported += opencode_result.imported;
-            result.skipped += opencode_result.skipped;
-            result.files_scanned += opencode_result.files_scanned;
-            result.errors.extend(opencode_result.errors);
-        }
-        Err(e) => {
-            result.errors.push(format!("OpenCode 同步失败: {e}"));
-        }
-    }
+    merge_session_sync_result(
+        &mut result,
+        "Claude sync failed",
+        crate::services::session_usage::sync_claude_session_logs(db),
+    );
+    merge_session_sync_result(
+        &mut result,
+        "Codex sync failed",
+        crate::services::session_usage_codex::sync_codex_usage(db),
+    );
+    merge_session_sync_result(
+        &mut result,
+        "Gemini sync failed",
+        crate::services::session_usage_gemini::sync_gemini_usage(db),
+    );
+    merge_session_sync_result(
+        &mut result,
+        "OpenCode sync failed",
+        crate::services::session_usage_opencode::sync_opencode_usage(db),
+    );
 
     Ok(result)
 }
@@ -341,4 +352,48 @@ pub struct ModelPricingInfo {
     pub output_cost_per_million: String,
     pub cache_read_cost_per_million: String,
     pub cache_creation_cost_per_million: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::session_usage::SessionSyncResult;
+
+    #[test]
+    fn session_sync_merge_preserves_success_and_source_errors() {
+        let mut total = SessionSyncResult {
+            imported: 1,
+            skipped: 2,
+            files_scanned: 3,
+            errors: vec!["record error".to_string()],
+        };
+
+        merge_session_sync_result(
+            &mut total,
+            "Codex sync failed",
+            Ok(SessionSyncResult {
+                imported: 4,
+                skipped: 5,
+                files_scanned: 6,
+                errors: vec!["second record error".to_string()],
+            }),
+        );
+        merge_session_sync_result(
+            &mut total,
+            "Gemini sync failed",
+            Err(AppError::Message("unavailable".to_string())),
+        );
+
+        assert_eq!(total.imported, 5);
+        assert_eq!(total.skipped, 7);
+        assert_eq!(total.files_scanned, 9);
+        assert_eq!(
+            total.errors,
+            vec![
+                "record error",
+                "second record error",
+                "Gemini sync failed: unavailable",
+            ]
+        );
+    }
 }
