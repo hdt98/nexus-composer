@@ -45,12 +45,6 @@ export interface SessionSyncResult {
   errors: string[];
 }
 
-export interface DataSourceSummary {
-  dataSource: string;
-  requestCount: number;
-  totalCostUsd: string;
-}
-
 export interface PaginatedLogs {
   data: RequestLog[];
   total: number;

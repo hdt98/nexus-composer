@@ -70,6 +70,39 @@ use tauri::RunEvent;
 use tauri::{Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags};
 
+async fn backfill_usage_costs(db: Arc<Database>) {
+    match tauri::async_runtime::spawn_blocking(move || db.backfill_missing_usage_costs()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => log::warn!("Usage cost startup backfill failed: {error}"),
+        Err(error) => log::warn!("Usage cost startup backfill task failed: {error}"),
+    }
+}
+
+async fn run_session_usage_sync(db: Arc<Database>, phase: &'static str) {
+    match crate::services::session_usage::sync_all_session_usage(db).await {
+        Ok(result) => {
+            if result.imported > 0 {
+                log::info!(
+                    "{phase} imported {} records from {} files ({} skipped)",
+                    result.imported,
+                    result.files_scanned,
+                    result.skipped
+                );
+            }
+            if !result.errors.is_empty() {
+                log::warn!(
+                    "{phase} completed with {} source or record errors",
+                    result.errors.len()
+                );
+                for error in result.errors {
+                    log::warn!("{phase}: {error}");
+                }
+            }
+        }
+        Err(error) => log::warn!("{phase} failed: {error}"),
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn set_windows_app_user_model_id(app: &tauri::AppHandle) {
     let app_id = app.config().identifier.clone();
@@ -1150,59 +1183,26 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     const SESSION_SYNC_INTERVAL_SECS: u64 = 60;
 
-                    fn run_step<T>(name: &str, result: Result<T, crate::error::AppError>) {
-                        if let Err(e) = result {
-                            log::warn!("{name} failed: {e}");
-                        }
-                    }
-
-                    let db = &db_for_session_sync;
-
-                    // 首次同步
-                    run_step(
-                        "Usage cost startup backfill",
-                        db.backfill_missing_usage_costs(),
-                    );
-                    run_step(
+                    backfill_usage_costs(db_for_session_sync.clone()).await;
+                    run_session_usage_sync(
+                        db_for_session_sync.clone(),
                         "Session usage initial sync",
-                        crate::services::session_usage::sync_claude_session_logs(db),
-                    );
-                    run_step(
-                        "Codex usage initial sync",
-                        crate::services::session_usage_codex::sync_codex_usage(db),
-                    );
-                    run_step(
-                        "Gemini usage initial sync",
-                        crate::services::session_usage_gemini::sync_gemini_usage(db),
-                    );
-                    run_step(
-                        "OpenCode usage initial sync",
-                        crate::services::session_usage_opencode::sync_opencode_usage(db),
-                    );
+                    )
+                    .await;
 
                     // 定期同步
                     let mut interval = tokio::time::interval(std::time::Duration::from_secs(
                         SESSION_SYNC_INTERVAL_SECS,
                     ));
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     interval.tick().await; // skip immediate first tick
                     loop {
                         interval.tick().await;
-                        run_step(
+                        run_session_usage_sync(
+                            db_for_session_sync.clone(),
                             "Session usage periodic sync",
-                            crate::services::session_usage::sync_claude_session_logs(db),
-                        );
-                        run_step(
-                            "Codex usage periodic sync",
-                            crate::services::session_usage_codex::sync_codex_usage(db),
-                        );
-                        run_step(
-                            "Gemini usage periodic sync",
-                            crate::services::session_usage_gemini::sync_gemini_usage(db),
-                        );
-                        run_step(
-                            "OpenCode usage periodic sync",
-                            crate::services::session_usage_opencode::sync_opencode_usage(db),
-                        );
+                        )
+                        .await;
                     }
                 });
             });
@@ -1467,7 +1467,6 @@ pub fn run() {
             commands::check_provider_limits,
             // Session usage sync
             commands::sync_session_usage,
-            commands::get_usage_data_sources,
             // Stream health check
             commands::stream_check_provider,
             commands::stream_check_all_providers,

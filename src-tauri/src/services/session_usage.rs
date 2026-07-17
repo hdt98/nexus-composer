@@ -13,9 +13,7 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::usage_stats::{
-    effective_usage_log_filter, find_model_pricing, should_skip_session_insert, DedupKey,
-};
+use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
 use crate::settings::get_effective_current_provider;
 use crate::AppType;
 use rust_decimal::Decimal;
@@ -24,6 +22,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 /// 同步结果
@@ -36,13 +35,65 @@ pub struct SessionSyncResult {
     pub errors: Vec<String>,
 }
 
-/// 数据来源分布
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DataSourceSummary {
-    pub data_source: String,
-    pub request_count: u32,
-    pub total_cost_usd: String,
+static SESSION_USAGE_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn merge_session_sync_result(
+    total: &mut SessionSyncResult,
+    error_prefix: &str,
+    next: Result<SessionSyncResult, AppError>,
+) {
+    match next {
+        Ok(next) => {
+            total.imported += next.imported;
+            total.skipped += next.skipped;
+            total.files_scanned += next.files_scanned;
+            total.errors.extend(next.errors);
+        }
+        Err(error) => total.errors.push(format!("{error_prefix}: {error}")),
+    }
+}
+
+fn sync_all_session_usage_from_db(db: &Database) -> SessionSyncResult {
+    let mut result = SessionSyncResult {
+        imported: 0,
+        skipped: 0,
+        files_scanned: 0,
+        errors: Vec::new(),
+    };
+
+    merge_session_sync_result(
+        &mut result,
+        "Claude sync failed",
+        sync_claude_session_logs(db),
+    );
+    merge_session_sync_result(
+        &mut result,
+        "Codex sync failed",
+        crate::services::session_usage_codex::sync_codex_usage(db),
+    );
+    merge_session_sync_result(
+        &mut result,
+        "Gemini sync failed",
+        crate::services::session_usage_gemini::sync_gemini_usage(db),
+    );
+    merge_session_sync_result(
+        &mut result,
+        "OpenCode sync failed",
+        crate::services::session_usage_opencode::sync_opencode_usage(db),
+    );
+
+    result
+}
+
+/// Synchronize every supported harness session source off the async runtime.
+pub async fn sync_all_session_usage(db: Arc<Database>) -> Result<SessionSyncResult, AppError> {
+    let guard = SESSION_USAGE_SYNC_LOCK.lock().await;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        sync_all_session_usage_from_db(&db)
+    })
+    .await
+    .map_err(|error| AppError::Message(format!("Session sync task failed: {error}")))
 }
 
 /// 从 JSONL 中解析出的 assistant 消息使用数据
@@ -85,9 +136,10 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
         result.files_scanned += 1;
 
         match sync_single_file(db, file_path) {
-            Ok((imported, skipped)) => {
+            Ok((imported, skipped, errors)) => {
                 result.imported += imported;
                 result.skipped += skipped;
+                result.errors.extend(errors);
             }
             Err(e) => {
                 let msg = format!("{}: {e}", file_path.display());
@@ -180,8 +232,8 @@ fn push_jsonl_children(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// 同步单个 JSONL 文件，返回 (imported, skipped)
-fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+/// Synchronize one JSONL file and return (imported, skipped, errors).
+fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32, Vec<String>), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 获取文件元数据
@@ -194,19 +246,41 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     // 从上次偏移位置开始增量解析
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
 
     let mut line_offset: i64 = 0;
     let mut messages: HashMap<String, ParsedAssistantUsage> = HashMap::new();
     let mut current_session_id: Option<String> = None;
+    let mut errors = Vec::new();
+    let mut retry_required = false;
+    let mut line = String::new();
 
-    for line_result in reader.lines() {
+    loop {
+        line.clear();
+        let bytes_read = match reader.read_line(&mut line) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) => {
+                let error = format!(
+                    "{}: failed to read JSONL line {}: {error}",
+                    file_path.display(),
+                    line_offset + 1
+                );
+                log::warn!("[SESSION-SYNC] {error}");
+                errors.push(error);
+                retry_required = true;
+                break;
+            }
+        };
+        if bytes_read == 0 {
+            break;
+        }
+
         line_offset += 1;
 
         // 跳过已处理的行
@@ -214,18 +288,31 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
             continue;
         }
 
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue, // 容忍不完整的最后一行
-        };
-
         if line.trim().is_empty() {
             continue;
         }
 
         let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+            Ok(value) => value,
+            Err(error) => {
+                let is_incomplete = !line.ends_with('\n') && error.is_eof();
+                let kind = if is_incomplete {
+                    "incomplete"
+                } else {
+                    "invalid"
+                };
+                let error = format!(
+                    "{}: {kind} JSONL line {line_offset}: {error}",
+                    file_path.display()
+                );
+                log::warn!("[SESSION-SYNC] {error}");
+                errors.push(error);
+                if is_incomplete {
+                    retry_required = true;
+                    break;
+                }
+                continue;
+            }
         };
 
         // 提取 session ID (从 system 或首条消息)
@@ -346,16 +433,28 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
             Ok(true) => imported += 1,
             Ok(false) => skipped += 1,
             Err(e) => {
-                log::warn!("[SESSION-SYNC] 插入失败 ({}): {e}", msg.message_id);
+                let error = format!(
+                    "{}: insert failed ({}): {e}",
+                    file_path.display(),
+                    msg.message_id
+                );
+                log::warn!("[SESSION-SYNC] {error}");
+                errors.push(error);
+                retry_required = true;
                 skipped += 1;
             }
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    update_sync_state_after_records(
+        db,
+        &file_path_str,
+        file_modified,
+        line_offset,
+        retry_required,
+    )?;
 
-    Ok((imported, skipped))
+    Ok((imported, skipped, errors))
 }
 
 /// 获取 session_log_sync 表中某条目的同步进度。
@@ -405,6 +504,19 @@ pub(crate) fn update_sync_state(
         rusqlite::params![file_path, last_modified, last_offset, now],
     )
     .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn update_sync_state_after_records(
+    db: &Database,
+    file_path: &str,
+    last_modified: i64,
+    last_offset: i64,
+    retry_required: bool,
+) -> Result<(), AppError> {
+    if !retry_required {
+        update_sync_state(db, file_path, last_modified, last_offset)?;
+    }
     Ok(())
 }
 
@@ -546,7 +658,6 @@ fn insert_session_log_entry(
     Ok(true)
 }
 
-
 /// Resolve the actual upstream model for pricing when proxy takeover is active.
 ///
 /// When the proxy is active, Claude Code's session logs report the client-side
@@ -592,41 +703,170 @@ fn find_model_pricing_for_session(
     find_model_pricing(conn, model_id)
 }
 
-/// 查询数据来源分布统计
-pub fn get_data_source_breakdown(db: &Database) -> Result<Vec<DataSourceSummary>, AppError> {
-    let conn = lock_conn!(db.conn);
-
-    let effective_filter = effective_usage_log_filter("l");
-    let sql = format!(
-        "SELECT COALESCE(l.data_source, 'proxy') as ds, COUNT(*) as cnt,
-                COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as cost
-         FROM proxy_request_logs l
-         WHERE {effective_filter}
-         GROUP BY ds
-         ORDER BY cnt DESC"
-    );
-
-    let mut stmt = conn.prepare(&sql)?;
-
-    let rows = stmt.query_map([], |row| {
-        Ok(DataSourceSummary {
-            data_source: row.get(0)?,
-            request_count: row.get::<_, i64>(1)? as u32,
-            total_cost_usd: format!("{:.6}", row.get::<_, f64>(2)?),
-        })
-    })?;
-
-    let mut summaries = Vec::new();
-    for row in rows {
-        summaries.push(row.map_err(|e| AppError::Database(e.to_string()))?);
-    }
-
-    Ok(summaries)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn session_sync_merge_preserves_success_and_source_errors() {
+        let mut total = SessionSyncResult {
+            imported: 1,
+            skipped: 2,
+            files_scanned: 3,
+            errors: vec!["record error".to_string()],
+        };
+
+        merge_session_sync_result(
+            &mut total,
+            "Codex sync failed",
+            Ok(SessionSyncResult {
+                imported: 4,
+                skipped: 5,
+                files_scanned: 6,
+                errors: vec!["second record error".to_string()],
+            }),
+        );
+        merge_session_sync_result(
+            &mut total,
+            "Gemini sync failed",
+            Err(AppError::Message("unavailable".to_string())),
+        );
+
+        assert_eq!(total.imported, 5);
+        assert_eq!(total.skipped, 7);
+        assert_eq!(total.files_scanned, 9);
+        assert_eq!(
+            total.errors,
+            vec![
+                "record error",
+                "second record error",
+                "Gemini sync failed: unavailable",
+            ]
+        );
+    }
+
+    #[test]
+    fn partial_record_failure_keeps_file_retryable() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_one_session_record
+                 BEFORE INSERT ON proxy_request_logs
+                 WHEN NEW.request_id = 'session:msg_fail'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced insert failure');
+                 END;",
+            )?;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("partial.jsonl");
+        let success = r#"{"type":"assistant","message":{"id":"msg_ok","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:23Z","sessionId":"session-partial"}"#;
+        let failure = r#"{"type":"assistant","message":{"id":"msg_fail","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:24Z","sessionId":"session-partial"}"#;
+        fs::write(&file, format!("{success}\n{failure}\n")).unwrap();
+
+        let (imported, _skipped, errors) = sync_single_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (0, 0),
+            "a partial insert failure must leave the file eligible for retry"
+        );
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch("DROP TRIGGER fail_one_session_record;")?;
+        }
+
+        let (retry_imported, retry_skipped, retry_errors) = sync_single_file(&db, &file)?;
+        assert_eq!(
+            retry_imported, 1,
+            "the failed record should import on retry"
+        );
+        assert_eq!(retry_skipped, 1, "the successful record should deduplicate");
+        assert!(retry_errors.is_empty());
+
+        let modified = metadata_modified_nanos(&fs::metadata(&file).unwrap());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (modified, 2),
+            "the cursor should advance after every record is durable"
+        );
+
+        let conn = lock_conn!(db.conn);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = 'session-partial'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 2);
+        drop(conn);
+
+        let (unchanged_imported, unchanged_skipped, unchanged_errors) =
+            sync_single_file(&db, &file)?;
+        assert_eq!((unchanged_imported, unchanged_skipped), (0, 0));
+        assert!(unchanged_errors.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_claude_eof_line_is_retried_after_completion() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("incomplete.jsonl");
+        let first = r#"{"type":"assistant","message":{"id":"msg_first","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:23Z","sessionId":"session-incomplete"}"#;
+        let second = r#"{"type":"assistant","message":{"id":"msg_completed","model":"claude-opus-4-8","usage":{"input_tokens":4,"output_tokens":2},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:24Z","sessionId":"session-incomplete"}"#;
+        let third = r#"{"type":"assistant","message":{"id":"msg_after_invalid","model":"claude-opus-4-8","usage":{"input_tokens":6,"output_tokens":3},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:25Z","sessionId":"session-incomplete"}"#;
+        let split_at = second.len() - 2;
+        fs::write(&file, format!("{first}\n{}", &second[..split_at])).unwrap();
+
+        let (imported, _, errors) = sync_single_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("incomplete JSONL line 2"));
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (0, 0),
+            "an unterminated final record must not advance the cursor"
+        );
+
+        let mut writer = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "{}", &second[split_at..]).unwrap();
+        drop(writer);
+
+        let (retry_imported, retry_skipped, retry_errors) = sync_single_file(&db, &file)?;
+        assert_eq!(retry_imported, 1);
+        assert_eq!(retry_skipped, 1);
+        assert!(retry_errors.is_empty());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 2)
+        );
+
+        let mut writer = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writer.write_all(b"{not json").unwrap();
+        drop(writer);
+        let (_, _, malformed_errors) = sync_single_file(&db, &file)?;
+        assert_eq!(malformed_errors.len(), 1);
+        assert!(malformed_errors[0].contains("invalid JSONL line 3"));
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 3),
+            "a permanent syntax error must not pin the file cursor"
+        );
+        assert_eq!(sync_single_file(&db, &file)?, (0, 0, Vec::new()));
+
+        let mut writer = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "\n{third}").unwrap();
+        drop(writer);
+        assert_eq!(sync_single_file(&db, &file)?.0, 1);
+
+        Ok(())
+    }
 
     #[test]
     fn test_parse_usage_from_jsonl_line() {
@@ -834,11 +1074,12 @@ mod tests {
         let empty = r#"{"type":"assistant","message":{"id":"msg_empty","model":"claude-opus-4-8","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"timestamp":"2026-06-07T13:01:24Z","sessionId":"session-wf"}"#;
         fs::write(&file, format!("{billable}\n{empty}\n")).unwrap();
 
-        let (imported, _skipped) = sync_single_file(&db, &file)?;
+        let (imported, _skipped, errors) = sync_single_file(&db, &file)?;
         assert_eq!(
             imported, 1,
             "有 cache 成本但无 stop_reason 的 message 必须被导入"
         );
+        assert!(errors.is_empty());
 
         let conn = lock_conn!(db.conn);
         let cache_read: i64 = conn.query_row(

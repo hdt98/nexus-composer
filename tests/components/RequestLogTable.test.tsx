@@ -1,10 +1,11 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { RequestLogTable } from "@/components/usage/RequestLogTable";
 import type { UsageRangeSelection } from "@/types/usage";
 
 const useRequestLogsMock = vi.hoisted(() => vi.fn());
-const requestDetailPropsMock = vi.hoisted(() => vi.fn());
+const useRequestDetailMock = vi.hoisted(() => vi.fn());
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -23,6 +24,7 @@ vi.mock("react-i18next", () => ({
 
 vi.mock("@/lib/query/usage", () => ({
   useRequestLogs: (args: unknown) => useRequestLogsMock(args),
+  useRequestDetail: (requestId: string) => useRequestDetailMock(requestId),
 }));
 
 vi.mock("@/components/ui/button", () => ({
@@ -56,17 +58,35 @@ vi.mock("@/components/ui/table", () => ({
   TableRow: ({ children, ...props }: any) => <tr {...props}>{children}</tr>,
 }));
 
-vi.mock("@/components/usage/RequestDetailPanel", () => ({
-  RequestDetailPanel: ({ requestId, onClose }: any) => {
-    requestDetailPropsMock({ requestId, onClose });
-    return <button onClick={onClose}>Close request detail</button>;
-  },
-}));
-
 describe("RequestLogTable", () => {
   beforeEach(() => {
     useRequestLogsMock.mockReset();
-    requestDetailPropsMock.mockReset();
+    useRequestDetailMock.mockReset();
+    useRequestDetailMock.mockReturnValue({
+      data: {
+        requestId: "response-id",
+        providerId: "provider-1",
+        providerName: "Nexus",
+        appType: "codex",
+        model: "glm-5.2",
+        costMultiplier: "1",
+        inputTokens: 10,
+        outputTokens: 2,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        inputCostUsd: "0",
+        outputCostUsd: "0",
+        cacheReadCostUsd: "0",
+        cacheCreationCostUsd: "0",
+        totalCostUsd: "0",
+        isStreaming: true,
+        latencyMs: 100,
+        statusCode: 200,
+        createdAt: 1_710_000_000,
+        dataSource: "proxy",
+      },
+      isLoading: false,
+    });
     useRequestLogsMock.mockImplementation(
       ({ page = 0, pageSize = 20 }: { page?: number; pageSize?: number }) => ({
         data: {
@@ -80,7 +100,8 @@ describe("RequestLogTable", () => {
     );
   });
 
-  it("opens a request detail from a row and closes it", () => {
+  it("returns from request detail without resetting the current page", async () => {
+    const user = userEvent.setup();
     const range: UsageRangeSelection = { preset: "today" };
     useRequestLogsMock.mockReturnValue({
       data: {
@@ -108,7 +129,7 @@ describe("RequestLogTable", () => {
             dataSource: "proxy",
           },
         ],
-        total: 1,
+        total: 21,
         page: 0,
         pageSize: 20,
       },
@@ -124,17 +145,38 @@ describe("RequestLogTable", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("row", { name: "View request details" }));
-    expect(requestDetailPropsMock).toHaveBeenLastCalledWith(
-      expect.objectContaining({ requestId: "response-id" }),
+    fireEvent.click(screen.getByRole("button", { name: "2" }));
+    await waitFor(() =>
+      expect(useRequestLogsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1 }),
+      ),
     );
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Close request detail" }),
+    fireEvent.click(screen.getByRole("row", { name: "View request details" }));
+    expect(
+      screen.getByRole("dialog", { name: "usage.requestDetail" }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "common.close" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(useRequestLogsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1 }),
     );
     expect(
-      screen.queryByRole("button", { name: "Close request detail" }),
-    ).toBeNull();
+      screen.getByRole("row", { name: "View request details" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("row", { name: "View request details" }));
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+    );
+    expect(useRequestLogsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1 }),
+    );
   });
 
   it("resets pagination when the dashboard range changes", async () => {

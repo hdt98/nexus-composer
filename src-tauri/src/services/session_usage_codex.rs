@@ -19,7 +19,7 @@ use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
-    get_sync_state, metadata_modified_nanos, update_sync_state, SessionSyncResult,
+    get_sync_state, metadata_modified_nanos, update_sync_state_after_records, SessionSyncResult,
 };
 use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
 use rust_decimal::Decimal;
@@ -161,9 +161,10 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
 
     for file_path in &files {
         match sync_single_codex_file(db, file_path) {
-            Ok((imported, skipped)) => {
+            Ok((imported, skipped, errors)) => {
                 result.imported += imported;
                 result.skipped += skipped;
+                result.errors.extend(errors);
             }
             Err(e) => {
                 let msg = format!("Codex 会话文件解析失败 {}: {e}", file_path.display());
@@ -228,8 +229,11 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
     }
 }
 
-/// 同步单个 Codex JSONL 文件，返回 (imported, skipped)
-fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+/// Synchronize one Codex JSONL file and return (imported, skipped, errors).
+fn sync_single_codex_file(
+    db: &Database,
+    file_path: &Path,
+) -> Result<(u32, u32, Vec<String>), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 获取文件元数据
@@ -242,13 +246,13 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     // 打开文件逐行解析
     let file =
         fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
 
     let mut state = FileParseState {
         session_id: None,
@@ -260,18 +264,62 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     let mut line_offset: i64 = 0;
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
+    let mut errors = Vec::new();
+    let mut retry_required = false;
+    let mut line = String::new();
 
-    for line_result in reader.lines() {
-        line_offset += 1;
-
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue, // 容忍不完整的最后一行
+    loop {
+        line.clear();
+        let bytes_read = match reader.read_line(&mut line) {
+            Ok(bytes_read) => bytes_read,
+            Err(error) => {
+                let error = format!(
+                    "{}: failed to read JSONL line {}: {error}",
+                    file_path.display(),
+                    line_offset + 1
+                );
+                log::warn!("[CODEX-SYNC] {error}");
+                errors.push(error);
+                retry_required = true;
+                break;
+            }
         };
+        if bytes_read == 0 {
+            break;
+        }
+
+        line_offset += 1;
 
         if line.trim().is_empty() {
             continue;
         }
+
+        let unterminated_value = if line.ends_with('\n') {
+            None
+        } else {
+            match serde_json::from_str(&line) {
+                Ok(value) => Some(value),
+                Err(error) if error.is_eof() => {
+                    let error = format!(
+                        "{}: incomplete JSONL line {line_offset}: {error}",
+                        file_path.display()
+                    );
+                    log::warn!("[CODEX-SYNC] {error}");
+                    errors.push(error);
+                    retry_required = true;
+                    break;
+                }
+                Err(error) => {
+                    let error = format!(
+                        "{}: invalid JSONL line {line_offset}: {error}",
+                        file_path.display()
+                    );
+                    log::warn!("[CODEX-SYNC] {error}");
+                    errors.push(error);
+                    continue;
+                }
+            }
+        };
 
         // 快速过滤：在 JSON 反序列化前跳过无关行
         let is_event_msg = line.contains("\"event_msg\"");
@@ -285,9 +333,20 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
             continue;
         }
 
-        let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let value: serde_json::Value = match unterminated_value {
+            Some(value) => value,
+            None => match serde_json::from_str(&line) {
+                Ok(value) => value,
+                Err(error) => {
+                    let error = format!(
+                        "{}: invalid JSONL line {line_offset}: {error}",
+                        file_path.display()
+                    );
+                    log::warn!("[CODEX-SYNC] {error}");
+                    errors.push(error);
+                    continue;
+                }
+            },
         };
 
         let event_type = match value.get("type").and_then(|t| t.as_str()) {
@@ -411,7 +470,11 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                     Ok(true) => imported += 1,
                     Ok(false) => skipped += 1,
                     Err(e) => {
-                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", request_id);
+                        let error =
+                            format!("{}: insert failed ({request_id}): {e}", file_path.display());
+                        log::warn!("[CODEX-SYNC] {error}");
+                        errors.push(error);
+                        retry_required = true;
                         skipped += 1;
                     }
                 }
@@ -420,10 +483,15 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    update_sync_state_after_records(
+        db,
+        &file_path_str,
+        file_modified,
+        line_offset,
+        retry_required,
+    )?;
 
-    Ok((imported, skipped))
+    Ok((imported, skipped, errors))
 }
 
 /// 插入单条 Codex 会话记录到 proxy_request_logs
@@ -549,6 +617,7 @@ fn find_codex_pricing(conn: &rusqlite::Connection, model_id: &str) -> Option<Mod
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn test_delta_first_event() {
@@ -709,6 +778,116 @@ mod tests {
             row.get(0)
         })?;
         assert_eq!(count, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn failed_codex_insert_retries_before_advancing_cursor() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_codex_session_record
+                 BEFORE INSERT ON proxy_request_logs
+                 WHEN NEW.request_id = 'codex_session:retry-session:1'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced insert failure');
+                 END;",
+            )?;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("retry.jsonl");
+        let lines = [
+            r#"{"type":"session_meta","payload":{"session_id":"retry-session"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+        ];
+        fs::write(&file, lines.join("\n")).unwrap();
+
+        let (_, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(get_sync_state(&db, &file.to_string_lossy())?, (0, 0));
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch("DROP TRIGGER fail_codex_session_record;")?;
+        }
+
+        let (imported, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert!(errors.is_empty());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 3)
+        );
+        assert_eq!(sync_single_codex_file(&db, &file)?.0, 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_codex_eof_line_is_retried_after_completion() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("incomplete.jsonl");
+        let session_meta =
+            r#"{"type":"session_meta","payload":{"session_id":"incomplete-session"}}"#;
+        let turn_context = r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#;
+        let first = r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#;
+        let second = r#"{"type":"event_msg","timestamp":"2026-07-18T00:01:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":4,"output_tokens":2}}}}"#;
+        let third = r#"{"type":"event_msg","timestamp":"2026-07-18T00:02:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":6,"output_tokens":3}}}}"#;
+        let split_at = second.len() - 2;
+        fs::write(
+            &file,
+            format!(
+                "{session_meta}\n{turn_context}\n{first}\n{}",
+                &second[..split_at]
+            ),
+        )
+        .unwrap();
+
+        let (imported, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("incomplete JSONL line 4"));
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (0, 0),
+            "an unterminated final record must not advance the cursor"
+        );
+
+        let mut writer = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "{}", &second[split_at..]).unwrap();
+        drop(writer);
+
+        let (retry_imported, retry_skipped, retry_errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(retry_imported, 1);
+        assert_eq!(retry_skipped, 1);
+        assert!(retry_errors.is_empty());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 4)
+        );
+
+        let mut writer = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writer.write_all(b"{not json").unwrap();
+        drop(writer);
+        let (_, _, malformed_errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(malformed_errors.len(), 1);
+        assert!(malformed_errors[0].contains("invalid JSONL line 5"));
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 5),
+            "a permanent syntax error must not pin the file cursor"
+        );
+        assert_eq!(sync_single_codex_file(&db, &file)?, (0, 0, Vec::new()));
+
+        let mut writer = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(writer, "\n{third}").unwrap();
+        drop(writer);
+        assert_eq!(sync_single_codex_file(&db, &file)?.0, 1);
 
         Ok(())
     }

@@ -1437,22 +1437,14 @@
       "opencode": "OpenCode"
     },
     "rawInputLabel": "Raw",
-    "dataSources": "Data Sources",
-    "dataSource": {
-      "proxy": "Routing",
-      "session_log": "Session Log",
-      "codex_db": "Codex DB",
-      "codex_session": "Codex Session",
-      "gemini_session": "Gemini Session",
-      "opencode_session": "OpenCode Session"
-    },
     "sessionSync": {
       "trigger": "Sync session logs",
-      "import": "Import Sessions",
       "resync": "Sync",
       "imported": "Imported {{count}} records from session logs",
+      "partial": "Records imported: {{imported}}; errors: {{failed}}",
       "upToDate": "Session logs are up to date",
-      "failed": "Session sync failed"
+      "failed": "Session sync failed",
+      "failedWithCount": "Session sync failed; errors: {{count}}"
     },
     "totalRecords": "{{total}} records total",
     "goToPage": "Go",
