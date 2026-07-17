@@ -38,6 +38,22 @@ use tauri::Manager;
 use tokio::sync::RwLock;
 
 const PROXY_AUTH_PLACEHOLDER: &str = "PROXY_MANAGED";
+const UPSTREAM_ERROR_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn read_upstream_error_body(
+    response: ProxyResponse,
+    status: u16,
+    timeout: std::time::Duration,
+) -> Result<bytes::Bytes, ProxyError> {
+    tokio::time::timeout(timeout, response.bytes())
+        .await
+        .map_err(|_| {
+            log::warn!(
+                "[Forwarder] Upstream HTTP {status} error body did not complete within {timeout:?}"
+            );
+            ProxyError::UpstreamError { status, body: None }
+        })?
+}
 
 pub struct ForwardResult {
     pub response: ProxyResponse,
@@ -1895,12 +1911,7 @@ impl RequestForwarder {
             }
         }
 
-        // 确定超时
-        let timeout = if self.non_streaming_timeout.is_zero() {
-            std::time::Duration::from_secs(600) // 默认 600 秒
-        } else {
-            self.non_streaming_timeout
-        };
+        let response_header_timeout = self.response_header_timeout(request_is_streaming);
 
         // 获取全局代理 URL
         let upstream_proxy_url: Option<String> = super::http_client::get_current_proxy_url();
@@ -1925,30 +1936,21 @@ impl RequestForwarder {
             log::debug!(
                 "[Forwarder] Using pooled reqwest client (preserve_exact_header_case={preserve_exact_header_case}, socks_proxy={is_socks_proxy})"
             );
-            let client = super::http_client::get();
+            let client = super::http_client::get_for_forwarding();
             let mut request = client.request(method.clone(), &url);
-            if request_is_streaming {
-                // reqwest 的 timeout 是整请求超时；流式请求交给 response_processor
-                // 的首包/静默期超时控制，避免长流被总时长误杀。
-                request = request.timeout(std::time::Duration::from_secs(24 * 60 * 60));
-            } else if !self.non_streaming_timeout.is_zero() {
+            if !request_is_streaming && !self.non_streaming_timeout.is_zero() {
                 request = request.timeout(self.non_streaming_timeout);
             }
             for (key, value) in &ordered_headers {
                 request = request.header(key, value);
             }
             let send = request.body(body_bytes).send();
-            let send_result = if request_is_streaming {
-                let header_timeout = if self.streaming_first_byte_timeout.is_zero() {
-                    timeout
-                } else {
-                    self.streaming_first_byte_timeout
-                };
+            let send_result = if let Some(header_timeout) = response_header_timeout {
                 tokio::time::timeout(header_timeout, send)
                     .await
                     .map_err(|_| {
                         ProxyError::Timeout(format!(
-                            "流式响应首包超时: {}s（上游未返回响应头）",
+                            "Upstream returned no response headers within {}s",
                             header_timeout.as_secs()
                         ))
                     })?
@@ -1969,7 +1971,7 @@ impl RequestForwarder {
                 ordered_headers,
                 extensions.clone(),
                 body_bytes,
-                timeout,
+                response_header_timeout,
                 upstream_proxy_url.as_deref(),
             )
             .await?
@@ -1989,7 +1991,8 @@ impl RequestForwarder {
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
             let encoding = get_content_encoding(response.headers());
-            let raw = response.bytes().await?;
+            let raw = read_upstream_error_body(response, status_code, UPSTREAM_ERROR_BODY_TIMEOUT)
+                .await?;
             let decoded = match encoding {
                 Some(encoding) => match decompress_body(&encoding, &raw) {
                     Ok(Some(decompressed)) => decompressed,
@@ -2037,6 +2040,15 @@ impl RequestForwarder {
             })??;
 
         Ok(ProxyResponse::buffered(status, headers, body))
+    }
+
+    fn response_header_timeout(&self, request_is_streaming: bool) -> Option<std::time::Duration> {
+        let timeout = if request_is_streaming {
+            self.streaming_first_byte_timeout
+        } else {
+            self.non_streaming_timeout
+        };
+        (!timeout.is_zero()).then_some(timeout)
     }
 
     async fn prime_streaming_response(
@@ -2908,6 +2920,28 @@ mod tests {
     }
 
     #[test]
+    fn zero_timeouts_disable_response_header_deadlines() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+
+        assert_eq!(forwarder.response_header_timeout(false), None);
+        assert_eq!(forwarder.response_header_timeout(true), None);
+    }
+
+    #[test]
+    fn response_header_deadline_uses_the_matching_request_mode() {
+        let forwarder = test_forwarder(Duration::from_secs(17), Duration::from_secs(29));
+
+        assert_eq!(
+            forwarder.response_header_timeout(false),
+            Some(Duration::from_secs(17))
+        );
+        assert_eq!(
+            forwarder.response_header_timeout(true),
+            Some(Duration::from_secs(29))
+        );
+    }
+
+    #[test]
     fn single_provider_retryable_log_uses_single_provider_code() {
         let error = ProxyError::UpstreamError {
             status: 429,
@@ -3265,6 +3299,57 @@ mod tests {
         };
 
         assert!(matches!(err, ProxyError::ForwardFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn stalled_upstream_error_body_hits_total_deadline() {
+        let forwarder = test_forwarder(Duration::ZERO, Duration::ZERO);
+        let response = ProxyResponse::streamed(
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            futures::stream::pending::<Result<Bytes, std::io::Error>>(),
+        );
+
+        let err = read_upstream_error_body(
+            response,
+            StatusCode::BAD_REQUEST.as_u16(),
+            Duration::from_millis(20),
+        )
+        .await
+        .expect_err("a stalled upstream error body must not hang forever");
+
+        assert!(matches!(
+            err,
+            ProxyError::UpstreamError {
+                status: 400,
+                body: None
+            }
+        ));
+        assert!(matches!(
+            forwarder.categorize_proxy_error(&err),
+            ErrorCategory::NonRetryable
+        ));
+    }
+
+    #[tokio::test]
+    async fn upstream_error_body_before_deadline_is_preserved() {
+        let response = ProxyResponse::streamed(
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            futures::stream::once(async {
+                Ok::<Bytes, std::io::Error>(Bytes::from_static(b"{\"error\":\"bad request\"}"))
+            }),
+        );
+
+        let body = read_upstream_error_body(
+            response,
+            StatusCode::BAD_REQUEST.as_u16(),
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("a completed upstream error body should be preserved");
+
+        assert_eq!(body, Bytes::from_static(b"{\"error\":\"bad request\"}"));
     }
 
     #[tokio::test]

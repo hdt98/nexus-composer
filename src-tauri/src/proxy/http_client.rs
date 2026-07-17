@@ -10,8 +10,14 @@ use std::net::IpAddr;
 use std::sync::RwLock;
 use std::time::Duration;
 
-/// 全局 HTTP 客户端实例
-static GLOBAL_CLIENT: OnceCell<RwLock<Client>> = OnceCell::new();
+struct GlobalClients {
+    general: Client,
+    forwarding: Client,
+}
+
+/// Shared HTTP clients. Proxy forwarding has no client-level request deadline;
+/// the forwarder applies the configured per-request timeout itself.
+static GLOBAL_CLIENTS: OnceCell<RwLock<GlobalClients>> = OnceCell::new();
 
 /// 当前代理 URL（用于日志和状态查询）
 static CURRENT_PROXY_URL: OnceCell<RwLock<Option<String>>> = OnceCell::new();
@@ -52,10 +58,10 @@ fn get_proxy_port() -> u16 {
 ///   传入 None 或空字符串表示直连
 pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    let client = build_client(effective_url)?;
+    let clients = build_clients(effective_url)?;
 
     // 尝试初始化全局客户端，如果已存在则记录警告并使用 apply_proxy 更新
-    if GLOBAL_CLIENT.set(RwLock::new(client.clone())).is_err() {
+    if GLOBAL_CLIENTS.set(RwLock::new(clients)).is_err() {
         log::warn!(
             "[GlobalProxy] [GP-003] Already initialized, updating instead: {}",
             effective_url
@@ -91,8 +97,8 @@ pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
 /// 验证成功返回 Ok(())，失败返回错误信息
 pub fn validate_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    // 只调用 build_client 来验证，但不应用
-    build_client(effective_url)?;
+    // Build both clients to validate the complete runtime configuration.
+    build_clients(effective_url)?;
     Ok(())
 }
 
@@ -105,15 +111,15 @@ pub fn validate_proxy(proxy_url: Option<&str>) -> Result<(), String> {
 /// * `proxy_url` - 代理 URL，None 或空字符串表示直连
 pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    let new_client = build_client(effective_url)?;
+    let new_clients = build_clients(effective_url)?;
 
     // 更新客户端
-    if let Some(lock) = GLOBAL_CLIENT.get() {
-        let mut client = lock.write().map_err(|e| {
+    if let Some(lock) = GLOBAL_CLIENTS.get() {
+        let mut clients = lock.write().map_err(|e| {
             log::error!("[GlobalProxy] [GP-001] Failed to acquire write lock: {e}");
             "Failed to update proxy: lock poisoned".to_string()
         })?;
-        *client = new_client;
+        *clients = new_clients;
     } else {
         // 如果还没初始化，则初始化
         return init(proxy_url);
@@ -149,15 +155,15 @@ pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
 #[allow(dead_code)]
 pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
-    let new_client = build_client(effective_url)?;
+    let new_clients = build_clients(effective_url)?;
 
     // 更新客户端
-    if let Some(lock) = GLOBAL_CLIENT.get() {
-        let mut client = lock.write().map_err(|e| {
+    if let Some(lock) = GLOBAL_CLIENTS.get() {
+        let mut clients = lock.write().map_err(|e| {
             log::error!("[GlobalProxy] [GP-001] Failed to acquire write lock: {e}");
             "Failed to update proxy: lock poisoned".to_string()
         })?;
-        *client = new_client;
+        *clients = new_clients;
     } else {
         // 如果还没初始化，则初始化
         return init(proxy_url);
@@ -186,13 +192,29 @@ pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
 ///
 /// 返回配置了代理的客户端（如果已配置代理），否则返回跟随系统代理的客户端。
 pub fn get() -> Client {
-    GLOBAL_CLIENT
+    GLOBAL_CLIENTS
         .get()
         .and_then(|lock| lock.read().ok())
-        .map(|c| c.clone())
+        .map(|clients| clients.general.clone())
         .unwrap_or_else(|| {
             log::warn!("[GlobalProxy] [GP-004] Client not initialized, using fallback");
             build_client(None).unwrap_or_default()
+        })
+}
+
+/// Return the pooled client used by the local proxy forwarding path.
+///
+/// Unlike the general-purpose client, it has no built-in total request timeout.
+/// RequestForwarder owns response-header, body, and stream-idle deadlines so a
+/// configured zero can actually disable those deadlines.
+pub fn get_for_forwarding() -> Client {
+    GLOBAL_CLIENTS
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .map(|clients| clients.forwarding.clone())
+        .unwrap_or_else(|| {
+            log::warn!("[GlobalProxy] [GP-004] Client not initialized, using forwarding fallback");
+            build_forwarding_client(None).unwrap_or_default()
         })
 }
 
@@ -214,8 +236,25 @@ pub fn is_proxy_enabled() -> bool {
 
 /// 构建 HTTP 客户端
 fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    build_client_with_timeout(proxy_url, Some(Duration::from_secs(600)))
+}
+
+fn build_forwarding_client(proxy_url: Option<&str>) -> Result<Client, String> {
+    build_client_with_timeout(proxy_url, None)
+}
+
+fn build_clients(proxy_url: Option<&str>) -> Result<GlobalClients, String> {
+    Ok(GlobalClients {
+        general: build_client(proxy_url)?,
+        forwarding: build_forwarding_client(proxy_url)?,
+    })
+}
+
+fn build_client_with_timeout(
+    proxy_url: Option<&str>,
+    request_timeout: Option<Duration>,
+) -> Result<Client, String> {
     let mut builder = Client::builder()
-        .timeout(Duration::from_secs(600))
         .connect_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
         .tcp_keepalive(Duration::from_secs(60))
@@ -225,6 +264,10 @@ fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
         .no_brotli()
         .no_deflate()
         .no_zstd();
+
+    if let Some(timeout) = request_timeout {
+        builder = builder.timeout(timeout);
+    }
 
     // 有代理地址则使用代理，否则跟随系统代理
     if let Some(url) = proxy_url {
