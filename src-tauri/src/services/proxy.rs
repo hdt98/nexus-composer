@@ -343,7 +343,7 @@ impl ProxyService {
         )
         .map_err(|e| format!("构建 codex 有效配置失败: {e}"))?;
         if let Some(existing_live) = existing_live.as_ref() {
-            Self::preserve_codex_mcp_servers_from_existing_config(
+            Self::preserve_codex_user_config_from_existing_config(
                 &mut effective_settings,
                 existing_live,
             )?;
@@ -2031,8 +2031,14 @@ impl ProxyService {
                 })
                 .transpose()?;
 
+            if let Ok(existing_live) = self.read_codex_live() {
+                Self::preserve_codex_user_config_from_existing_config(
+                    &mut effective_settings,
+                    &existing_live,
+                )?;
+            }
             if let Some(existing_value) = existing_backup_value.as_ref() {
-                Self::preserve_codex_mcp_servers_from_existing_config(
+                Self::preserve_codex_user_config_from_existing_config(
                     &mut effective_settings,
                     existing_value,
                 )?;
@@ -2180,7 +2186,7 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
-    fn preserve_codex_mcp_servers_from_existing_config(
+    fn preserve_codex_user_config_from_existing_config(
         target_settings: &mut Value,
         existing_config: &Value,
     ) -> Result<(), String> {
@@ -2212,6 +2218,12 @@ impl ProxyService {
         let existing_doc = existing_config
             .parse::<toml_edit::DocumentMut>()
             .map_err(|e| format!("解析现有 Codex 备份失败: {e}"))?;
+
+        for (key, item) in existing_doc.as_table().iter() {
+            if target_doc.get(key).is_none() {
+                target_doc.insert(key, item.clone());
+            }
+        }
 
         if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
             match target_doc.get_mut("mcp_servers") {
@@ -5005,7 +5017,7 @@ base_url = "https://codex.example/v1"
 
     #[tokio::test]
     #[serial]
-    async fn update_live_backup_from_provider_preserves_codex_mcp_servers() {
+    async fn update_live_backup_from_provider_preserves_codex_user_config() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -5020,6 +5032,8 @@ base_url = "https://codex.example/v1"
                 },
                 "config": r#"model_provider = "any"
 model = "gpt-4"
+appearanceTheme = "dark"
+usePointerCursors = true
 
 [model_providers.any]
 base_url = "https://old.example/v1"
@@ -5071,6 +5085,14 @@ base_url = "https://new.example/v1"
         assert!(
             config.contains("[mcp_servers.echo]"),
             "existing Codex MCP section should survive proxy hot-switch backup update"
+        );
+        assert!(
+            config.contains("appearanceTheme = \"dark\""),
+            "Codex appearance should survive proxy hot-switch backup update"
+        );
+        assert!(
+            config.contains("usePointerCursors = true"),
+            "unrelated Codex preferences should survive proxy hot-switch backup update"
         );
         assert!(
             config.contains("https://new.example/v1"),
@@ -5147,6 +5169,7 @@ requires_openai_auth = true
                 },
                 "config": r#"model_provider = "rightcode"
 model = "gpt-5.4"
+appearanceTheme = "dark"
 
 [model_providers.rightcode]
 name = "RightCode"
@@ -5179,6 +5202,13 @@ requires_openai_auth = true
             parsed_backup.get("model_provider").and_then(|v| v.as_str()),
             Some("aihubmix"),
             "provider-derived restore backup should preserve the provider's model_provider"
+        );
+        assert_eq!(
+            parsed_backup
+                .get("appearanceTheme")
+                .and_then(|v| v.as_str()),
+            Some("dark"),
+            "restore backup should capture Codex preferences changed during takeover"
         );
         let backup_model_providers = parsed_backup
             .get("model_providers")
@@ -5239,6 +5269,13 @@ requires_openai_auth = true
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
             Some("aihubmix"),
             "restored Codex live config should preserve the provider's model_provider"
+        );
+        assert_eq!(
+            parsed_live
+                .get("appearanceTheme")
+                .and_then(|v| v.as_str()),
+            Some("dark"),
+            "restored Codex live config should preserve the user's appearance"
         );
         assert_eq!(
             live.get("auth")
