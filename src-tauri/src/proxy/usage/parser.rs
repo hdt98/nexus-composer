@@ -34,6 +34,7 @@ impl TokenUsage {
     pub fn dedup_request_id(&self) -> String {
         self.message_id
             .as_ref()
+            .filter(|mid| !mid.trim().is_empty())
             .map(|mid| format!("{SESSION_REQUEST_ID_PREFIX}{mid}"))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
     }
@@ -536,6 +537,29 @@ mod tests {
         assert_eq!(usage.cache_read_tokens, 20);
         assert_eq!(usage.cache_creation_tokens, 10);
         assert_eq!(usage.model, Some("claude-sonnet-4-20250514".to_string()));
+    }
+
+    #[test]
+    fn test_dedup_request_id_rejects_empty_message_ids() {
+        for message_id in ["", "  "] {
+            let usage = TokenUsage {
+                message_id: Some(message_id.to_string()),
+                ..Default::default()
+            };
+            let first = usage.dedup_request_id();
+            let second = usage.dedup_request_id();
+
+            assert_ne!(first, "session:");
+            assert_ne!(first, second);
+            assert!(uuid::Uuid::parse_str(&first).is_ok());
+            assert!(uuid::Uuid::parse_str(&second).is_ok());
+        }
+
+        let padded = TokenUsage {
+            message_id: Some(" msg_1 ".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(padded.dedup_request_id(), "session: msg_1 ");
     }
 
     #[test]
