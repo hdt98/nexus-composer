@@ -1130,15 +1130,18 @@ fn format_headers(headers: &HeaderMap) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app_config::AppType;
     use crate::database::Database;
     use crate::error::AppError;
     use crate::provider::ProviderMeta;
     use crate::proxy::failover_switch::FailoverSwitchManager;
+    use crate::proxy::handler_config::CLAUDE_PARSER_CONFIG;
     use crate::proxy::provider_router::ProviderRouter;
     use crate::proxy::providers::{
         codex_chat_history::CodexChatHistoryStore, gemini_shadow::GeminiShadowStore,
     };
     use crate::proxy::types::{ProxyConfig, ProxyStatus};
+    use rusqlite::OptionalExtension;
     use rust_decimal::Decimal;
     use std::collections::HashMap;
     use std::str::FromStr;
@@ -1307,6 +1310,74 @@ mod tests {
         let completion = collect_body(body).await;
         assert_eq!(completion.0.len(), 2);
         assert_eq!(completion.2, StreamOutcome::complete(200));
+    }
+
+    #[tokio::test]
+    async fn completed_anthropic_stream_persists_terminal_duration() -> Result<(), AppError> {
+        let db = Arc::new(Database::memory()?);
+        insert_provider(&db, "provider-duration", "claude", ProviderMeta::default())?;
+        db.set_current_provider("claude", "provider-duration")?;
+
+        let state = build_state(db.clone());
+        let mut ctx = RequestContext::new(
+            &state,
+            &serde_json::json!({"model": "req-model", "stream": true}),
+            &HeaderMap::new(),
+            AppType::Claude,
+            "Claude",
+            "claude",
+        )
+        .await
+        .expect("request context");
+        ctx.start_time = std::time::Instant::now() - std::time::Duration::from_millis(25);
+
+        let collector = create_usage_collector(&ctx, &state, 200, &CLAUDE_PARSER_CONFIG)
+            .expect("usage collector");
+        let source = futures::stream::iter([Ok(Bytes::from(concat!(
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-duration\",\"model\":\"resp-model\",\"usage\":{\"input_tokens\":7,\"output_tokens\":0}}}\n\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+            "data: {\"type\":\"message_stop\"}\n\n"
+        )))]);
+        let _: Vec<_> =
+            create_logged_passthrough_stream(source, "test", Some(collector), NO_TIMEOUTS, None)
+                .collect()
+                .await;
+
+        let (latency_ms, duration_ms, status, error) =
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                loop {
+                    let row = {
+                        let conn = db.conn.lock().expect("lock test database");
+                        conn.query_row(
+                            "SELECT latency_ms, duration_ms, status_code, error_message
+                             FROM proxy_request_logs WHERE request_id = 'session:msg-duration'",
+                            [],
+                            |row| {
+                                Ok((
+                                    row.get::<_, i64>(0)?,
+                                    row.get::<_, Option<i64>>(1)?,
+                                    row.get::<_, i64>(2)?,
+                                    row.get::<_, Option<String>>(3)?,
+                                ))
+                            },
+                        )
+                        .optional()
+                        .expect("query usage row")
+                    };
+                    if let Some(row) = row {
+                        break row;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("completed Anthropic stream was not logged");
+
+        assert!(latency_ms >= 25);
+        assert_eq!(duration_ms, Some(latency_ms));
+        assert_eq!(status, 200);
+        assert_eq!(error, None);
+        Ok(())
     }
 
     #[tokio::test]

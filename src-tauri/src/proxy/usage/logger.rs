@@ -77,9 +77,9 @@ impl<'a> UsageLogger<'a> {
                 request_id, correlation_id, provider_id, app_type, model, request_model, pricing_model,
                 input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens,
                 input_cost_usd, output_cost_usd, cache_read_cost_usd, cache_creation_cost_usd, total_cost_usd,
-                latency_ms, first_token_ms, status_code, error_message, session_id,
+                latency_ms, first_token_ms, duration_ms, status_code, error_message, session_id,
                 provider_type, is_streaming, cost_multiplier, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
             rusqlite::params![
                 log.request_id,
                 log.correlation_id,
@@ -99,6 +99,7 @@ impl<'a> UsageLogger<'a> {
                 total_cost,
                 log.latency_ms as i64,
                 log.first_token_ms.map(|v| v as i64),
+                log.latency_ms as i64,
                 log.status_code as i64,
                 log.error_message,
                 log.session_id,
@@ -421,17 +422,23 @@ mod tests {
 
         // 验证记录已插入
         let conn = crate::database::lock_conn!(db.conn);
-        let (count, request_model, correlation_id): (i64, String, Option<String>) = conn
+        let (count, request_model, correlation_id, duration_ms): (
+            i64,
+            String,
+            Option<String>,
+            Option<i64>,
+        ) = conn
             .query_row(
-                "SELECT COUNT(*), request_model, correlation_id
+                "SELECT COUNT(*), request_model, correlation_id, duration_ms
                  FROM proxy_request_logs WHERE request_id = 'req-123'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(request_model, "req-model");
         assert_eq!(correlation_id.as_deref(), Some("server-request-id"));
+        assert_eq!(duration_ms, Some(100));
         Ok(())
     }
 
@@ -516,15 +523,16 @@ mod tests {
 
         // 验证错误记录已插入
         let conn = crate::database::lock_conn!(db.conn);
-        let (status, error): (i64, Option<String>) = conn
+        let (status, error, duration_ms): (i64, Option<String>, Option<i64>) = conn
             .query_row(
-                "SELECT status_code, error_message FROM proxy_request_logs WHERE request_id = 'req-error'",
+                "SELECT status_code, error_message, duration_ms FROM proxy_request_logs WHERE request_id = 'req-error'",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         assert_eq!(status, 500);
         assert_eq!(error, Some("Internal Server Error".to_string()));
+        assert_eq!(duration_ms, Some(50));
         Ok(())
     }
 }
