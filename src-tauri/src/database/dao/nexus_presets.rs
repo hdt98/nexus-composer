@@ -6,10 +6,13 @@ use serde_json::{json, Value};
 use toml_edit::{value, DocumentMut};
 
 const HOSTED_ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
+const HOSTED_ORIGIN: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud";
 const LEGACY_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
 const MODEL: &str = "GLM-5.2-FP8";
 const CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
-const MANAGED_VERSION: u64 = 7;
+const CODEX_MANAGED_VERSION: u64 = 7;
+const CLAUDE_LEGACY_MANAGED_VERSION: u64 = 7;
+const CLAUDE_MANAGED_VERSION: u64 = 8;
 const CLAUDE_DESKTOP_MANAGED_VERSION: u64 = 8;
 const CONTEXT_WINDOW: i64 = 1_048_576;
 const COMPACT_TOKENS: i64 = 252_000;
@@ -22,6 +25,11 @@ fn recognized_endpoint(value: &str) -> bool {
     )
 }
 
+fn recognized_claude_endpoint(value: &str, version: Option<u64>) -> bool {
+    value.trim_end_matches('/') == HOSTED_ORIGIN
+        || (version != Some(CLAUDE_MANAGED_VERSION) && recognized_endpoint(value))
+}
+
 fn recognized_model(value: &str) -> bool {
     matches!(
         value.trim_end_matches("[1m]"),
@@ -31,7 +39,8 @@ fn recognized_model(value: &str) -> bool {
 
 fn managed_version(app: &AppType) -> Option<u64> {
     match app {
-        AppType::Claude | AppType::Codex => Some(MANAGED_VERSION),
+        AppType::Claude => Some(CLAUDE_MANAGED_VERSION),
+        AppType::Codex => Some(CODEX_MANAGED_VERSION),
         AppType::ClaudeDesktop => Some(CLAUDE_DESKTOP_MANAGED_VERSION),
         _ => None,
     }
@@ -74,9 +83,12 @@ fn has_hosted_signature(app: &AppType, settings: &Value, meta: &Value) -> bool {
             let Some(env) = settings.get("env") else {
                 return false;
             };
+            let version = meta
+                .get("managedNexusPresetVersion")
+                .and_then(Value::as_u64);
             env.get("ANTHROPIC_BASE_URL")
                 .and_then(Value::as_str)
-                .is_some_and(recognized_endpoint)
+                .is_some_and(|endpoint| recognized_claude_endpoint(endpoint, version))
                 && env
                     .get("ANTHROPIC_MODEL")
                     .and_then(Value::as_str)
@@ -254,7 +266,7 @@ fn upgrade_settings(app: &AppType, settings: &mut Value, meta: &mut Value) -> Re
                 .get_mut("env")
                 .and_then(Value::as_object_mut)
                 .ok_or_else(|| AppError::Message("Nexus Claude env must be an object".into()))?;
-            env.insert("ANTHROPIC_BASE_URL".into(), json!(HOSTED_ENDPOINT));
+            env.insert("ANTHROPIC_BASE_URL".into(), json!(HOSTED_ORIGIN));
             for key in [
                 "ANTHROPIC_MODEL",
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL",
@@ -356,11 +368,29 @@ impl Database {
                 meta.remove("providerType");
                 meta.remove("managedNexusPresetVersion");
             } else if version != Some(managed_version) {
-                upgrade_settings(app, &mut settings, &mut meta).map_err(|error| {
-                    AppError::Message(format!(
-                        "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
-                    ))
-                })?;
+                if matches!(app, AppType::Claude) && version == Some(CLAUDE_LEGACY_MANAGED_VERSION)
+                {
+                    let env = settings
+                        .get_mut("env")
+                        .and_then(Value::as_object_mut)
+                        .ok_or_else(|| {
+                            AppError::Message("Nexus Claude env must be an object".into())
+                        })?;
+                    env.insert("ANTHROPIC_BASE_URL".into(), json!(HOSTED_ORIGIN));
+                    let meta = meta.as_object_mut().ok_or_else(|| {
+                        AppError::Message("Nexus metadata must be an object".into())
+                    })?;
+                    meta.insert(
+                        "managedNexusPresetVersion".into(),
+                        json!(CLAUDE_MANAGED_VERSION),
+                    );
+                } else {
+                    upgrade_settings(app, &mut settings, &mut meta).map_err(|error| {
+                        AppError::Message(format!(
+                            "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
+                        ))
+                    })?;
+                }
             } else {
                 continue;
             }
@@ -385,7 +415,9 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-    use super::{MANAGED_VERSION, MODEL};
+    use super::{
+        CLAUDE_LEGACY_MANAGED_VERSION, CLAUDE_MANAGED_VERSION, CODEX_MANAGED_VERSION, MODEL,
+    };
     use crate::app_config::AppType;
     use crate::database::Database;
     use crate::provider::Provider;
@@ -393,6 +425,7 @@ mod tests {
 
     const LEGACY_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
     const HOSTED_ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
+    const HOSTED_ORIGIN: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud";
 
     fn save_provider(
         db: &Database,
@@ -474,7 +507,7 @@ mod tests {
         );
         assert_eq!(
             codex.meta.as_ref().unwrap().managed_nexus_preset_version,
-            Some(MANAGED_VERSION as u32)
+            Some(CODEX_MANAGED_VERSION as u32)
         );
         assert_eq!(
             codex
@@ -511,9 +544,9 @@ mod tests {
         let env = &claude.settings_config["env"];
         assert_eq!(
             claude.meta.as_ref().unwrap().managed_nexus_preset_version,
-            Some(MANAGED_VERSION as u32)
+            Some(CLAUDE_MANAGED_VERSION as u32)
         );
-        assert_eq!(env["ANTHROPIC_BASE_URL"], HOSTED_ENDPOINT);
+        assert_eq!(env["ANTHROPIC_BASE_URL"], HOSTED_ORIGIN);
         assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "user-key");
         assert_eq!(env["ANTHROPIC_MODEL"], "GLM-5.2-FP8[1m]");
         assert_eq!(env["API_TIMEOUT_MS"], "3000000");
@@ -833,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_future_versions_and_is_idempotent() {
+    fn skips_future_versions_and_migrates_v7_idempotently() {
         let db = Database::memory().unwrap();
         save_provider(
             &db,
@@ -855,17 +888,73 @@ mod tests {
             AppType::Claude,
             "managed",
             "Nexus GLM-5.2",
-            json!({"env":{
-                "ANTHROPIC_BASE_URL":HOSTED_ENDPOINT,
-                "ANTHROPIC_MODEL":"GLM-5.2-FP8[1m]"
-            }}),
-            json!({"providerType":"nexus","managedNexusPresetVersion":6,"apiFormat":"openai_chat"}),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
+                    "ANTHROPIC_AUTH_TOKEN": "user-key",
+                    "ANTHROPIC_MODEL": "glm-5.2[1m]",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "custom-sonnet",
+                    "USER_SETTING": "keep"
+                },
+                "modelCatalog": {
+                    "models": [{
+                        "model": "GLM-5.2-FP8",
+                        "displayName": "Keep this label",
+                        "inputModalities": ["text"]
+                    }]
+                }
+            }),
+            json!({
+                "providerType": "nexus",
+                "managedNexusPresetVersion": 7,
+                "apiFormat": "openai_chat",
+                "localProxyRequestOverrides": {
+                    "headers": {"x-keep": "yes"},
+                    "body": {"temperature": 0.2}
+                }
+            }),
         );
+        let before = db
+            .get_provider_by_id("managed", AppType::Claude.as_str())
+            .unwrap()
+            .unwrap();
+        let mut expected_settings = before.settings_config;
+        expected_settings["env"]["ANTHROPIC_BASE_URL"] = json!(HOSTED_ORIGIN);
+        let mut expected_meta = serde_json::to_value(before.meta).unwrap();
+        expected_meta["managedNexusPresetVersion"] = json!(CLAUDE_MANAGED_VERSION);
+
         assert!(db
             .migrate_managed_nexus_for_app(&AppType::Claude, Some("managed"))
             .unwrap());
+        let managed = db
+            .get_provider_by_id("managed", AppType::Claude.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(managed.settings_config, expected_settings);
+        assert_eq!(serde_json::to_value(managed.meta).unwrap(), expected_meta);
         assert!(!db
             .migrate_managed_nexus_for_app(&AppType::Claude, Some("managed"))
             .unwrap());
+    }
+
+    #[test]
+    fn current_claude_version_requires_the_origin_signature() {
+        let settings = json!({"env": {
+            "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
+            "ANTHROPIC_MODEL": "GLM-5.2-FP8[1m]"
+        }});
+        let mut meta = json!({"managedNexusPresetVersion": CLAUDE_MANAGED_VERSION});
+
+        assert!(!super::has_hosted_signature(
+            &AppType::Claude,
+            &settings,
+            &meta
+        ));
+        meta["managedNexusPresetVersion"] = json!(CLAUDE_LEGACY_MANAGED_VERSION);
+        assert!(super::has_hosted_signature(
+            &AppType::Claude,
+            &settings,
+            &meta
+        ));
     }
 }

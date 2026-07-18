@@ -13,7 +13,9 @@ import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPres
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CLAUDE_BASE_URL,
   NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+  NEXUS_CLAUDE_MANAGED_PRESET_VERSION,
   NEXUS_CLAUDE_MODEL,
   NEXUS_CONTEXT_WINDOW,
   NEXUS_ENDPOINT,
@@ -95,7 +97,11 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
   it("uses the hosted Nexus endpoint without a bundled credential", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus GLM-5.2")!;
     const env = (nexus.settingsConfig as any).env;
-    expect(env.ANTHROPIC_BASE_URL).toBe(NEXUS_ENDPOINT);
+    expect(env.ANTHROPIC_BASE_URL).toBe(NEXUS_CLAUDE_BASE_URL);
+    expect(nexus.endpointCandidates).toEqual([NEXUS_CLAUDE_BASE_URL]);
+    expect(`${env.ANTHROPIC_BASE_URL}/v1/messages`).toBe(
+      `${NEXUS_ENDPOINT}/messages`,
+    );
     expect(env.ANTHROPIC_AUTH_TOKEN).toBe("");
   });
 
@@ -117,7 +123,9 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
 
   it("uses the Chat adapter with text-only continuity defaults", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus GLM-5.2")!;
-    expect(nexus.managedNexusPresetVersion).toBe(NEXUS_MANAGED_PRESET_VERSION);
+    expect(nexus.managedNexusPresetVersion).toBe(
+      NEXUS_CLAUDE_MANAGED_PRESET_VERSION,
+    );
     expect(nexus.apiFormat).toBe("openai_chat");
     expect((nexus.settingsConfig as any).modelCatalog).toEqual(
       NEXUS_TEXT_MODEL_CATALOG,
