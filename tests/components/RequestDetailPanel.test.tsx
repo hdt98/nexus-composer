@@ -12,6 +12,9 @@ vi.mock("react-i18next", () => ({
     t: (key: string) =>
       ({
         "common.close": "Close",
+        "usage.requestId": "Nexus request ID",
+        "usage.correlationId": "Server request ID",
+        "usage.copyRequestId": "Copy Nexus request ID",
         "usage.copyCorrelationId": "Copy server request ID",
       })[key] ?? key,
     i18n: { language: "en" },
@@ -81,14 +84,37 @@ describe("RequestDetailPanel", () => {
     copyTextMock.mockResolvedValue(undefined);
   });
 
-  it("shows and copies the server request ID", () => {
+  it("shows and copies debug request IDs", () => {
     render(<RequestDetailPanel requestId="response-id" onClose={vi.fn()} />);
+
+    expect(screen.getByText("Nexus request ID")).toBeInTheDocument();
+    expect(screen.getByText("Server request ID")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Copy Nexus request ID" }),
+    );
+    expect(copyTextMock).toHaveBeenCalledWith("response-id");
 
     expect(screen.getByText("server-request-id")).toBeInTheDocument();
     fireEvent.click(
       screen.getByRole("button", { name: "Copy server request ID" }),
     );
     expect(copyTextMock).toHaveBeenCalledWith("server-request-id");
+  });
+
+  it("hides the optional server request ID when it is absent", () => {
+    useRequestDetailMock.mockReturnValue({
+      data: { ...request, correlationId: undefined },
+      isLoading: false,
+    });
+
+    render(<RequestDetailPanel requestId="response-id" onClose={vi.fn()} />);
+
+    expect(
+      screen.queryByRole("button", { name: "Copy server request ID" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Copy Nexus request ID" }),
+    ).toBeInTheDocument();
   });
 
   it("uses concise Vietnamese request-detail labels", () => {
@@ -100,7 +126,8 @@ describe("RequestDetailPanel", () => {
       performance: viLocale.usage.performance,
       nexusId: viLocale.usage.requestId,
       serverId: viLocale.usage.correlationId,
-      copy: viLocale.usage.copyCorrelationId,
+      copyNexus: viLocale.usage.copyRequestId,
+      copyServer: viLocale.usage.copyCorrelationId,
     }).toEqual({
       title: "Chi tiết yêu cầu",
       general: "Thông tin chung",
@@ -109,7 +136,8 @@ describe("RequestDetailPanel", () => {
       performance: "Hiệu năng",
       nexusId: "Mã trong Nexus",
       serverId: "Mã yêu cầu",
-      copy: "Sao chép mã yêu cầu",
+      copyNexus: "Sao chép mã Nexus",
+      copyServer: "Sao chép mã yêu cầu",
     });
   });
 

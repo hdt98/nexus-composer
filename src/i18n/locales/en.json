@@ -1527,6 +1527,7 @@
     "successRate": "Success Rate",
     "requestId": "Nexus request ID",
     "correlationId": "Server request ID",
+    "copyRequestId": "Copy Nexus request ID",
     "copyCorrelationId": "Copy server request ID",
     "unpriced": "Unpriced",
     "never": "Never",

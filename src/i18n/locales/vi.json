@@ -1527,6 +1527,7 @@
     "successRate": "Success Rate",
     "requestId": "Mã trong Nexus",
     "correlationId": "Mã yêu cầu",
+    "copyRequestId": "Sao chép mã Nexus",
     "copyCorrelationId": "Sao chép mã yêu cầu",
     "unpriced": "Chưa có giá",
     "never": "Never",
