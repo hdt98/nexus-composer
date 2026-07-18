@@ -506,6 +506,47 @@ pub(crate) fn build_effective_settings_with_common_config(
     Ok(effective_settings)
 }
 
+fn set_codex_desktop_table(settings: &mut Value, desktop: Option<Item>) -> Result<(), AppError> {
+    let settings = settings
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("Codex provider settings must be a JSON object".into()))?;
+    let config = settings.get("config").and_then(Value::as_str).unwrap_or("");
+    let mut provider_doc = config.parse::<DocumentMut>().map_err(|e| {
+        AppError::Message(format!(
+            "Invalid Codex config.toml while synchronizing desktop settings: {e}"
+        ))
+    })?;
+    match desktop {
+        Some(desktop) => {
+            provider_doc.insert("desktop", desktop);
+        }
+        None => {
+            provider_doc.remove("desktop");
+        }
+    }
+    settings.insert(
+        "config".to_string(),
+        Value::String(provider_doc.to_string()),
+    );
+    Ok(())
+}
+
+pub(crate) fn sync_codex_desktop_table(
+    settings: &mut Value,
+    authoritative_settings: &Value,
+) -> Result<(), AppError> {
+    let config = authoritative_settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let doc = config.parse::<DocumentMut>().map_err(|e| {
+        AppError::Message(format!(
+            "Invalid authoritative Codex config.toml while synchronizing desktop settings: {e}"
+        ))
+    })?;
+    set_codex_desktop_table(settings, doc.get("desktop").cloned())
+}
+
 pub(crate) fn write_live_with_common_config(
     db: &Database,
     app_type: &AppType,
@@ -514,6 +555,13 @@ pub(crate) fn write_live_with_common_config(
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
+
+    if matches!(app_type, AppType::Codex) {
+        let live_settings = json!({
+            "config": crate::codex_config::read_codex_config_text()?
+        });
+        sync_codex_desktop_table(&mut effective_provider.settings_config, &live_settings)?;
+    }
 
     if matches!(app_type, AppType::ClaudeDesktop) {
         crate::claude_desktop_config::apply_provider(db, &effective_provider)?;
@@ -620,6 +668,13 @@ fn restore_live_settings_for_provider_backfill(
         if let Some(obj) = settings.as_object_mut() {
             obj.insert("modelCatalog".to_string(), stored_catalog.clone());
         }
+    }
+
+    if let Err(err) = set_codex_desktop_table(&mut settings, None) {
+        log::warn!(
+            "Failed to remove live-owned Codex desktop settings while backfilling '{}': {err}",
+            provider.id
+        );
     }
 
     settings
@@ -1802,6 +1857,42 @@ mod tests {
             result.get("modelCatalog"),
             live_settings.get("modelCatalog"),
             "backfill must keep the Live-reconstructed catalog when the DB has none"
+        );
+    }
+
+    #[test]
+    fn codex_switch_backfill_does_not_store_live_desktop_preferences() {
+        let provider = Provider::with_id(
+            "old".to_string(),
+            "Old".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "token" },
+                "config": "model_provider = \"old\"\n"
+            }),
+            None,
+        );
+        let live_settings = json!({
+            "auth": { "OPENAI_API_KEY": "token" },
+            "config": r#"model_provider = "old"
+
+[desktop]
+appearanceTheme = "dark"
+animations-enabled = false
+"#
+        });
+
+        let result =
+            restore_live_settings_for_provider_backfill(&AppType::Codex, &provider, live_settings);
+        let config = result["config"]
+            .as_str()
+            .expect("backfilled config should remain a string");
+        let parsed = config
+            .parse::<DocumentMut>()
+            .expect("backfilled config should remain valid TOML");
+
+        assert!(
+            parsed.get("desktop").is_none(),
+            "Codex desktop preferences are live-owned and must not be stored in a provider"
         );
     }
 }

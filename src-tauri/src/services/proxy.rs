@@ -11,7 +11,8 @@ use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
-    build_effective_settings_with_common_config, write_live_with_common_config,
+    build_effective_settings_with_common_config, sync_codex_desktop_table,
+    write_live_with_common_config,
 };
 use crate::store::AppState;
 use serde_json::{json, Map, Value};
@@ -379,6 +380,11 @@ impl ProxyService {
                 &mut effective_settings,
                 existing_live,
             )?;
+            sync_codex_desktop_table(&mut effective_settings, existing_live)
+                .map_err(|e| format!("Failed to preserve Codex desktop settings: {e}"))?;
+        } else {
+            sync_codex_desktop_table(&mut effective_settings, &json!({ "config": "" }))
+                .map_err(|e| format!("Failed to clear stale Codex desktop settings: {e}"))?;
         }
         let (_, proxy_codex_base_url) = self.build_proxy_urls().await?;
 
@@ -2082,10 +2088,11 @@ impl ProxyService {
                 })
                 .transpose()?;
 
-            if let Ok(existing_live) = self.read_codex_live() {
+            let existing_live = self.read_codex_live().ok();
+            if let Some(existing_live) = existing_live.as_ref() {
                 Self::preserve_codex_user_config_from_existing_config(
                     &mut effective_settings,
-                    &existing_live,
+                    existing_live,
                 )?;
             }
             if let Some(existing_value) = existing_backup_value.as_ref() {
@@ -2094,6 +2101,16 @@ impl ProxyService {
                     existing_value,
                 )?;
                 Self::preserve_codex_oauth_auth_in_backup(&mut effective_settings, existing_value)?;
+            }
+
+            if let Some(authoritative_settings) =
+                existing_live.as_ref().or(existing_backup_value.as_ref())
+            {
+                sync_codex_desktop_table(&mut effective_settings, authoritative_settings)
+                    .map_err(|e| format!("Failed to preserve Codex desktop settings: {e}"))?;
+            } else {
+                sync_codex_desktop_table(&mut effective_settings, &json!({ "config": "" }))
+                    .map_err(|e| format!("Failed to clear stale Codex desktop settings: {e}"))?;
             }
 
             // 统一会话开关：备份是接管释放时恢复 live 的来源，官方配置的
@@ -2197,12 +2214,15 @@ impl ProxyService {
         }
 
         if has_backup && !live_taken_over && matches!(app_type_enum, AppType::Codex) {
-            let effective_settings = build_effective_settings_with_common_config(
+            let mut effective_settings = build_effective_settings_with_common_config(
                 self.db.as_ref(),
                 &AppType::Codex,
                 &provider,
             )
             .map_err(|e| format!("构建 Codex 有效配置失败: {e}"))?;
+            let live_settings = self.read_codex_live()?;
+            sync_codex_desktop_table(&mut effective_settings, &live_settings)
+                .map_err(|e| format!("Failed to preserve Codex desktop settings: {e}"))?;
             let auth = effective_settings
                 .get("auth")
                 .ok_or_else(|| "Codex 供应商缺少 auth 配置".to_string())?;
@@ -5871,6 +5891,13 @@ name = "AiHubMix"
 base_url = "https://aihubmix.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
+
+[desktop]
+show-ultra-in-model-picker-slider = false
+appearanceTheme = "light"
+dock-icon-preference = "classic"
+animations-enabled = true
+provider-only-setting = "stale"
 "#
             }),
             None,
@@ -5890,12 +5917,7 @@ requires_openai_auth = true
         )
         .await
         .expect("seed live backup");
-        service
-            .write_codex_live(&json!({
-                "auth": {
-                    "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
-                },
-                "config": r#"model_provider = "rightcode"
+        let takeover_config = r#"model_provider = "rightcode"
 model = "gpt-5.4"
 
 [model_providers.rightcode]
@@ -5905,9 +5927,18 @@ wire_api = "responses"
 requires_openai_auth = true
 
 [desktop]
+show-ultra-in-model-picker-slider = true
 appearanceTheme = "dark"
 dock-icon-preference = "codex-system"
-"#
+animations-enabled = false
+sidebar-density = "compact"
+"#;
+        service
+            .write_codex_live(&json!({
+                "auth": {
+                    "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER
+                },
+                "config": takeover_config
             }))
             .expect("seed taken-over Codex live config");
 
@@ -5929,6 +5960,8 @@ dock-icon-preference = "codex-system"
             .expect("backup config string");
         let parsed_backup: toml::Value =
             toml::from_str(backup_config).expect("parse backup config");
+        let expected_desktop: toml::Value =
+            toml::from_str(takeover_config).expect("parse expected desktop table");
         assert_eq!(
             parsed_backup.get("model_provider").and_then(|v| v.as_str()),
             Some("aihubmix"),
@@ -5948,19 +5981,9 @@ dock-icon-preference = "codex-system"
             "provider id should point at the hot-switched provider endpoint"
         );
         assert_eq!(
-            parsed_backup
-                .get("desktop")
-                .and_then(|v| v.get("appearanceTheme"))
-                .and_then(|v| v.as_str()),
-            Some("dark"),
-            "restore backup should capture desktop preferences changed during takeover"
-        );
-        assert_eq!(
-            parsed_backup
-                .get("desktop")
-                .and_then(|v| v.get("dock-icon-preference"))
-                .and_then(|v| v.as_str()),
-            Some("codex-system")
+            parsed_backup.get("desktop"),
+            expected_desktop.get("desktop"),
+            "the restore backup must use the entire live desktop table, not stale provider values"
         );
 
         let live = service.read_codex_live().expect("read Codex live config");
@@ -5993,12 +6016,33 @@ dock-icon-preference = "codex-system"
             "taken-over live config should stay pointed at the local proxy"
         );
         assert_eq!(
-            parsed_live
-                .get("desktop")
-                .and_then(|v| v.get("appearanceTheme"))
-                .and_then(|v| v.as_str()),
-            Some("dark"),
-            "hot-switch synchronization should preserve desktop preferences"
+            parsed_live.get("desktop"),
+            expected_desktop.get("desktop"),
+            "hot-switch synchronization must use the entire live desktop table"
+        );
+
+        let first_backup = backup.original_config.clone();
+        let first_live = live_config.to_string();
+        service
+            .hot_switch_provider("codex", "b")
+            .await
+            .expect("repeat hot switch Codex provider");
+        let repeated_backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("get repeated live backup")
+            .expect("repeated backup exists");
+        let repeated_live = service
+            .read_codex_live()
+            .expect("read repeated Codex live config");
+        assert_eq!(
+            repeated_backup.original_config, first_backup,
+            "repeating the same hot switch should leave the restore backup byte-identical"
+        );
+        assert_eq!(
+            repeated_live.get("config").and_then(Value::as_str),
+            Some(first_live.as_str()),
+            "repeating the same hot switch should leave live config.toml byte-identical"
         );
 
         service
@@ -6018,19 +6062,9 @@ dock-icon-preference = "codex-system"
             "restored Codex live config should preserve the provider's model_provider"
         );
         assert_eq!(
-            parsed_live
-                .get("desktop")
-                .and_then(|v| v.get("appearanceTheme"))
-                .and_then(|v| v.as_str()),
-            Some("dark"),
-            "restored Codex live config should preserve desktop preferences"
-        );
-        assert_eq!(
-            parsed_live
-                .get("desktop")
-                .and_then(|v| v.get("dock-icon-preference"))
-                .and_then(|v| v.as_str()),
-            Some("codex-system")
+            parsed_live.get("desktop"),
+            expected_desktop.get("desktop"),
+            "restored Codex live config should preserve the authoritative desktop table"
         );
         assert_eq!(
             live.get("auth")
@@ -6301,6 +6335,11 @@ name = "ProviderA"
 base_url = "https://provider-a.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
+
+[desktop]
+appearanceTheme = "dark"
+animations-enabled = false
+live-only-setting = "keep"
 "#;
         let config_b = r#"model_provider = "provider-b"
 model = "model-b"
@@ -6310,6 +6349,11 @@ name = "ProviderB"
 base_url = "https://provider-b.example/v1"
 wire_api = "responses"
 requires_openai_auth = true
+
+[desktop]
+appearanceTheme = "light"
+animations-enabled = true
+provider-only-setting = "stale"
 "#;
 
         let provider_a = Provider::with_id(
@@ -6407,6 +6451,13 @@ requires_openai_auth = true
         assert!(
             config_text.contains(r#"command = "shared-command""#),
             "config.toml must include common config content after switch"
+        );
+        let parsed: toml::Value = toml::from_str(&config_text).expect("parse switched config");
+        let expected: toml::Value = toml::from_str(config_a).expect("parse expected config");
+        assert_eq!(
+            parsed.get("desktop"),
+            expected.get("desktop"),
+            "a restored-backup hot switch must keep the whole live desktop table"
         );
     }
 
