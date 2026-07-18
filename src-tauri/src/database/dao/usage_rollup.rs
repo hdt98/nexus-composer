@@ -146,7 +146,7 @@ impl Database {
                     COALESCE(l.request_model, '') as rm,
                     COALESCE(l.pricing_model, '') as pm,
                     COUNT(*) as new_req,
-                    SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END) as new_succ,
+                    SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.error_message IS NULL THEN 1 ELSE 0 END) as new_succ,
                     COALESCE(SUM(l.input_tokens), 0) as new_in,
                     COALESCE(SUM(l.output_tokens), 0) as new_out,
                     COALESCE(SUM(l.cache_read_tokens), 0) as new_cr,
@@ -511,9 +511,13 @@ mod tests {
                     "INSERT INTO proxy_request_logs (
                         request_id, provider_id, app_type, model,
                         input_tokens, output_tokens, total_cost_usd,
-                        latency_ms, status_code, created_at
-                    ) VALUES (?1, 'p1', 'claude', 'claude-3', 100, 50, '0.01', 200, 200, ?2)",
-                    rusqlite::params![format!("merge-{i}"), old_ts + i as i64],
+                        latency_ms, status_code, error_message, created_at
+                    ) VALUES (?1, 'p1', 'claude', 'claude-3', 100, 50, '0.01', 200, 200, ?2, ?3)",
+                    rusqlite::params![
+                        format!("merge-{i}"),
+                        (i == 2).then_some("upstream_response_incomplete:length"),
+                        old_ts + i as i64
+                    ],
                 )?;
             }
         }
@@ -522,13 +526,14 @@ mod tests {
         assert_eq!(deleted, 3);
 
         let conn = crate::database::lock_conn!(db.conn);
-        let (count, input): (i64, i64) = conn.query_row(
-            "SELECT request_count, input_tokens FROM usage_daily_rollups
+        let (count, success_count, input): (i64, i64, i64) = conn.query_row(
+            "SELECT request_count, success_count, input_tokens FROM usage_daily_rollups
              WHERE app_type = 'claude' AND provider_id = 'p1'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         assert_eq!(count, 13, "10 existing + 3 new");
+        assert_eq!(success_count, 12, "10 existing + 2 semantic successes");
         assert_eq!(input, 1300, "1000 existing + 300 new");
         Ok(())
     }
