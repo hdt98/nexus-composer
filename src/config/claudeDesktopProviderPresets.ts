@@ -8,8 +8,15 @@
  *
  * 翻译来源：src/config/claudeProviderPresets.ts（排除 OAuth 与不兼容预设）
  */
-import { ProviderCategory } from "../types";
+import { ProviderCategory, type LocalProxyRequestOverrides } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
+import {
+  NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+  NEXUS_ENDPOINT,
+  NEXUS_MODEL,
+  NEXUS_REQUEST_OVERRIDES,
+  NEXUS_TEXT_MODEL_CATALOG,
+} from "./nexus";
 
 export type ClaudeDesktopApiFormat =
   | "anthropic"
@@ -56,7 +63,10 @@ export interface ClaudeDesktopProviderPreset {
   mode: "direct" | "proxy";
   apiFormat?: ClaudeDesktopApiFormat;
   modelRoutes?: ClaudeDesktopRoutePreset[];
-  providerType?: "github_copilot" | "codex_oauth";
+  providerType?: "github_copilot" | "codex_oauth" | "nexus";
+  modelCatalog?: Record<string, unknown>;
+  localProxyRequestOverrides?: LocalProxyRequestOverrides;
+  managedNexusPresetVersion?: number;
   requiresOAuth?: boolean;
 
   endpointCandidates?: string[];
@@ -152,6 +162,30 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     },
     icon: "anthropic",
     iconColor: "#D4915D",
+  },
+  {
+    name: "Nexus GLM-5.2",
+    nameKey: "providerForm.presets.nexus",
+    websiteUrl: NEXUS_ENDPOINT,
+    category: "third_party",
+    baseUrl: NEXUS_ENDPOINT,
+    mode: "proxy",
+    apiFormat: "openai_chat",
+    modelRoutes: [
+      {
+        routeId: CLAUDE_DESKTOP_ROLE_ROUTE_IDS.sonnet,
+        upstreamModel: NEXUS_MODEL,
+        labelOverride: NEXUS_MODEL,
+        supports1m: true,
+      },
+    ],
+    providerType: "nexus",
+    modelCatalog: NEXUS_TEXT_MODEL_CATALOG,
+    localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
+    managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+    endpointCandidates: [NEXUS_ENDPOINT],
+    icon: "nexus",
+    iconColor: "#6366F1",
   },
   {
     name: "Shengsuanyun",

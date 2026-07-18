@@ -5,13 +5,15 @@
 use crate::app_config::AppType;
 use crate::config::{get_claude_settings_path, read_json_file, write_json_file};
 use crate::database::Database;
-use crate::provider::Provider;
+use crate::error::AppError;
+use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::proxy::server::ProxyServer;
 use crate::proxy::switch_lock::SwitchLockManager;
 use crate::proxy::types::*;
 use crate::services::provider::{
     build_effective_settings_with_common_config, write_live_with_common_config,
 };
+use crate::store::AppState;
 use serde_json::{json, Map, Value};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -63,6 +65,36 @@ pub struct ProxyService {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HotSwitchOutcome {
     pub logical_target_changed: bool,
+}
+
+fn current_claude_desktop_proxy_provider(db: &Database) -> Result<Option<Provider>, AppError> {
+    let app = AppType::ClaudeDesktop;
+    let Some(current_id) = crate::settings::get_effective_current_provider(db, &app)? else {
+        return Ok(None);
+    };
+    let Some(provider) = db.get_provider_by_id(&current_id, app.as_str())? else {
+        return Ok(None);
+    };
+    if !matches!(
+        crate::claude_desktop_config::provider_mode(&provider),
+        ClaudeDesktopMode::Proxy
+    ) {
+        return Ok(None);
+    }
+
+    Ok(Some(provider))
+}
+
+fn current_claude_desktop_uses_proxy(db: &Database) -> Result<bool, AppError> {
+    Ok(current_claude_desktop_proxy_provider(db)?.is_some())
+}
+
+pub(crate) fn sync_current_claude_desktop_proxy_profile(state: &AppState) -> Result<(), AppError> {
+    let Some(provider) = current_claude_desktop_proxy_provider(state.db.as_ref())? else {
+        return Ok(());
+    };
+
+    write_live_with_common_config(state.db.as_ref(), &AppType::ClaudeDesktop, &provider)
 }
 
 impl ProxyService {
@@ -785,8 +817,14 @@ impl ProxyService {
         if !any_enabled {
             let _ = self.db.set_live_takeover_active(false).await;
 
-            if self.is_running().await {
-                // 此时没有任何 app 处于接管状态，停止服务即可
+            let desktop_uses_proxy = current_claude_desktop_uses_proxy(self.db.as_ref())
+                .unwrap_or_else(|error| {
+                    log::warn!(
+                        "Failed to inspect the Claude Desktop route; keeping the proxy listener: {error}"
+                    );
+                    true
+                });
+            if !desktop_uses_proxy && self.is_running().await {
                 let _ = self.stop().await;
             }
         }
@@ -1043,33 +1081,40 @@ impl ProxyService {
         Ok(())
     }
 
-    /// 停止代理服务器
-    pub async fn stop(&self) -> Result<(), String> {
+    /// Stop the listener without changing persisted proxy or provider state.
+    pub(crate) async fn stop_server(&self) -> Result<(), String> {
         if let Some(server) = self.server.write().await.take() {
             server
                 .stop()
                 .await
                 .map_err(|e| format!("停止代理服务器失败: {e}"))?;
 
-            // 停止时设置 proxy_enabled = false
-            let mut global_config = self
-                .db
-                .get_global_proxy_config()
-                .await
-                .map_err(|e| format!("获取全局代理配置失败: {e}"))?;
-
-            if global_config.proxy_enabled {
-                global_config.proxy_enabled = false;
-                if let Err(e) = self.db.update_global_proxy_config(global_config).await {
-                    log::warn!("更新代理总开关失败: {e}");
-                }
-            }
-
             log::info!("代理服务器已停止");
             Ok(())
         } else {
             Err("代理服务器未运行".to_string())
         }
+    }
+
+    /// Stop the proxy server.
+    pub async fn stop(&self) -> Result<(), String> {
+        self.stop_server().await?;
+
+        // Persist the stopped state for the next launch.
+        let mut global_config = self
+            .db
+            .get_global_proxy_config()
+            .await
+            .map_err(|e| format!("Failed to read the global proxy configuration: {e}"))?;
+
+        if global_config.proxy_enabled {
+            global_config.proxy_enabled = false;
+            if let Err(e) = self.db.update_global_proxy_config(global_config).await {
+                log::warn!("Failed to persist the global proxy switch: {e}");
+            }
+        }
+
+        Ok(())
     }
 
     /// 停止代理服务器（恢复 Live 配置，用户手动关闭时使用）
@@ -1124,7 +1169,7 @@ impl ProxyService {
     /// 用于程序正常退出时，保留代理状态以便下次启动时自动恢复
     pub async fn stop_with_restore_keep_state(&self) -> Result<(), String> {
         // 1. 停止代理服务器（即使未运行也继续执行恢复逻辑）
-        if let Err(e) = self.stop().await {
+        if let Err(e) = self.stop_server().await {
             log::warn!("停止代理服务器失败（将继续恢复 Live 配置）: {e}");
         }
 
@@ -2810,9 +2855,9 @@ impl ProxyService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::ProviderMeta;
+    use crate::provider::{ClaudeDesktopModelRoute, LocalProxyRequestOverrides, ProviderMeta};
     use serial_test::serial;
-    use std::env;
+    use std::{env, sync::Mutex};
     use tempfile::TempDir;
 
     struct TempHome {
@@ -2877,6 +2922,528 @@ mod tests {
     async fn running_codex_base_url(service: &ProxyService) -> String {
         let status = service.get_status().await.expect("get proxy status");
         format!("http://127.0.0.1:{}/v1", status.port)
+    }
+
+    fn select_invalid_desktop_provider(db: &Arc<Database>) {
+        let mut provider = Provider::with_id(
+            "invalid-desktop".to_string(),
+            "Invalid Desktop provider".to_string(),
+            json!({"env": {"ANTHROPIC_BASE_URL": "https://example.com/v1"}}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(crate::provider::ClaudeDesktopMode::Proxy),
+            ..Default::default()
+        });
+        db.save_provider(AppType::ClaudeDesktop.as_str(), &provider)
+            .expect("save invalid Desktop provider");
+        db.set_current_provider(AppType::ClaudeDesktop.as_str(), &provider.id)
+            .expect("select invalid Desktop provider");
+        crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some(&provider.id))
+            .expect("select local Desktop provider");
+    }
+
+    fn select_desktop_proxy_provider(db: &Arc<Database>) {
+        let mut provider = Provider::with_id(
+            "desktop".to_string(),
+            "Nexus GLM-5.2".to_string(),
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1",
+                "ANTHROPIC_AUTH_TOKEN": "test-token"
+            }}),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(crate::provider::ClaudeDesktopMode::Proxy),
+            api_format: Some("openai_chat".to_string()),
+            provider_type: Some("nexus".to_string()),
+            managed_nexus_preset_version: Some(7),
+            claude_desktop_model_routes: std::collections::HashMap::from([(
+                "claude-sonnet-5".to_string(),
+                crate::provider::ClaudeDesktopModelRoute {
+                    model: "GLM-5.2-FP8".to_string(),
+                    label_override: None,
+                    supports_1m: Some(true),
+                },
+            )]),
+            ..Default::default()
+        });
+        db.save_provider(AppType::ClaudeDesktop.as_str(), &provider)
+            .expect("save Desktop provider");
+        db.set_current_provider(AppType::ClaudeDesktop.as_str(), &provider.id)
+            .expect("select Desktop provider");
+        crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some(&provider.id))
+            .expect("select local Desktop provider");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn manual_start_isolated_from_mcp_sync_and_restores_desktop_profile() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        use_ephemeral_proxy_port(&db).await;
+        let global = db
+            .get_global_proxy_config()
+            .await
+            .expect("get global proxy config");
+        assert!(!global.proxy_enabled);
+
+        select_desktop_proxy_provider(&db);
+
+        std::fs::write(crate::config::get_default_claude_mcp_path(), "{invalid")
+            .expect("seed unrelated invalid MCP config");
+        db.save_mcp_server(&crate::app_config::McpServer {
+            id: "unrelated".to_string(),
+            name: "Unrelated MCP".to_string(),
+            server: json!({"command": "true"}),
+            apps: crate::app_config::McpApps {
+                claude: true,
+                ..Default::default()
+            },
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: Vec::new(),
+        })
+        .expect("save MCP fixture");
+        assert!(
+            crate::services::mcp::McpService::sync_all_enabled(&state).is_err(),
+            "fixture must prove unrelated MCP synchronization is failing"
+        );
+
+        crate::services::provider::ProviderService::sync_current_provider_for_app(
+            &state,
+            AppType::ClaudeDesktop,
+        )
+        .expect_err("unresolved port must fail the first profile apply");
+
+        crate::commands::start_proxy_server_inner(&state)
+            .await
+            .expect("manually start proxy and retry Desktop profile");
+
+        assert!(state.proxy_service.is_running().await);
+        let config = db
+            .get_proxy_config()
+            .await
+            .expect("get resolved proxy config");
+        assert_ne!(config.listen_port, 0);
+        let status = crate::claude_desktop_config::get_status(&db, true)
+            .expect("read Desktop profile status");
+        assert!(status.configured);
+        assert_eq!(status.actual_base_url, status.expected_base_url);
+
+        state
+            .proxy_service
+            .stop_with_restore_keep_state()
+            .await
+            .expect("gracefully stop proxy");
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("read preserved proxy state")
+                .proxy_enabled
+        );
+
+        let restarted = crate::store::AppState::new(db.clone());
+        crate::restore_proxy_state_on_startup(&restarted).await;
+        assert!(restarted.proxy_service.is_running().await);
+        let status = crate::claude_desktop_config::get_status(&db, true)
+            .expect("read restored Desktop profile status");
+        assert_eq!(status.actual_base_url, status.expected_base_url);
+        restarted
+            .proxy_service
+            .stop()
+            .await
+            .expect("stop restarted test proxy");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn manual_start_rolls_back_when_desktop_profile_is_invalid() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        use_ephemeral_proxy_port(&db).await;
+        select_invalid_desktop_provider(&db);
+
+        let error = crate::commands::start_proxy_server_inner(&state)
+            .await
+            .expect_err("invalid Desktop profile must fail proxy start");
+        assert!(error.contains("model route"), "unexpected error: {error}");
+        assert!(!state.proxy_service.is_running().await);
+        assert!(
+            !db.get_global_proxy_config()
+                .await
+                .expect("read rolled-back proxy state")
+                .proxy_enabled
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn manual_start_keeps_existing_proxy_when_desktop_profile_is_invalid() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        use_ephemeral_proxy_port(&db).await;
+        state.proxy_service.start().await.expect("start proxy");
+        select_invalid_desktop_provider(&db);
+
+        crate::commands::start_proxy_server_inner(&state)
+            .await
+            .expect_err("invalid Desktop profile must fail profile sync");
+        assert!(state.proxy_service.is_running().await);
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("read preserved proxy state")
+                .proxy_enabled
+        );
+        state
+            .proxy_service
+            .stop_server()
+            .await
+            .expect("stop existing proxy listener");
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("read preserved proxy state after listener stop")
+                .proxy_enabled
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_desktop_nexus_route_streams_text_only_glm_end_to_end() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let captured_upstream = Arc::new(Mutex::new(None::<Value>));
+        let captured_tokenize = Arc::new(Mutex::new(None::<Value>));
+        let upstream_app = axum::Router::new()
+            .route(
+                "/v1/chat/completions",
+                axum::routing::post({
+                    let captured_upstream = captured_upstream.clone();
+                    move |axum::Json(body): axum::Json<Value>| {
+                        let captured_upstream = captured_upstream.clone();
+                        async move {
+                            *captured_upstream.lock().expect("capture upstream request") =
+                                Some(body);
+                            (
+                                [(
+                                    axum::http::header::CONTENT_TYPE,
+                                    "text/event-stream",
+                                )],
+                                concat!(
+                                    "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"Inspect safely.\"}}]}\n\n",
+                                    "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"Hanoi\\\"}\"}}]}}]}\n\n",
+                                    "data: {\"id\":\"chatcmpl_desktop\",\"model\":\"GLM-5.2-FP8\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":4}}\n\n",
+                                    "data: [DONE]\n\n"
+                                ),
+                            )
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/v1/tokenize",
+                axum::routing::post({
+                    let captured_tokenize = captured_tokenize.clone();
+                    move |axum::Json(body): axum::Json<Value>| {
+                        let captured_tokenize = captured_tokenize.clone();
+                        async move {
+                            *captured_tokenize.lock().expect("capture tokenize request") =
+                                Some(body);
+                            axum::Json(json!({"tokens": [1, 2, 3], "count": 17}))
+                        }
+                    }
+                }),
+            );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock upstream");
+        let upstream_address = upstream_listener
+            .local_addr()
+            .expect("read mock upstream address");
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream_app)
+                .await
+                .expect("serve mock upstream");
+        });
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        use_ephemeral_proxy_port(&db).await;
+
+        let mut provider = Provider::with_id(
+            "desktop-nexus".to_string(),
+            "Nexus GLM-5.2".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": format!("http://{upstream_address}/v1"),
+                    "ANTHROPIC_AUTH_TOKEN": "test-upstream-token"
+                },
+                "modelCatalog": {
+                    "models": [{
+                        "model": "GLM-5.2-FP8",
+                        "inputModalities": ["text"]
+                    }]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(crate::provider::ClaudeDesktopMode::Proxy),
+            claude_desktop_model_routes: std::collections::HashMap::from([(
+                "claude-sonnet-5".to_string(),
+                ClaudeDesktopModelRoute {
+                    model: "GLM-5.2-FP8".to_string(),
+                    label_override: Some("GLM-5.2-FP8".to_string()),
+                    supports_1m: Some(true),
+                },
+            )]),
+            api_format: Some("openai_chat".to_string()),
+            local_proxy_request_overrides: Some(LocalProxyRequestOverrides {
+                body: Some(json!({
+                    "max_tokens": 65_536,
+                    "chat_template_kwargs": {
+                        "enable_thinking": true,
+                        "clear_thinking": false
+                    }
+                })),
+                ..Default::default()
+            }),
+            managed_nexus_preset_version: Some(7),
+            provider_type: Some("nexus".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::ClaudeDesktop.as_str(), &provider)
+            .expect("save Desktop provider");
+        db.set_current_provider(AppType::ClaudeDesktop.as_str(), &provider.id)
+            .expect("select Desktop provider");
+        crate::settings::set_current_provider(&AppType::ClaudeDesktop, Some(&provider.id))
+            .expect("select local Desktop provider");
+
+        let proxy = state.proxy_service.start().await.expect("start proxy");
+        let gateway_token = crate::claude_desktop_config::get_or_create_gateway_token(db.as_ref())
+            .expect("create gateway token");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build test client");
+        let count_response = client
+            .post(format!(
+                "http://127.0.0.1:{}/claude-desktop/v1/messages/count_tokens",
+                proxy.port
+            ))
+            .bearer_auth(&gateway_token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "claude-sonnet-5",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "thinking",
+                                "thinking": "prior proof checkpoint",
+                                "signature": "sig"
+                            },
+                            {"type": "text", "text": "Checkpoint saved."}
+                        ]
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Continue from the image."},
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": "COUNT_IMAGE_MUST_NOT_REACH_UPSTREAM"
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .expect("send Desktop count request");
+        assert_eq!(count_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            count_response
+                .json::<Value>()
+                .await
+                .expect("read Desktop count response"),
+            json!({"input_tokens": 17})
+        );
+        let count_upstream = captured_tokenize
+            .lock()
+            .expect("read captured tokenize request")
+            .clone()
+            .expect("mock upstream should receive one tokenize request");
+        assert_eq!(count_upstream["model"], "GLM-5.2-FP8");
+        let count_messages = count_upstream["messages"]
+            .as_array()
+            .expect("OpenAI count messages");
+        let count_assistant = count_messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("count request assistant history");
+        assert_eq!(
+            count_assistant["reasoning_content"],
+            "prior proof checkpoint"
+        );
+        assert_eq!(
+            count_upstream["chat_template_kwargs"],
+            json!({"enable_thinking": true, "clear_thinking": false})
+        );
+        let serialized_count =
+            serde_json::to_string(&count_upstream).expect("serialize count request");
+        assert!(serialized_count.contains(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER));
+        assert!(!serialized_count.contains("COUNT_IMAGE_MUST_NOT_REACH_UPSTREAM"));
+        assert!(count_upstream.get("max_tokens").is_none());
+        assert!(count_upstream.get("stream").is_none());
+        assert_eq!(
+            db.conn
+                .lock()
+                .expect("lock test database")
+                .query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("count Usage rows"),
+            0,
+            "count_tokens must not create a Usage row"
+        );
+
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{}/claude-desktop/v1/messages",
+                proxy.port
+            ))
+            .bearer_auth(&gateway_token)
+            .header("anthropic-version", "2023-06-01")
+            .json(&json!({
+                "model": "claude-sonnet-5",
+                "max_tokens": 4_096,
+                "stream": true,
+                "thinking": {"type": "enabled", "budget_tokens": 1_024},
+                "messages": [{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Inspect the attached image."},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": "MUST_NOT_REACH_UPSTREAM"
+                            }
+                        }
+                    ]
+                }],
+                "tools": [{
+                    "name": "get_weather",
+                    "description": "Get the weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"]
+                    }
+                }]
+            }))
+            .send()
+            .await
+            .expect("send Desktop request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream")));
+        let downstream = response.text().await.expect("read Desktop stream");
+        let upstream = captured_upstream
+            .lock()
+            .expect("read captured upstream request")
+            .clone()
+            .expect("mock upstream should receive one request");
+
+        state.proxy_service.stop().await.expect("stop proxy");
+        upstream_task.abort();
+
+        for (pointer, expected) in [
+            ("/model", json!("GLM-5.2-FP8")),
+            ("/max_tokens", json!(65_536)),
+            ("/chat_template_kwargs/enable_thinking", json!(true)),
+            ("/chat_template_kwargs/clear_thinking", json!(false)),
+            ("/stream", json!(true)),
+            ("/stream_options/include_usage", json!(true)),
+            ("/tools/0/function/name", json!("get_weather")),
+            (
+                "/messages/0/content/0/text",
+                json!("Inspect the attached image."),
+            ),
+            (
+                "/messages/0/content/1/text",
+                json!(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER),
+            ),
+        ] {
+            assert_eq!(upstream.pointer(pointer), Some(&expected), "{pointer}");
+        }
+        let serialized_upstream = serde_json::to_string(&upstream).expect("serialize upstream");
+        for forbidden in [
+            "MUST_NOT_REACH_UPSTREAM",
+            "data:image",
+            "\"type\":\"image\"",
+            "\"image_url\"",
+        ] {
+            assert!(
+                !serialized_upstream.contains(forbidden),
+                "upstream request leaked forbidden image data: {forbidden}"
+            );
+        }
+
+        let events: Vec<Value> = downstream
+            .split("\n\n")
+            .filter_map(|block| {
+                let data = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("data:").map(str::trim))?;
+                serde_json::from_str(data).ok()
+            })
+            .collect();
+        let has_event = |pointer: &str, expected: Value| {
+            events
+                .iter()
+                .any(|event| event.pointer(pointer) == Some(&expected))
+        };
+        assert!(has_event("/delta/thinking", json!("Inspect safely.")));
+        assert!(events.iter().any(|event| {
+            event.pointer("/content_block/type") == Some(&json!("tool_use"))
+                && event.pointer("/content_block/name") == Some(&json!("get_weather"))
+        }));
+        assert!(has_event(
+            "/delta/partial_json",
+            json!(r#"{"city":"Hanoi"}"#)
+        ));
+        assert!(has_event("/delta/stop_reason", json!("tool_use")));
+        assert!(has_event("/type", json!("message_stop")));
+        for forbidden in ["<think>", "</think>", "reasoning_content", "tool_calls"] {
+            assert!(
+                !downstream.contains(forbidden),
+                "downstream stream leaked upstream protocol field: {forbidden}"
+            );
+        }
     }
 
     fn seed_codex_model_template() {
@@ -3546,7 +4113,8 @@ wire_api = "responses"
 
         let db = Arc::new(Database::memory().expect("init db"));
         use_ephemeral_proxy_port(&db).await;
-        let service = ProxyService::new(db.clone());
+        let state = crate::store::AppState::new(db.clone());
+        let service = state.proxy_service.clone();
         let oauth_auth = json!({
             "auth_mode": "chatgpt",
             "tokens": {
@@ -3591,6 +4159,10 @@ wire_api = "responses"
             .expect("set current provider");
         crate::settings::set_current_provider(&AppType::Codex, Some("deepseek"))
             .expect("set local current provider");
+        select_desktop_proxy_provider(&db);
+        crate::commands::start_proxy_server_inner(&state)
+            .await
+            .expect("start listener and apply Desktop profile");
 
         service
             .set_takeover_for_app("codex", true)
@@ -3609,6 +4181,27 @@ wire_api = "responses"
             .set_takeover_for_app("codex", false)
             .await
             .expect("disable Codex takeover");
+        assert!(
+            service.is_running().await,
+            "disabling the final takeover must keep the listener used by Claude Desktop"
+        );
+        assert!(
+            db.get_global_proxy_config()
+                .await
+                .expect("read mixed-use proxy state")
+                .proxy_enabled,
+            "the listener's persisted enabled state must remain true"
+        );
+        let desktop_status = crate::claude_desktop_config::get_status(&db, true)
+            .expect("read mixed-use Desktop status");
+        assert_eq!(
+            desktop_status.actual_base_url, desktop_status.expected_base_url,
+            "the active Desktop profile must still target the running listener"
+        );
+        service
+            .stop_server()
+            .await
+            .expect("stop mixed-use test listener");
         crate::settings::update_settings(crate::settings::AppSettings::default())
             .expect("reset settings");
     }

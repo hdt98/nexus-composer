@@ -58,6 +58,7 @@ import {
   type ClaudeDesktopProviderPreset,
   type ClaudeDesktopRoleId,
 } from "@/config/claudeDesktopProviderPresets";
+import { NEXUS_ENDPOINT, NEXUS_MODEL } from "@/config/nexus";
 import {
   fetchModelsForConfig,
   showFetchModelsError,
@@ -138,9 +139,13 @@ function clonePlainRecord(value: unknown): Record<string, unknown> {
   return { ...(value as Record<string, unknown>) };
 }
 
+function normalizeEndpoint(value: string) {
+  return value.trim().replace(/\/+$/, "");
+}
+
 function routeRoleFromId(route: string): RouteRole {
   const normalized = route.trim().toLowerCase();
-  // 与后端 claude_role_keyword 同序（opus → haiku → fable → sonnet）。
+  // Keep the same order as the backend claude_role_keyword helper.
   if (normalized.includes("opus")) return "opus";
   if (normalized.includes("haiku")) return "haiku";
   if (normalized.includes("fable")) return "fable";
@@ -197,10 +202,9 @@ function initialRouteRows(
   });
 }
 
-// Proxy 模式对齐 Claude Code：固定 Sonnet / Opus / Fable / Haiku 四档。
-// 把任意来源的 route 行按角色归类到固定四槽（缺档留空），保证 UI 永远四行、
-// 用户不会漏配某档导致子 agent 找不到模型。
-// （fable 自 Desktop 1.12603.1+ 起被 fail-all 校验放行，可作为独立档位。）
+// Proxy mode mirrors Claude Code with four fixed model roles. Normalize routes
+// from any source into those slots so a missing role cannot break subagents.
+// Claude Desktop 1.12603.1 and later accepts Fable as an independent role.
 function normalizeProxyRows(rows: RouteRow[]): RouteRow[] {
   return ROLE_ORDER.map((role) => {
     const match = rows.find(
@@ -224,9 +228,9 @@ function isClaudeSafeRoute(route: string) {
       ? normalized.slice(CLAUDE_ROUTE_PREFIX.length)
       : "";
 
-  // 角色前缀后必须还有实际模型标识，拒绝 claude-sonnet- 这类退化值
-  // （否则会写入 profile 并触发 Claude Desktop fail-all 拒收整组）。
-  // 与后端 is_claude_safe_model_id 镜像；fable 自 Desktop 1.12603.1+ 起被校验放行。
+  // Require an identifier after the role prefix. Degenerate values such as
+  // claude-sonnet- make Claude Desktop reject the entire profile. Keep this in
+  // sync with the backend is_claude_safe_model_id helper.
   return ["sonnet-", "opus-", "haiku-", "fable-"].some(
     (prefix) =>
       routeTail.startsWith(prefix) && routeTail.length > prefix.length,
@@ -244,6 +248,27 @@ function defaultRouteRows(
       labelOverride: "",
       supports1m: route.supports1m,
     }),
+  );
+}
+
+function matchesNexusProtocolContract(
+  mode: "direct" | "proxy",
+  apiFormat: ClaudeApiFormat,
+  routes: Record<string, ClaudeDesktopModelRoute>,
+) {
+  const expectedRoutes = Object.values(CLAUDE_DESKTOP_ROLE_ROUTE_IDS);
+  return (
+    mode === "proxy" &&
+    apiFormat === "openai_chat" &&
+    Object.keys(routes).length === expectedRoutes.length &&
+    expectedRoutes.every((routeId) => {
+      const route = routes[routeId];
+      return (
+        route?.model === NEXUS_MODEL &&
+        route.labelOverride === NEXUS_MODEL &&
+        route.supports1m === true
+      );
+    })
   );
 }
 
@@ -286,19 +311,13 @@ export function ClaudeDesktopProviderForm({
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
     "custom",
   );
-  const [activePreset, setActivePreset] = useState<{
-    id: string;
-    category?: ProviderCategory;
-    isPartner?: boolean;
-    partnerPromotionKey?: string;
-    providerType?: string;
-    requiresOAuth?: boolean;
-  } | null>(null);
+  const [activePreset, setActivePreset] = useState<
+    (ClaudeDesktopProviderPreset & { id: string }) | null
+  >(null);
   const [routes, setRoutes] = useState<RouteRow[]>(() => {
     const rows = initialRouteRows(initialData?.meta?.claudeDesktopModelRoutes);
-    // proxy 模式归一化成固定三档；但初始无任何 route 时保持空数组，交给 seed
-    // effect 用默认路由回填（默认 1M 声明、ANTHROPIC_MODEL 预填），避免过早
-    // normalize 成空三档把 routes.length 撑到 3、永久挡住 seed。
+    // Normalize populated proxy routes into the four roles. Leave an empty
+    // initial list for the seed effect so async defaults can still populate it.
     return initialMode === "proxy" && rows.length > 0
       ? normalizeProxyRows(rows)
       : rows;
@@ -362,30 +381,33 @@ export function ClaudeDesktopProviderForm({
 
   const presetCategoryLabels: Record<string, string> = useMemo(
     () => ({
-      official: t("providerForm.categoryOfficial", { defaultValue: "官方" }),
+      official: t("providerForm.categoryOfficial", {
+        defaultValue: "Official",
+      }),
       cn_official: t("providerForm.categoryCnOfficial", {
-        defaultValue: "国内官方",
+        defaultValue: "Regional official",
       }),
       aggregator: t("providerForm.categoryAggregation", {
-        defaultValue: "聚合服务",
+        defaultValue: "Aggregator",
       }),
       third_party: t("providerForm.categoryThirdParty", {
-        defaultValue: "第三方",
+        defaultValue: "Third party",
       }),
     }),
     [t],
   );
-  const activeProviderType =
-    activePreset?.providerType ?? initialData?.meta?.providerType;
-  const isOfficial =
-    initialData?.category === "official" ||
-    activePreset?.category === "official";
+  const activeProviderType = activePreset
+    ? activePreset.providerType
+    : initialData?.meta?.providerType;
+  const isOfficial = activePreset
+    ? activePreset.category === "official"
+    : initialData?.category === "official";
   const usesManagedOAuth =
     activePreset?.requiresOAuth === true ||
     activeProviderType === "github_copilot" ||
     activeProviderType === "codex_oauth";
 
-  // API Key 获取/邀请链接（与 Claude Code 表单同款，见 ClaudeFormFields）
+  // Reuse the Claude Code API-key and invitation-link behavior.
   const apiKeyLinkCategory = activePreset?.category ?? initialData?.category;
   const {
     shouldShowApiKeyLink,
@@ -451,14 +473,7 @@ export function ClaudeDesktopProviderForm({
     const entry = presetEntries.find((item) => item.id === value);
     if (!entry) return;
 
-    setActivePreset({
-      id: value,
-      category: entry.preset.category,
-      isPartner: entry.preset.isPartner,
-      partnerPromotionKey: entry.preset.partnerPromotionKey,
-      providerType: entry.preset.providerType,
-      requiresOAuth: entry.preset.requiresOAuth,
-    });
+    setActivePreset({ ...entry.preset, id: value });
     applyDesktopPreset(entry.preset);
   };
 
@@ -471,12 +486,11 @@ export function ClaudeDesktopProviderForm({
   const handleModelMappingChange = (checked: boolean) => {
     setMode(checked ? "proxy" : "direct");
     if (checked) {
-      // 切到 proxy：归一化成固定 Sonnet / Opus / Haiku 三档；
-      // 若当前无路由则以后端默认路由作为来源（保留 Sonnet 默认模型）。
+      // Normalize proxy mode into the four fixed roles. If no routes exist,
+      // seed them from backend defaults, including the default Sonnet model.
       setRoutes((current) => {
-        // 默认路由（默认 1M 声明、ANTHROPIC_MODEL 预填）异步加载完成前，若当前
-        // 无路由则保持空数组，交给 seed effect 在加载后回填；不要过早 normalize
-        // 成空三档（会把 routes.length 撑到 3、永久挡住 seed）。
+        // Keep an empty list while async defaults load; normalizing it early
+        // would create four blank rows and permanently block the seed effect.
         if (current.length === 0 && defaultProxyRouteRows.length === 0) {
           return current;
         }
@@ -522,7 +536,7 @@ export function ClaudeDesktopProviderForm({
       toast.success(
         t("providerForm.fetchModelsSuccess", {
           count: models.length,
-          defaultValue: `已获取 ${models.length} 个模型`,
+          defaultValue: `Fetched ${models.length} models`,
         }),
       );
     } catch (error) {
@@ -539,23 +553,26 @@ export function ClaudeDesktopProviderForm({
     if (!values.name.trim()) {
       toast.error(
         t("providerForm.fillSupplierName", {
-          defaultValue: "请填写供应商名称",
+          defaultValue: "Enter a provider name",
         }),
       );
       return;
     }
     if (isOfficial) {
-      // 官方供应商使用 Claude Desktop 内置 1P 模式，保持空 env 占位；
-      // 不写 claudeDesktopMode / claudeDesktopModelRoutes / apiFormat，
-      // 与启动 seed 的 OFFICIAL_SEEDS 占位语义一致。
+      // Official providers use Claude Desktop's built-in first-party mode.
+      // Preserve the empty environment placeholder used by OFFICIAL_SEEDS.
       const settingsConfig = clonePlainRecord(initialData?.settingsConfig);
       settingsConfig.env = {};
+      delete settingsConfig.modelCatalog;
       const meta: ProviderMeta = { ...(initialData?.meta ?? {}) };
       delete meta.claudeDesktopMode;
       delete meta.claudeDesktopModelRoutes;
       delete meta.apiFormat;
       delete meta.endpointAutoSelect;
       delete meta.isFullUrl;
+      delete meta.providerType;
+      delete meta.localProxyRequestOverrides;
+      delete meta.managedNexusPresetVersion;
       await onSubmit({
         ...values,
         name: values.name.trim(),
@@ -571,7 +588,7 @@ export function ClaudeDesktopProviderForm({
     if (!baseUrl.trim()) {
       toast.error(
         t("providerForm.fetchModelsNeedEndpoint", {
-          defaultValue: "请先填写接口地址",
+          defaultValue: "Enter the API endpoint first",
         }),
       );
       return;
@@ -579,7 +596,7 @@ export function ClaudeDesktopProviderForm({
     if (!usesManagedOAuth && !apiKey.trim()) {
       toast.error(
         t("providerForm.fetchModelsNeedApiKey", {
-          defaultValue: "请先填写 API Key",
+          defaultValue: "Enter an API key first",
         }),
       );
       return;
@@ -595,14 +612,13 @@ export function ClaudeDesktopProviderForm({
       .filter((route) => route.route || route.model);
 
     if (mode === "proxy") {
-      // 固定四档（Sonnet / Opus / Fable / Haiku），route_id 由 UI 生成、恒合法，
-      // 因此只要求至少填一个实际请求模型；留空档继承第一个已填档（Sonnet 优先），
-      // 对齐 Claude Code 的兜底，保证落库四档齐全、子 agent 不会找不到模型。
+      // Route IDs are generated for the four fixed roles. Require one upstream
+      // model and let blank roles inherit it so every subagent role remains usable.
       const primary = routeEntries.find((route) => route.model);
       if (!primary) {
         toast.error(
           t("claudeDesktop.routesRequired", {
-            defaultValue: "至少填写一个模型映射",
+            defaultValue: "Configure at least one model mapping",
           }),
         );
         return;
@@ -613,8 +629,8 @@ export function ClaudeDesktopProviderForm({
           if (!route.labelOverride) {
             route.labelOverride = primary.labelOverride || primary.model;
           }
-          // 回填的是同一个上游模型，1M 能力声明应与 primary 一致，
-          // 避免同模型在不同档声明不同 1M（除非该档用户已显式勾选）。
+          // Inherited roles use the same upstream model and 1M capability unless
+          // the user explicitly enabled 1M for that role.
           if (!route.supports1m) {
             route.supports1m = primary.supports1m;
           }
@@ -628,7 +644,7 @@ export function ClaudeDesktopProviderForm({
         toast.error(
           t("claudeDesktop.directModelInvalid", {
             defaultValue:
-              "直连模型必须使用 Claude Desktop 可识别的 Sonnet / Opus / Haiku 模型名",
+              "Direct mode requires a Sonnet, Opus, Fable, or Haiku model ID recognized by Claude Desktop",
           }),
         );
         return;
@@ -649,6 +665,13 @@ export function ClaudeDesktopProviderForm({
           ANTHROPIC_BASE_URL: baseUrl.trim().replace(/\/+$/, ""),
           [apiKeyField]: apiKey.trim(),
         };
+    if (activePreset) {
+      if (activePreset.modelCatalog) {
+        settingsConfig.modelCatalog = activePreset.modelCatalog;
+      } else {
+        delete settingsConfig.modelCatalog;
+      }
+    }
 
     const routeMap = routeEntries.reduce<
       Record<string, ClaudeDesktopModelRoute>
@@ -661,6 +684,15 @@ export function ClaudeDesktopProviderForm({
       };
       return acc;
     }, {});
+    const managedNexusSelected =
+      activePreset?.providerType === "nexus" ||
+      (!activePreset && initialData?.meta?.providerType === "nexus");
+    const managedNexusProtocolChanged =
+      managedNexusSelected &&
+      !matchesNexusProtocolContract(mode, apiFormat, routeMap);
+    const managedNexusEndpointChanged =
+      managedNexusSelected &&
+      normalizeEndpoint(baseUrl) !== normalizeEndpoint(NEXUS_ENDPOINT);
 
     const meta: ProviderMeta = {
       ...(initialData?.meta ?? {}),
@@ -670,6 +702,18 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    if (activePreset) {
+      meta.localProxyRequestOverrides = activePreset.localProxyRequestOverrides;
+      meta.managedNexusPresetVersion = activePreset.managedNexusPresetVersion;
+    }
+    if (managedNexusProtocolChanged) {
+      delete settingsConfig.modelCatalog;
+      delete meta.providerType;
+      delete meta.managedNexusPresetVersion;
+      delete meta.localProxyRequestOverrides;
+    } else if (managedNexusEndpointChanged) {
+      delete meta.managedNexusPresetVersion;
+    }
     meta.authBinding =
       activeProviderType === "github_copilot"
         ? {
@@ -720,7 +764,7 @@ export function ClaudeDesktopProviderForm({
           ) : (
             <Download className="h-3.5 w-3.5" />
           )}
-          {t("providerForm.fetchModels", { defaultValue: "获取模型" })}
+          {t("providerForm.fetchModels", { defaultValue: "Fetch models" })}
         </Button>
       )}
       <Button
@@ -759,7 +803,7 @@ export function ClaudeDesktopProviderForm({
           <div className="rounded-lg border border-border-default bg-muted/20 p-3 text-sm text-muted-foreground">
             {t("claudeDesktop.officialNotice", {
               defaultValue:
-                "Claude Desktop 官方供应商使用应用内置的 1P 登录，无需配置 API Key 和接口地址。",
+                "Official Claude Desktop providers use the app's built-in sign-in and need no API key or endpoint.",
             })}
           </div>
         )}
@@ -787,7 +831,9 @@ export function ClaudeDesktopProviderForm({
                 value={apiKey}
                 onChange={setApiKey}
                 category={apiKeyLinkCategory}
-                shouldShowLink={shouldShowApiKeyLink}
+                shouldShowLink={
+                  shouldShowApiKeyLink && activeProviderType !== "nexus"
+                }
                 websiteUrl={apiKeyLinkWebsiteUrl}
                 isPartner={apiKeyLinkIsPartner}
                 partnerPromotionKey={apiKeyLinkPromotionKey}
@@ -817,18 +863,18 @@ export function ClaudeDesktopProviderForm({
                 <div className="space-y-1">
                   <Label>
                     {t("claudeDesktop.modelMappingToggle", {
-                      defaultValue: "需要模型映射",
+                      defaultValue: "Needs model mapping",
                     })}
                   </Label>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {needsModelMapping
                       ? t("claudeDesktop.modelMappingOnHint", {
                           defaultValue:
-                            "Claude Desktop 只接受 claude-sonnet-* / claude-opus-* / claude-haiku-* 三档角色 ID。开启后 Nexus Composer 会把这三档映射到供应商的实际模型，并在使用期间保持本地路由开启。",
+                            "Claude Desktop accepts four role IDs: claude-sonnet-*, claude-opus-*, claude-fable-*, and claude-haiku-*. Nexus maps them to the provider's models and keeps routing active while they are in use.",
                         })
                       : t("claudeDesktop.modelMappingOffHint", {
                           defaultValue:
-                            "仅当供应商直接接受 Claude Desktop 可识别的三档角色 ID（claude-sonnet-* / claude-opus-* / claude-haiku-*）时才适用直连；其他模型名（含 claude-3-5-sonnet-… 等旧式 ID）请打开此开关走映射。",
+                            "Use direct mode only when the provider accepts Claude Desktop's Sonnet, Opus, Fable, and Haiku role IDs. Enable mapping for all other model IDs.",
                         })}
                   </p>
                 </div>
@@ -836,7 +882,7 @@ export function ClaudeDesktopProviderForm({
                   checked={needsModelMapping}
                   onCheckedChange={handleModelMappingChange}
                   aria-label={t("claudeDesktop.modelMappingToggle", {
-                    defaultValue: "需要模型映射",
+                    defaultValue: "Needs model mapping",
                   })}
                 />
               </div>
@@ -846,7 +892,9 @@ export function ClaudeDesktopProviderForm({
               <div className="space-y-4 rounded-lg border border-border-default p-4">
                 <div className="space-y-2">
                   <Label>
-                    {t("providerForm.apiFormat", { defaultValue: "API 格式" })}
+                    {t("providerForm.apiFormat", {
+                      defaultValue: "API format",
+                    })}
                   </Label>
                   <Select
                     value={apiFormat}
@@ -860,23 +908,24 @@ export function ClaudeDesktopProviderForm({
                     <SelectContent>
                       <SelectItem value="anthropic">
                         {t("providerForm.apiFormatAnthropic", {
-                          defaultValue: "Anthropic Messages (原生)",
+                          defaultValue: "Anthropic Messages (native)",
                         })}
                       </SelectItem>
                       <SelectItem value="openai_chat">
                         {t("providerForm.apiFormatOpenAIChat", {
-                          defaultValue: "OpenAI Chat Completions (需开启路由)",
+                          defaultValue:
+                            "OpenAI Chat Completions (Needs Routing)",
                         })}
                       </SelectItem>
                       <SelectItem value="openai_responses">
                         {t("providerForm.apiFormatOpenAIResponses", {
-                          defaultValue: "OpenAI Responses API (需开启路由)",
+                          defaultValue: "OpenAI Responses API (Needs Routing)",
                         })}
                       </SelectItem>
                       <SelectItem value="gemini_native">
                         {t("providerForm.apiFormatGeminiNative", {
                           defaultValue:
-                            "Gemini Native generateContent (需开启路由)",
+                            "Gemini Native generateContent (Needs Routing)",
                         })}
                       </SelectItem>
                     </SelectContent>
@@ -888,7 +937,7 @@ export function ClaudeDesktopProviderForm({
                     <div className="flex items-center justify-between">
                       <Label>
                         {t("claudeDesktop.routeMapTitle", {
-                          defaultValue: "模型映射",
+                          defaultValue: "Model mapping",
                         })}
                       </Label>
                       {!usesManagedOAuth && (
@@ -906,7 +955,7 @@ export function ClaudeDesktopProviderForm({
                             <Download className="h-3.5 w-3.5" />
                           )}
                           {t("providerForm.fetchModels", {
-                            defaultValue: "获取模型",
+                            defaultValue: "Fetch models",
                           })}
                         </Button>
                       )}
@@ -914,7 +963,7 @@ export function ClaudeDesktopProviderForm({
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       {t("claudeDesktop.routeMapHint", {
                         defaultValue:
-                          "为 Sonnet、Opus、Haiku 三档分别填写实际请求模型；菜单显示名可写 DeepSeek、Kimi 等品牌名。留空的档会自动沿用 Sonnet（或第一个已填档）的模型，确保子 agent 调用的 Haiku 始终可用。",
+                          "Map the Sonnet, Opus, Fable, and Haiku roles to upstream models. Blank roles inherit the first configured model so subagent calls remain available.",
                       })}
                     </p>
                   </div>
@@ -922,22 +971,22 @@ export function ClaudeDesktopProviderForm({
                   <div className="hidden grid-cols-[140px_1fr_1fr_116px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                     <span>
                       {t("claudeDesktop.routeModelLabel", {
-                        defaultValue: "模型角色",
+                        defaultValue: "Model role",
                       })}
                     </span>
                     <span>
                       {t("claudeDesktop.labelOverrideLabel", {
-                        defaultValue: "菜单显示名",
+                        defaultValue: "Menu label",
                       })}
                     </span>
                     <span>
                       {t("claudeDesktop.upstreamModelLabel", {
-                        defaultValue: "实际请求模型",
+                        defaultValue: "Upstream model",
                       })}
                     </span>
                     <span>
                       {t("claudeDesktop.supports1mLabel", {
-                        defaultValue: "声明支持 1M",
+                        defaultValue: "Advertise 1M",
                       })}
                     </span>
                   </div>
@@ -959,8 +1008,8 @@ export function ClaudeDesktopProviderForm({
                             : t("claudeDesktop.routeRoleSonnet", {
                                 defaultValue: "Sonnet",
                               });
-                    // Haiku 档示范映射到轻量模型（flash），其余档映射到 pro；
-                    // 两列占位联动，保持每行「菜单显示名 ↔ 实际请求模型」品牌一致。
+                    // Show a lightweight placeholder for Haiku and a larger
+                    // model for other roles, keeping labels and IDs aligned.
                     const isHaikuRole = role === "haiku";
                     const labelPlaceholder = isHaikuRole
                       ? "DeepSeek V4 Flash"
@@ -1045,7 +1094,7 @@ export function ClaudeDesktopProviderForm({
                     )}
                     {t("claudeDesktop.directModelListTitle", {
                       defaultValue:
-                        "手动指定 Claude Desktop 模型列表（高级，可选）",
+                        "Manual Claude Desktop model list (advanced, optional)",
                     })}
                   </Button>
                 </CollapsibleTrigger>
@@ -1053,7 +1102,7 @@ export function ClaudeDesktopProviderForm({
                   <p className="ml-1 mt-1 text-xs text-muted-foreground">
                     {t("claudeDesktop.directModelListCollapsedHint", {
                       defaultValue:
-                        "原生 Claude 模型供应商通常不用填写，Claude Desktop 会自动读取 /v1/models。",
+                        "Native Claude providers usually need no entries because Claude Desktop reads /v1/models automatically.",
                     })}
                   </p>
                 )}
@@ -1063,7 +1112,7 @@ export function ClaudeDesktopProviderForm({
                       <p className="flex-1 text-xs leading-relaxed text-muted-foreground">
                         {t("claudeDesktop.directModelListHint", {
                           defaultValue:
-                            "仅当供应商的 /v1/models 不可用或没有返回 Claude Desktop 可识别的 Sonnet / Opus / Haiku 模型名时填写；勾选 1M 会向 Claude Desktop 声明支持 1M 上下文。",
+                            "Use this only when /v1/models is unavailable or lacks Claude Desktop-compatible Sonnet, Opus, Fable, or Haiku IDs. Enable 1M to advertise 1M context support.",
                         })}
                       </p>
                       {renderActionButtons(
@@ -1078,7 +1127,7 @@ export function ClaudeDesktopProviderForm({
                             }),
                           ]),
                         t("claudeDesktop.addModel", {
-                          defaultValue: "添加模型",
+                          defaultValue: "Add model",
                         }),
                       )}
                     </div>

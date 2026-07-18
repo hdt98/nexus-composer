@@ -2,20 +2,23 @@
  * Nexus Composer E2E feature tests.
  *
  * These tests verify the actual Nexus Composer customizations:
- * - Preset arrays contain only Nexus GLM-5.2 + Official
+ * - Claude Code and Codex contain only Nexus GLM-5.2 + Official
+ * - Claude Desktop preserves its existing catalog and adds Nexus GLM-5.2
  * - Nexus GLM-5.2 preset config is correct (endpoint, model, format)
- * - Sponsor filter works (no sponsors visible even if added later)
  * - Claude Official has empty env (resets to native API)
  */
 import { describe, expect, it } from "vitest";
 import { providerPresets } from "@/config/claudeProviderPresets";
+import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPresets";
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
   NEXUS_CLAUDE_MODEL,
   NEXUS_CONTEXT_WINDOW,
   NEXUS_ENDPOINT,
   NEXUS_MAX_OUTPUT_TOKENS,
+  NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -36,10 +39,18 @@ describe("Nexus Composer preset arrays", () => {
     expect(names).toContain("OpenAI Official");
   });
 
+  it("adds Nexus without replacing the Claude Desktop preset catalog", () => {
+    const names = claudeDesktopProviderPresets.map((preset) => preset.name);
+    expect(names).toHaveLength(68);
+    expect(names).toContain("Nexus GLM-5.2");
+    expect(names).toContain("Claude Desktop Official");
+    expect(names).toContain("Shengsuanyun");
+    expect(new Set(names).size).toBe(names.length);
+  });
+
   it("does not contain any removed presets", () => {
     const claudeNames = providerPresets.map((p) => p.name);
     const codexNames = codexProviderPresets.map((p) => p.name);
-
     const removed = [
       "Longcat",
       "DeepSeek",
@@ -70,10 +81,13 @@ describe("Nexus Composer preset arrays", () => {
     const codex = codexProviderPresets.find(
       (preset) => preset.name === "Nexus GLM-5.2",
     )!;
+    const desktop = claudeDesktopProviderPresets.find(
+      (preset) => preset.name === "Nexus GLM-5.2",
+    )!;
 
     expect((claude.settingsConfig as any).env.ANTHROPIC_AUTH_TOKEN).toBe("");
     expect((codex.auth as any).OPENAI_API_KEY).toBe("");
-    expect(JSON.stringify({ claude, codex })).not.toContain("onenx_");
+    expect(JSON.stringify({ claude, codex, desktop })).not.toContain("onenx_");
   });
 });
 
@@ -103,6 +117,7 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
 
   it("uses the Chat adapter with text-only continuity defaults", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus GLM-5.2")!;
+    expect(nexus.managedNexusPresetVersion).toBe(NEXUS_MANAGED_PRESET_VERSION);
     expect(nexus.apiFormat).toBe("openai_chat");
     expect((nexus.settingsConfig as any).modelCatalog).toEqual(
       NEXUS_TEXT_MODEL_CATALOG,
@@ -134,6 +149,7 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
 
   it("uses the Chat adapter with continuity defaults", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
+    expect(nexus.managedNexusPresetVersion).toBe(NEXUS_MANAGED_PRESET_VERSION);
     expect(nexus.apiFormat).toBe("openai_chat");
     expect(nexus.localProxyRequestOverrides).toEqual(NEXUS_REQUEST_OVERRIDES);
     expect(NEXUS_REQUEST_OVERRIDES.body).toEqual({
@@ -153,6 +169,34 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
     expect(nexus.modelCatalog![0].displayName).toBe("GLM-5.2");
     expect(nexus.modelCatalog![0].contextWindow).toBe(NEXUS_CONTEXT_WINDOW);
     expect(nexus.modelCatalog![0].inputModalities).toEqual(["text"]);
+  });
+});
+
+describe("Nexus GLM-5.2 Claude Desktop preset config", () => {
+  const nexus = claudeDesktopProviderPresets.find(
+    (preset) => preset.name === "Nexus GLM-5.2",
+  )!;
+
+  it("routes the text-only hosted model through the local Chat adapter", () => {
+    expect(nexus).toBeDefined();
+    expect(nexus.baseUrl).toBe(NEXUS_ENDPOINT);
+    expect(nexus.mode).toBe("proxy");
+    expect(nexus.apiFormat).toBe("openai_chat");
+    expect(nexus.modelCatalog).toEqual(NEXUS_TEXT_MODEL_CATALOG);
+    expect(nexus.localProxyRequestOverrides).toEqual(NEXUS_REQUEST_OVERRIDES);
+  });
+
+  it("declares one 1M GLM route that the form expands across Desktop roles", () => {
+    expect(nexus.modelRoutes).toEqual([
+      expect.objectContaining({
+        upstreamModel: NEXUS_MODEL,
+        supports1m: true,
+      }),
+    ]);
+    expect(nexus.providerType).toBe("nexus");
+    expect(nexus.managedNexusPresetVersion).toBe(
+      NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+    );
   });
 });
 
@@ -187,6 +231,10 @@ describe("Sponsor filter", () => {
     for (const p of codexProviderPresets) {
       expect(isSponsorPreset(p)).toBe(false);
     }
+    const desktopNexus = claudeDesktopProviderPresets.find(
+      (preset) => preset.name === "Nexus GLM-5.2",
+    );
+    expect(isSponsorPreset(desktopNexus!)).toBe(false);
 
     const fakeSponsor = {
       name: "FakeProvider",
@@ -200,6 +248,7 @@ describe("Sponsor filter", () => {
     const serialized = JSON.stringify({
       providerPresets,
       codexProviderPresets,
+      claudeDesktopProviderPresets,
     });
     expect(serialized).not.toMatch(/onenx_[A-Za-z0-9_-]+/);
     expect(serialized).not.toMatch(/127\.0\.0\.1|localhost/i);
