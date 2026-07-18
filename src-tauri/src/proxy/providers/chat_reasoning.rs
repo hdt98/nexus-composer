@@ -1368,6 +1368,8 @@ mod tests {
             r#"{"reasoning_content":"late reasoning"}"#,
             r#"{"content":[{"type":"text","text":"late answer"}]}"#,
             r#"{"refusal":{"text":"late refusal"}}"#,
+            r#"{"tool_calls":[{"index":0,"function":{"name":"late","arguments":"{}"}}]}"#,
+            r#"{"function_call":{"name":"late","arguments":"{}"}}"#,
         ] {
             let input = format!(
                 "data: {{\"choices\":[{{\"delta\":{{\"content\":\"answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{late},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n"
