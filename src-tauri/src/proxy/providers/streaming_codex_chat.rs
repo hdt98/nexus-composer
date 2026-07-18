@@ -561,11 +561,16 @@ impl ChatToResponsesState {
         if status == "incomplete" {
             response["incomplete_details"] = json!({ "reason": "max_output_tokens" });
         }
+        let terminal_event = if status == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
 
         events.push(sse_event(
-            "response.completed",
+            terminal_event,
             json!({
-                "type": "response.completed",
+                "type": terminal_event,
                 "response": response
             }),
         ));
@@ -1386,14 +1391,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_length_finish_reason_remains_completed_but_incomplete() {
+    async fn reasoning_only_length_finish_reason_emits_incomplete() {
         let output = collect(vec![
-            "data: {\"id\":\"chatcmpl_length\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"content\":\"bounded\"},\"finish_reason\":\"length\"}]}\n\n",
+            "data: {\"id\":\"chatcmpl_length\",\"model\":\"glm-5.2\",\"choices\":[{\"delta\":{\"reasoning_content\":\"partial reasoning\"},\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":17,\"completion_tokens\":131072,\"total_tokens\":131089,\"completion_tokens_details\":{\"reasoning_tokens\":131072}}}\n\n",
         ])
         .await;
 
-        assert!(output.contains("event: response.completed"));
+        assert_eq!(output.matches("event: response.incomplete").count(), 1);
         assert!(output.contains("\"status\":\"incomplete\""));
+        assert!(output.contains("\"reason\":\"max_output_tokens\""));
+        assert!(output.contains("partial reasoning"));
+        assert!(output.contains("\"output_tokens\":131072"));
+        assert!(output.contains("\"reasoning_tokens\":131072"));
+        assert!(!output.contains("event: response.completed"));
         assert!(!output.contains("event: response.failed"));
     }
 
