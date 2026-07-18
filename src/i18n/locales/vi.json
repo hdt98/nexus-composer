@@ -356,8 +356,8 @@
         "description": "Configure failover queue and circuit breaker strategy"
       },
       "pricing": {
-        "title": "Cost Pricing",
-        "description": "Manage token pricing rules for each model"
+        "title": "Đơn giá mô hình",
+        "description": "Quản lý đơn giá token theo từng mô hình"
       },
       "globalProxy": {
         "title": "Global Outbound Proxy",
@@ -1388,7 +1388,7 @@
     "noSearchResults": "No provider presets match your search."
   },
   "usage": {
-    "title": "Usage Statistics",
+    "title": "Thống kê sử dụng",
     "subtitle": "View AI model usage and cost statistics",
     "today": "24 Hours",
     "last7days": "7 Days",
@@ -1398,17 +1398,17 @@
     "preset7d": "7d",
     "preset14d": "14d",
     "preset30d": "30d",
-    "totalRequests": "Total Requests",
+    "totalRequests": "Tổng yêu cầu",
     "totalCost": "Tổng chi phí",
     "cost": "Cost",
     "perMillion": "(per million)",
-    "trends": "Usage Trends",
+    "trends": "Xu hướng sử dụng",
     "rangeToday": "Last 24 hours (hourly)",
     "rangeLast7Days": "Last 7 days",
     "rangeLast30Days": "Last 30 days",
     "totalTokens": "Tổng token mới",
     "cacheTokens": "Cache Tokens",
-    "realTotal": "Tokens Processed",
+    "realTotal": "Token đã xử lý",
     "realTotalHint": "Input + Output + Cache Write + Cache Read",
     "freshInput": "Fresh Input",
     "cacheHitRate": "Cache Hit Rate",
