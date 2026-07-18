@@ -1,13 +1,132 @@
 /**
  * Nexus Composer language system tests.
  *
- * Verifies that only English and Vietnamese locale files exist,
- * and the i18n config loads only these two languages.
+ * Verifies the English and Vietnamese catalogs and i18n configuration.
  */
 import { describe, expect, it } from "vitest";
-import { readFileSync, existsSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
+import { join } from "path";
+
+type FlatCatalog = Map<string, string>;
+
+const LOCALE_FILES = {
+  en: "src/i18n/locales/en.json",
+  vi: "src/i18n/locales/vi.json",
+} as const;
+
+function flattenCatalog(
+  value: unknown,
+  prefix = "",
+  result: FlatCatalog = new Map(),
+): FlatCatalog {
+  if (typeof value === "string") {
+    result.set(prefix, value);
+    return result;
+  }
+
+  if (!value || Array.isArray(value) || typeof value !== "object") {
+    throw new Error(`Unsupported locale value at ${prefix || "<root>"}`);
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    flattenCatalog(child, prefix ? `${prefix}.${key}` : key, result);
+  }
+  return result;
+}
+
+function readCatalog(path: string): FlatCatalog {
+  return flattenCatalog(JSON.parse(readFileSync(path, "utf-8")));
+}
+
+function sourceFiles(directory: string): string[] {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) return sourceFiles(path);
+    return path.endsWith(".ts") || path.endsWith(".tsx") ? [path] : [];
+  });
+}
+
+function literalTranslationKeys(files: string[]): string[] {
+  return files.flatMap((file) => {
+    const source = readFileSync(file, "utf-8");
+    return [...source.matchAll(/\bt\(\s*(["'`])([^"'`]+)\1/g)]
+      .map((match) => match[2])
+      .filter((key) => !key.includes("${"));
+  });
+}
+
+function sourceTranslationKeys(
+  files: string[],
+  catalogRoots: Set<string>,
+): string[] {
+  return files.flatMap((file) => {
+    const source = readFileSync(file, "utf-8");
+    return [...source.matchAll(/(["'`])([A-Za-z][\w-]*(?:\.[\w-]+)+)\1/g)]
+      .map((match) => match[2])
+      .filter((key) => catalogRoots.has(key.split(".")[0]));
+  });
+}
+
+function missingCatalogKeys(
+  keys: string[],
+  catalogs: Record<string, FlatCatalog>,
+): string[] {
+  return [...new Set(keys)]
+    .sort()
+    .flatMap((key) =>
+      Object.entries(catalogs).flatMap(([language, catalog]) =>
+        catalog.has(key) ? [] : [`${language}:${key}`],
+      ),
+    );
+}
+
+function interpolationTokens(value: string): string[] {
+  return [...value.matchAll(/{{\s*([^},\s]+)[^}]*}}/g)]
+    .map((match) => match[1])
+    .sort();
+}
+
+const catalogs = {
+  en: readCatalog(LOCALE_FILES.en),
+  vi: readCatalog(LOCALE_FILES.vi),
+};
+const catalogRoots = new Set(
+  [...catalogs.en.keys()].map((key) => key.split(".")[0]),
+);
+const appSourceFiles = sourceFiles("src");
 
 describe("Nexus Composer language system", () => {
+  it("keeps the English and Vietnamese locale trees in parity", () => {
+    expect([...catalogs.vi.keys()].sort()).toEqual(
+      [...catalogs.en.keys()].sort(),
+    );
+  });
+
+  it("keeps interpolation tokens in parity", () => {
+    const mismatches = [...catalogs.en].flatMap(([key, enValue]) => {
+      const enTokens = interpolationTokens(enValue);
+      const viTokens = interpolationTokens(catalogs.vi.get(key) ?? "");
+      return JSON.stringify(enTokens) === JSON.stringify(viTokens)
+        ? []
+        : [{ key, enTokens, viTokens }];
+    });
+
+    expect(mismatches).toEqual([]);
+  });
+
+  it("has both locale entries for every literal translation call", () => {
+    expect(
+      missingCatalogKeys(literalTranslationKeys(appSourceFiles), catalogs),
+    ).toEqual([]);
+  });
+
+  it("has both locale entries for mapped runtime translation keys", () => {
+    const keys = sourceTranslationKeys(appSourceFiles, catalogRoots);
+
+    expect(keys).toContain("subscription.thirtyDay");
+    expect(missingCatalogKeys(keys, catalogs)).toEqual([]);
+  });
+
   it("only en.json and vi.json locale files exist", () => {
     expect(existsSync("src/i18n/locales/en.json")).toBe(true);
     expect(existsSync("src/i18n/locales/vi.json")).toBe(true);
@@ -44,6 +163,26 @@ describe("Nexus Composer language system", () => {
 
     expect(en.settings.languageOptionVietnamese).toBe("Tiếng Việt");
     expect(vi.settings.languageOptionVietnamese).toBe("Tiếng Việt");
+  });
+
+  it("localizes representative Usage screen copy in Vietnamese", () => {
+    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
+
+    expect({
+      title: vi.usage.title,
+      totalRequests: vi.usage.totalRequests,
+      trends: vi.usage.trends,
+      realTotal: vi.usage.realTotal,
+      pricingTitle: vi.settings.advanced.pricing.title,
+      pricingDescription: vi.settings.advanced.pricing.description,
+    }).toEqual({
+      title: "Thống kê sử dụng",
+      totalRequests: "Tổng yêu cầu",
+      trends: "Xu hướng sử dụng",
+      realTotal: "Token đã xử lý",
+      pricingTitle: "Đơn giá mô hình",
+      pricingDescription: "Quản lý đơn giá token theo từng mô hình",
+    });
   });
 
   it("en.json does not have Chinese or Japanese options", () => {

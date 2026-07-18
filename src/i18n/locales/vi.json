@@ -141,6 +141,7 @@
     "searchCloseAriaLabel": "Close provider search",
     "noSearchResults": "No providers match your search.",
     "duplicate": "Duplicate",
+    "duplicateLiveIdsLoadFailed": "Không thể đọc ID nhà cung cấp từ cấu hình hiện tại. Hãy kiểm tra cấu hình rồi thử lại.",
     "sortUpdateFailed": "Failed to update sort order",
     "configureUsage": "Configure usage query",
     "officialPartner": "Official Partner",
@@ -217,6 +218,7 @@
     "statusGatewayTokenMissing": "Chưa tạo khóa định tuyến. Hãy chuyển lại sang nhà cung cấp này để tạo khóa.",
     "statusBaseUrlMismatch": "Hồ sơ Claude Desktop đang dùng địa chỉ khác. Hiện tại: {{actual}}; cần dùng: {{expected}}. Hãy chuyển lại sang nhà cung cấp này để sửa.",
     "route": {
+      "stopBlockedByTakeover": "Một ứng dụng khác đang kết nối qua Nexus. Hãy tắt kết nối của ứng dụng đó trong Cài đặt trước khi dừng dịch vụ.",
       "tooltip": {
         "active": "Định tuyến Claude Desktop đang chạy — {{address}}:{{port}}",
         "inactive": "Bật định tuyến khi nhà cung cấp cần ánh xạ mô hình hoặc đổi định dạng. Địa chỉ: {{address}}:{{port}}"
@@ -250,11 +252,12 @@
     "deleteFailed": "Failed to delete provider: {{error}}",
     "settingsSaved": "Settings saved",
     "settingsSaveFailed": "Failed to save settings: {{error}}",
-    "proxyRequiredForSwitch": "This provider {{reason}}, requires the routing service to work properly. Start routing first.",
-    "proxyReasonCopilot": "uses GitHub Copilot as a Claude provider",
-    "proxyReasonOpenAIChat": "uses OpenAI Chat API format",
-    "proxyReasonOpenAIResponses": "uses OpenAI Responses API format",
-    "proxyReasonFullUrl": "has full URL connection mode enabled",
+    "proxyRequiredForSwitch": "Nhà cung cấp này {{reason}}. Hãy bật Định tuyến trước khi sử dụng.",
+    "proxyReasonCopilot": "dùng GitHub Copilot cho Claude",
+    "proxyReasonOpenAIChat": "dùng định dạng OpenAI Chat API",
+    "proxyReasonOpenAIResponses": "dùng định dạng OpenAI Responses API",
+    "proxyReasonClaudeDesktop": "kết nối Claude Desktop qua Nexus",
+    "proxyReasonFullUrl": "dùng chế độ kết nối bằng URL đầy đủ",
     "openAIFormatHint": "This provider uses OpenAI-compatible format and requires the routing service to be enabled",
     "copilotProxyHint": "GitHub Copilot as a Claude provider always requires local routing; routing automatically selects Chat Completions or Responses based on the current model.",
     "openLinkFailed": "Failed to open link",
@@ -353,8 +356,8 @@
         "description": "Configure failover queue and circuit breaker strategy"
       },
       "pricing": {
-        "title": "Cost Pricing",
-        "description": "Manage token pricing rules for each model"
+        "title": "Đơn giá mô hình",
+        "description": "Quản lý đơn giá token theo từng mô hình"
       },
       "globalProxy": {
         "title": "Global Outbound Proxy",
@@ -1003,6 +1006,7 @@
     "omoHint": "💡 OMO config manages Agent model assignments and supports both oh-my-openagent.jsonc and oh-my-opencode.jsonc",
     "officialHint": "💡 Official provider uses browser login, no API Key needed",
     "getApiKey": "Get API Key",
+    "providerKeyStatusLoading": "Đang kiểm tra ID nhà cung cấp. Vui lòng thử lại sau.",
     "partnerPromotion": {
       "code0": "code0.ai is an AI coding service platform for developers, supporting Claude Code, Codex, and Gemini. Exclusive for Nexus Composer users: contact support via the official website to claim free trial credits!",
       "nekocode": "NekoCode gives developers a stable, efficient, and reliable API relay for Claude, Codex, and other AI models, with transparent pay-as-you-go pricing. Exclusive 10% off for Nexus Composer users: register via the link above and enter promo code nexus-composer at recharge to save 10%!",
@@ -1275,6 +1279,7 @@
     "apiUrlLabel": "API Request URL",
     "extractFromCurrent": "Extract from Editor",
     "extractNoCommonConfig": "No common config available to extract from editor",
+    "noCommonConfigToApply": "Đoạn cấu hình dùng chung đang trống hoặc không có nội dung để áp dụng",
     "extractFailed": "Extract failed: {{error}}",
     "saveFailed": "Save failed: {{error}}",
     "modelNameHint": "Specify the model to use, will be auto-updated in config.toml",
@@ -1383,7 +1388,7 @@
     "noSearchResults": "No provider presets match your search."
   },
   "usage": {
-    "title": "Usage Statistics",
+    "title": "Thống kê sử dụng",
     "subtitle": "View AI model usage and cost statistics",
     "today": "24 Hours",
     "last7days": "7 Days",
@@ -1393,17 +1398,17 @@
     "preset7d": "7d",
     "preset14d": "14d",
     "preset30d": "30d",
-    "totalRequests": "Total Requests",
+    "totalRequests": "Tổng yêu cầu",
     "totalCost": "Tổng chi phí",
     "cost": "Cost",
     "perMillion": "(per million)",
-    "trends": "Usage Trends",
+    "trends": "Xu hướng sử dụng",
     "rangeToday": "Last 24 hours (hourly)",
     "rangeLast7Days": "Last 7 days",
     "rangeLast30Days": "Last 30 days",
     "totalTokens": "Tổng token mới",
     "cacheTokens": "Cache Tokens",
-    "realTotal": "Tokens Processed",
+    "realTotal": "Token đã xử lý",
     "realTotalHint": "Input + Output + Cache Write + Cache Read",
     "freshInput": "Fresh Input",
     "cacheHitRate": "Cache Hit Rate",
@@ -2401,6 +2406,7 @@
       "tooltip": "Failover priority {{priority}}"
     },
     "tooltip": {
+      "takeoverRequired": "Hãy kết nối {{app}} qua Nexus trước khi bật chuyển dự phòng",
       "enabled": "{{app}} failover enabled\nRequests follow queue priority (P1→P2→...)",
       "disabled": "Enable {{app}} failover\nSwitches to queue P1 immediately, then falls back on failures"
     }
@@ -2580,7 +2586,9 @@
     },
     "server": {
       "started": "Routing service started - {{address}}:{{port}}",
-      "startFailed": "Failed to start routing service: {{detail}}"
+      "startFailed": "Failed to start routing service: {{detail}}",
+      "stopped": "Đã dừng dịch vụ định tuyến",
+      "stopFailed": "Không thể dừng dịch vụ định tuyến: {{detail}}"
     },
     "stoppedWithRestore": "Routing service stopped, all routing configs restored",
     "stopWithRestoreFailed": "Stop failed: {{detail}}"
@@ -2692,6 +2700,7 @@
     "noAppsEnabled": "No apps enabled",
     "added": "Universal provider added",
     "addedAndSynced": "Universal provider added and synced",
+    "addedButSyncFailed": "Đã thêm nhà cung cấp nhưng chưa đồng bộ được",
     "updated": "Universal provider updated",
     "deleted": "Universal provider deleted",
     "addSuccess": "Universal provider added successfully",
@@ -2907,6 +2916,7 @@
     "sevenDay": "7-Day",
     "sevenDayOpus": "7-Day (Opus)",
     "sevenDaySonnet": "7-Day (Sonnet)",
+    "thirtyDay": "30 ngày",
     "geminiPro": "Pro",
     "geminiFlash": "Flash",
     "geminiFlashLite": "Flash Lite",
