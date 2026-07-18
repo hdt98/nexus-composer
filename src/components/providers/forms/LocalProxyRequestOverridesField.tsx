@@ -13,11 +13,13 @@ import {
 interface LocalProxyMaxOutputTokensFieldProps {
   bodyJson: string;
   onBodyJsonChange: (value: string) => void;
+  showClaudeDesktopTimeoutWarning?: boolean;
 }
 
 export function LocalProxyMaxOutputTokensField({
   bodyJson,
   onBodyJsonChange,
+  showClaudeDesktopTimeoutWarning = false,
 }: LocalProxyMaxOutputTokensFieldProps) {
   const { t } = useTranslation();
   const parsedBody = parseBodyOverrideJson(bodyJson);
@@ -62,6 +64,11 @@ export function LocalProxyMaxOutputTokensField({
       <p className="text-xs text-muted-foreground">
         {t("providerForm.maxOutputTokensHint")}
       </p>
+      {showClaudeDesktopTimeoutWarning && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          {t("providerForm.claudeDesktopMaxOutputTokensWarning")}
+        </p>
+      )}
       {(parsedBody.error || maxOutputTokensInvalid) && (
         <p className="text-xs text-destructive">
           {maxOutputTokensInvalid

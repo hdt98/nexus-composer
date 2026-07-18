@@ -1094,6 +1094,7 @@
     "localProxyBodyOverridesInvalidDetail": "Body overrides format error: {{error}}",
     "maxOutputTokens": "Token đầu ra tối đa",
     "maxOutputTokensHint": "Nexus áp dụng giới hạn này sau khi chuyển đổi yêu cầu. Để trống để dùng giá trị từ ứng dụng. Claude Code do Nexus quản lý cũng dùng cùng giới hạn khi tính ngữ cảnh.",
+    "claudeDesktopMaxOutputTokensWarning": "Claude Desktop có thể dừng lượt chạy sau khoảng 15 phút. Hãy chọn mức mà mô hình có thể hoàn tất trong thời gian này.",
     "maxOutputTokensInvalid": "Hãy nhập một số nguyên dương.",
     "fullUrlLabel": "Full URL",
     "fullUrlEnabled": "Full URL Mode",

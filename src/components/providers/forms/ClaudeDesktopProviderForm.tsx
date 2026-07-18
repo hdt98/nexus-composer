@@ -1251,6 +1251,7 @@ export function ClaudeDesktopProviderForm({
                 <LocalProxyMaxOutputTokensField
                   bodyJson={localProxyBodyOverride}
                   onBodyJsonChange={setLocalProxyBodyOverride}
+                  showClaudeDesktopTimeoutWarning
                 />
                 {hasInvalidHiddenRequestOverrides && (
                   <LocalProxyRequestOverridesField

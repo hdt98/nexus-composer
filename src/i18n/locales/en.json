@@ -1094,6 +1094,7 @@
     "localProxyBodyOverridesInvalidDetail": "Body overrides format error: {{error}}",
     "maxOutputTokens": "Maximum output tokens",
     "maxOutputTokensHint": "Nexus applies this limit after converting the request. Leave blank to use the client's value. Managed Claude Code uses the same limit for context accounting.",
+    "claudeDesktopMaxOutputTokensWarning": "Claude Desktop may stop a turn after about 15 minutes. Choose a limit the model can finish within that time.",
     "maxOutputTokensInvalid": "Enter a positive whole number.",
     "fullUrlLabel": "Full URL",
     "fullUrlEnabled": "Full URL Mode",

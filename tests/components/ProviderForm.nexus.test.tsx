@@ -25,6 +25,9 @@ vi.mock("@/components/providers/forms/CommonConfigEditor", () => ({
 }));
 vi.mock("@/components/JsonEditor", () => ({ default: () => null }));
 
+const desktopTimeoutWarning =
+  /providerForm\.claudeDesktopMaxOutputTokensWarning|Claude Desktop may stop a turn/i;
+
 function renderForm(
   appId: "codex" | "claude",
   initialData?: ProviderFormProps["initialData"],
@@ -127,6 +130,7 @@ describe("ProviderForm Nexus presets", () => {
       const inputElement = screen.getByLabelText(
         /providerForm\.maxOutputTokens|Maximum output tokens/i,
       );
+      expect(screen.queryByText(desktopTimeoutWarning)).not.toBeInTheDocument();
       fireEvent.change(inputElement, { target: { value: input } });
       fireEvent.submit(inputElement.closest("form")!);
 
@@ -190,6 +194,7 @@ describe("ProviderForm Nexus presets", () => {
       },
     });
 
+    expect(screen.queryByText(desktopTimeoutWarning)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));

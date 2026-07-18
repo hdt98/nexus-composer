@@ -25,6 +25,8 @@ beforeAll(() => {
 
 const maxOutputTokensLabel =
   /providerForm\.maxOutputTokens|Maximum output tokens/i;
+const desktopTimeoutWarning =
+  /providerForm\.claudeDesktopMaxOutputTokensWarning|Claude Desktop may stop a turn/i;
 
 function renderForm(
   initialData: ComponentProps<typeof ClaudeDesktopProviderForm>["initialData"],
@@ -114,6 +116,14 @@ function selectNexusPreset() {
 }
 
 describe("ClaudeDesktopProviderForm", () => {
+  it("shows the output timeout warning only while Desktop routing is enabled", () => {
+    renderForm(managedNexusProvider());
+
+    expect(screen.getByText(desktopTimeoutWarning)).toBeVisible();
+    fireEvent.click(screen.getByRole("switch"));
+    expect(screen.queryByText(desktopTimeoutWarning)).not.toBeInTheDocument();
+  });
+
   it("persists the managed Nexus preset metadata and request defaults", async () => {
     const onSubmit = vi.fn();
     renderForm(undefined, onSubmit);
