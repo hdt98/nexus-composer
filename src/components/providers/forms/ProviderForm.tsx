@@ -120,7 +120,8 @@ import {
 import { HERMES_DEFAULT_CONFIG } from "./hooks/useHermesFormState";
 import { resolveManagedAccountId } from "@/lib/authBinding";
 import {
-  NEXUS_CLAUDE_MODEL,
+  isNexusModel,
+  NEXUS_CLAUDE_BASE_URL,
   NEXUS_ENDPOINT,
   NEXUS_MODEL,
 } from "@/config/nexus";
@@ -1474,8 +1475,9 @@ function ProviderFormFull({
           normalizedEndpoint(NEXUS_ENDPOINT) &&
         extractCodexModelName(codexConfig) === NEXUS_MODEL) ||
         (appId === "claude" &&
-          normalizedEndpoint(baseUrl) === normalizedEndpoint(NEXUS_ENDPOINT) &&
-          claudeModel === NEXUS_CLAUDE_MODEL));
+          normalizedEndpoint(baseUrl) ===
+            normalizedEndpoint(NEXUS_CLAUDE_BASE_URL) &&
+          isNexusModel(claudeModel)));
     const providerType = managedNexus
       ? "nexus"
       : presetProviderType === "nexus" ||

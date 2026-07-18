@@ -4,9 +4,10 @@
 import { ProviderCategory, type LocalProxyRequestOverrides } from "../types";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CLAUDE_BASE_URL,
+  NEXUS_CLAUDE_MANAGED_PRESET_VERSION,
   NEXUS_CLAUDE_MODEL,
   NEXUS_ENDPOINT,
-  NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
 } from "./nexus";
@@ -92,7 +93,7 @@ export const providerPresets: ProviderPreset[] = [
     settingsConfig: {
       modelCatalog: NEXUS_TEXT_MODEL_CATALOG,
       env: {
-        ANTHROPIC_BASE_URL: NEXUS_ENDPOINT,
+        ANTHROPIC_BASE_URL: NEXUS_CLAUDE_BASE_URL,
         ANTHROPIC_AUTH_TOKEN: "",
         ANTHROPIC_MODEL: NEXUS_CLAUDE_MODEL,
         ANTHROPIC_DEFAULT_HAIKU_MODEL: NEXUS_CLAUDE_MODEL,
@@ -105,10 +106,10 @@ export const providerPresets: ProviderPreset[] = [
         CLAUDE_CODE_ATTRIBUTION_HEADER: "0",
       },
     },
-    endpointCandidates: [NEXUS_ENDPOINT],
+    endpointCandidates: [NEXUS_CLAUDE_BASE_URL],
     apiFormat: "openai_chat",
     providerType: "nexus",
-    managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+    managedNexusPresetVersion: NEXUS_CLAUDE_MANAGED_PRESET_VERSION,
     localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     category: "third_party",
     icon: "nexus",
