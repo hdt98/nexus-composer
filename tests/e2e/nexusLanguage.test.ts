@@ -165,6 +165,26 @@ describe("Nexus Composer language system", () => {
     expect(vi.settings.languageOptionVietnamese).toBe("Tiếng Việt");
   });
 
+  it("localizes representative Usage screen copy in Vietnamese", () => {
+    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
+
+    expect({
+      title: vi.usage.title,
+      totalRequests: vi.usage.totalRequests,
+      trends: vi.usage.trends,
+      realTotal: vi.usage.realTotal,
+      pricingTitle: vi.settings.advanced.pricing.title,
+      pricingDescription: vi.settings.advanced.pricing.description,
+    }).toEqual({
+      title: "Thống kê sử dụng",
+      totalRequests: "Tổng yêu cầu",
+      trends: "Xu hướng sử dụng",
+      realTotal: "Token đã xử lý",
+      pricingTitle: "Đơn giá mô hình",
+      pricingDescription: "Quản lý đơn giá token theo từng mô hình",
+    });
+  });
+
   it("en.json does not have Chinese or Japanese options", () => {
     const en = JSON.parse(readFileSync("src/i18n/locales/en.json", "utf-8"));
     expect(en.settings.languageOptionChinese).toBeUndefined();
