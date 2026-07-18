@@ -1456,8 +1456,10 @@
       "import": "Import Sessions",
       "resync": "Sync",
       "imported": "Imported {{count}} records from session logs",
+      "partial": "Records imported: {{imported}}; errors: {{failed}}",
       "upToDate": "Session logs are up to date",
-      "failed": "Session sync failed"
+      "failed": "Session sync failed",
+      "failedWithCount": "Session sync failed; errors: {{count}}"
     },
     "totalRecords": "{{total}} records total",
     "goToPage": "Go",

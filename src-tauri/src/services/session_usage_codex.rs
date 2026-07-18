@@ -19,7 +19,7 @@ use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
-    get_sync_state, metadata_modified_nanos, update_sync_state, SessionSyncResult,
+    get_sync_state, metadata_modified_nanos, update_sync_state_after_records, SessionSyncResult,
 };
 use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
 use rust_decimal::Decimal;
@@ -161,9 +161,10 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
 
     for file_path in &files {
         match sync_single_codex_file(db, file_path) {
-            Ok((imported, skipped)) => {
+            Ok((imported, skipped, errors)) => {
                 result.imported += imported;
                 result.skipped += skipped;
+                result.errors.extend(errors);
             }
             Err(e) => {
                 let msg = format!("Codex 会话文件解析失败 {}: {e}", file_path.display());
@@ -228,8 +229,11 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
     }
 }
 
-/// 同步单个 Codex JSONL 文件，返回 (imported, skipped)
-fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+/// Synchronize one Codex JSONL file and return (imported, skipped, errors).
+fn sync_single_codex_file(
+    db: &Database,
+    file_path: &Path,
+) -> Result<(u32, u32, Vec<String>), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 获取文件元数据
@@ -242,7 +246,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     // 打开文件逐行解析
@@ -260,6 +264,7 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
     let mut line_offset: i64 = 0;
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
+    let mut errors = Vec::new();
 
     for line_result in reader.lines() {
         line_offset += 1;
@@ -411,7 +416,10 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                     Ok(true) => imported += 1,
                     Ok(false) => skipped += 1,
                     Err(e) => {
-                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", request_id);
+                        let error =
+                            format!("{}: insert failed ({request_id}): {e}", file_path.display());
+                        log::warn!("[CODEX-SYNC] {error}");
+                        errors.push(error);
                         skipped += 1;
                     }
                 }
@@ -420,10 +428,15 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    update_sync_state_after_records(
+        db,
+        &file_path_str,
+        file_modified,
+        line_offset,
+        !errors.is_empty(),
+    )?;
 
-    Ok((imported, skipped))
+    Ok((imported, skipped, errors))
 }
 
 /// 插入单条 Codex 会话记录到 proxy_request_logs
@@ -710,6 +723,54 @@ mod tests {
         })?;
         assert_eq!(count, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn failed_codex_insert_retries_before_advancing_cursor() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_codex_session_record
+                 BEFORE INSERT ON proxy_request_logs
+                 WHEN NEW.request_id = 'codex_session:retry-session:1'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced insert failure');
+                 END;",
+            )?;
+        }
+
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-retry-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("retry.jsonl");
+        let lines = [
+            r#"{"type":"session_meta","payload":{"session_id":"retry-session"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+        ];
+        fs::write(&file, lines.join("\n")).unwrap();
+
+        let (_, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(get_sync_state(&db, &file.to_string_lossy())?, (0, 0));
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch("DROP TRIGGER fail_codex_session_record;")?;
+        }
+
+        let (imported, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert!(errors.is_empty());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 3)
+        );
+        assert_eq!(sync_single_codex_file(&db, &file)?.0, 0);
+
+        fs::remove_dir_all(&tmp).ok();
         Ok(())
     }
 

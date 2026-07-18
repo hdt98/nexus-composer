@@ -80,7 +80,7 @@ describe("RequestLogTable", () => {
     );
   });
 
-  it("opens a request detail from a row and closes it", () => {
+  it("closes a request detail without resetting the current page", async () => {
     const range: UsageRangeSelection = { preset: "today" };
     useRequestLogsMock.mockReturnValue({
       data: {
@@ -108,7 +108,7 @@ describe("RequestLogTable", () => {
             dataSource: "proxy",
           },
         ],
-        total: 1,
+        total: 21,
         page: 0,
         pageSize: 20,
       },
@@ -124,6 +124,13 @@ describe("RequestLogTable", () => {
       />,
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "2" }));
+    await waitFor(() =>
+      expect(useRequestLogsMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 1 }),
+      ),
+    );
+
     fireEvent.click(screen.getByRole("row", { name: "View request details" }));
     expect(requestDetailPropsMock).toHaveBeenLastCalledWith(
       expect.objectContaining({ requestId: "response-id" }),
@@ -135,6 +142,12 @@ describe("RequestLogTable", () => {
     expect(
       screen.queryByRole("button", { name: "Close request detail" }),
     ).toBeNull();
+    expect(useRequestLogsMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({ page: 1 }),
+    );
+    expect(
+      screen.getByRole("row", { name: "View request details" }),
+    ).toBeInTheDocument();
   });
 
   it("resets pagination when the dashboard range changes", async () => {

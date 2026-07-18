@@ -1452,12 +1452,14 @@
       "opencode_session": "OpenCode Session"
     },
     "sessionSync": {
-      "trigger": "Sync session logs",
-      "import": "Import Sessions",
-      "resync": "Sync",
-      "imported": "Imported {{count}} records from session logs",
-      "upToDate": "Session logs are up to date",
-      "failed": "Session sync failed"
+      "trigger": "Đồng bộ nhật ký phiên",
+      "import": "Nhập nhật ký phiên",
+      "resync": "Đồng bộ",
+      "imported": "Đã nhập {{count}} mục",
+      "partial": "Đã nhập {{imported}} mục; {{failed}} lỗi",
+      "upToDate": "Dữ liệu đã được cập nhật",
+      "failed": "Không thể đồng bộ",
+      "failedWithCount": "Không thể đồng bộ: {{count}} lỗi"
     },
     "totalRecords": "{{total}} records total",
     "goToPage": "Go",
