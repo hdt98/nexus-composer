@@ -10,6 +10,7 @@ const LEGACY_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
 const MODEL: &str = "GLM-5.2-FP8";
 const CLAUDE_MODEL: &str = "GLM-5.2-FP8[1m]";
 const MANAGED_VERSION: u64 = 7;
+const CLAUDE_DESKTOP_MANAGED_VERSION: u64 = 8;
 const CONTEXT_WINDOW: i64 = 1_048_576;
 const COMPACT_TOKENS: i64 = 252_000;
 const MAX_OUTPUT_TOKENS: u64 = 65_536;
@@ -28,7 +29,31 @@ fn recognized_model(value: &str) -> bool {
     )
 }
 
-fn has_hosted_signature(app: &AppType, settings: &Value) -> bool {
+fn managed_version(app: &AppType) -> Option<u64> {
+    match app {
+        AppType::Claude | AppType::Codex => Some(MANAGED_VERSION),
+        AppType::ClaudeDesktop => Some(CLAUDE_DESKTOP_MANAGED_VERSION),
+        _ => None,
+    }
+}
+
+fn managed_claude_desktop_routes() -> serde_json::Map<String, Value> {
+    crate::claude_desktop_config::DEFAULT_PROXY_ROUTES
+        .iter()
+        .map(|route| {
+            (
+                route.route_id.to_string(),
+                json!({
+                    "model": MODEL,
+                    "labelOverride": MODEL,
+                    "supports1m": route.supports_1m
+                }),
+            )
+        })
+        .collect()
+}
+
+fn has_hosted_signature(app: &AppType, settings: &Value, meta: &Value) -> bool {
     match app {
         AppType::Codex => {
             let Some(config) = settings.get("config").and_then(Value::as_str) else {
@@ -56,6 +81,23 @@ fn has_hosted_signature(app: &AppType, settings: &Value) -> bool {
                     .get("ANTHROPIC_MODEL")
                     .and_then(Value::as_str)
                     .is_some_and(recognized_model)
+        }
+        AppType::ClaudeDesktop => {
+            let Some(env) = settings.get("env") else {
+                return false;
+            };
+            let Some(routes) = meta
+                .get("claudeDesktopModelRoutes")
+                .and_then(Value::as_object)
+            else {
+                return false;
+            };
+            env.get("ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str)
+                .is_some_and(|endpoint| endpoint.trim_end_matches('/') == HOSTED_ENDPOINT)
+                && meta.get("claudeDesktopMode").and_then(Value::as_str) == Some("proxy")
+                && meta.get("apiFormat").and_then(Value::as_str) == Some("openai_chat")
+                && routes == &managed_claude_desktop_routes()
         }
         _ => false,
     }
@@ -147,7 +189,7 @@ fn merge_text_only_catalog(settings: &mut Value, app: &AppType) -> Result<(), Ap
     Ok(())
 }
 
-fn merge_request_defaults(meta: &mut Value) -> Result<(), AppError> {
+fn merge_request_defaults(meta: &mut Value, managed_version: u64) -> Result<(), AppError> {
     let meta = meta
         .as_object_mut()
         .ok_or_else(|| AppError::Message("Nexus metadata must be an object".into()))?;
@@ -177,7 +219,7 @@ fn merge_request_defaults(meta: &mut Value) -> Result<(), AppError> {
         .entry("clear_thinking")
         .or_insert_with(|| json!(false));
     meta.insert("providerType".into(), json!("nexus"));
-    meta.insert("managedNexusPresetVersion".into(), json!(MANAGED_VERSION));
+    meta.insert("managedNexusPresetVersion".into(), json!(managed_version));
     meta.insert("apiFormat".into(), json!("openai_chat"));
     Ok(())
 }
@@ -231,10 +273,31 @@ fn upgrade_settings(app: &AppType, settings: &mut Value, meta: &mut Value) -> Re
                 env.insert(key.into(), json!(value));
             }
         }
+        AppType::ClaudeDesktop => {
+            let env = settings
+                .get_mut("env")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| {
+                    AppError::Message("Nexus Claude Desktop env must be an object".into())
+                })?;
+            env.insert("ANTHROPIC_BASE_URL".into(), json!(HOSTED_ENDPOINT));
+
+            let meta = meta.as_object_mut().ok_or_else(|| {
+                AppError::Message("Nexus Claude Desktop metadata must be an object".into())
+            })?;
+            meta.insert("claudeDesktopMode".into(), json!("proxy"));
+            meta.insert(
+                "claudeDesktopModelRoutes".into(),
+                Value::Object(managed_claude_desktop_routes()),
+            );
+        }
         _ => return Ok(()),
     }
     merge_text_only_catalog(settings, app)?;
-    merge_request_defaults(meta)
+    merge_request_defaults(
+        meta,
+        managed_version(app).expect("supported managed Nexus app"),
+    )
 }
 
 impl Database {
@@ -243,9 +306,9 @@ impl Database {
         app: &AppType,
         current_id: Option<&str>,
     ) -> Result<bool, AppError> {
-        if !matches!(app, AppType::Claude | AppType::Codex) {
+        let Some(managed_version) = managed_version(app) else {
             return Ok(false);
-        }
+        };
         let app_name = app.as_str();
         let mut connection = lock_conn!(self.conn);
         let transaction = connection.transaction()?;
@@ -276,23 +339,23 @@ impl Database {
             let version = meta
                 .get("managedNexusPresetVersion")
                 .and_then(Value::as_u64);
-            if version.is_some_and(|version| version > MANAGED_VERSION) {
+            if version.is_some_and(|version| version > managed_version) {
                 continue;
             }
-            let explicitly_managed =
-                meta.get("providerType").and_then(Value::as_str) == Some("nexus");
+            let managed_owned = meta.get("providerType").and_then(Value::as_str) == Some("nexus")
+                && (!matches!(app, AppType::ClaudeDesktop) || version.is_some());
             let legacy = is_legacy_preset(app, &name, &settings, &meta);
-            if !explicitly_managed && !legacy {
+            if !managed_owned && !legacy {
                 continue;
             }
 
-            if explicitly_managed && !has_hosted_signature(app, &settings) {
+            if managed_owned && !has_hosted_signature(app, &settings, &meta) {
                 let Some(meta) = meta.as_object_mut() else {
                     continue;
                 };
                 meta.remove("providerType");
                 meta.remove("managedNexusPresetVersion");
-            } else if version != Some(MANAGED_VERSION) {
+            } else if version != Some(managed_version) {
                 upgrade_settings(app, &mut settings, &mut meta).map_err(|error| {
                     AppError::Message(format!(
                         "Cannot upgrade {app_name} Nexus provider '{id}': {error}"
@@ -322,10 +385,11 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use super::{MANAGED_VERSION, MODEL};
     use crate::app_config::AppType;
     use crate::database::Database;
     use crate::provider::Provider;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     const LEGACY_ENDPOINT: &str = "https://glm-test-glm52-tp4.onenexus-do.cloud/v1";
     const HOSTED_ENDPOINT: &str = "https://my-tenant-2-glm52-sonle-tp4.onenexus-do.cloud/v1";
@@ -341,6 +405,19 @@ mod tests {
         let mut provider = Provider::with_id(id.into(), name.into(), settings, None);
         provider.meta = Some(serde_json::from_value(meta).unwrap());
         db.save_provider(app.as_str(), &provider).unwrap();
+    }
+
+    fn managed_desktop_meta(version: Option<u64>) -> Value {
+        let mut meta = json!({
+            "providerType": "nexus",
+            "apiFormat": "openai_chat",
+            "claudeDesktopMode": "proxy",
+            "claudeDesktopModelRoutes": super::managed_claude_desktop_routes()
+        });
+        if let Some(version) = version {
+            meta["managedNexusPresetVersion"] = json!(version);
+        }
+        meta
     }
 
     #[test]
@@ -396,6 +473,10 @@ mod tests {
             Some("keep-agent")
         );
         assert_eq!(
+            codex.meta.as_ref().unwrap().managed_nexus_preset_version,
+            Some(MANAGED_VERSION as u32)
+        );
+        assert_eq!(
             codex
                 .meta
                 .as_ref()
@@ -428,12 +509,278 @@ mod tests {
             .unwrap()
             .unwrap();
         let env = &claude.settings_config["env"];
+        assert_eq!(
+            claude.meta.as_ref().unwrap().managed_nexus_preset_version,
+            Some(MANAGED_VERSION as u32)
+        );
         assert_eq!(env["ANTHROPIC_BASE_URL"], HOSTED_ENDPOINT);
         assert_eq!(env["ANTHROPIC_AUTH_TOKEN"], "user-key");
         assert_eq!(env["ANTHROPIC_MODEL"], "GLM-5.2-FP8[1m]");
         assert_eq!(env["API_TIMEOUT_MS"], "3000000");
         assert_eq!(env["CLAUDE_CODE_ATTRIBUTION_HEADER"], "0");
         assert_eq!(env["USER_SETTING"], "keep");
+    }
+
+    #[test]
+    fn migrates_claude_desktop_v7_to_app_specific_v8() {
+        let db = Database::memory().unwrap();
+        let mut meta = managed_desktop_meta(Some(7));
+        meta["localProxyRequestOverrides"] = json!({
+            "headers": {"x-keep": "yes"},
+            "body": {"max_tokens": 12345, "temperature": 0.2}
+        });
+        meta["customUserAgent"] = json!("keep-agent");
+        save_provider(
+            &db,
+            AppType::ClaudeDesktop,
+            "desktop",
+            "Nexus GLM-5.2",
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
+                    "ANTHROPIC_AUTH_TOKEN": "user-key",
+                    "USER_SETTING": "keep"
+                },
+                "modelCatalog": {"models": [
+                    {"model": "GLM-5.2-FP8", "inputModalities": ["text", "image"]},
+                    {"model": "user-model", "inputModalities": ["image"]}
+                ]}
+            }),
+            meta,
+        );
+
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("desktop"))
+            .unwrap());
+
+        let desktop = db
+            .get_provider_by_id("desktop", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            desktop.settings_config["env"]["ANTHROPIC_AUTH_TOKEN"],
+            "user-key"
+        );
+        assert_eq!(desktop.settings_config["env"]["USER_SETTING"], "keep");
+        assert_eq!(
+            desktop.settings_config["modelCatalog"]["models"][0],
+            json!({"model": "GLM-5.2-FP8", "inputModalities": ["text"]})
+        );
+        assert_eq!(
+            desktop.settings_config["modelCatalog"]["models"][1]["model"],
+            "user-model"
+        );
+
+        let expected_settings = desktop.settings_config.clone();
+        let expected_meta = serde_json::to_value(&desktop.meta).unwrap();
+        let meta = desktop.meta.as_ref().unwrap();
+        assert_eq!(meta.managed_nexus_preset_version, Some(8));
+        assert_eq!(meta.api_format.as_deref(), Some("openai_chat"));
+        assert_eq!(meta.custom_user_agent.as_deref(), Some("keep-agent"));
+        assert_eq!(meta.claude_desktop_model_routes.len(), 4);
+        assert!(meta.claude_desktop_model_routes.values().all(|route| {
+            route.model == "GLM-5.2-FP8"
+                && route.label_override.as_deref() == Some("GLM-5.2-FP8")
+                && route.supports_1m == Some(true)
+        }));
+        let overrides = meta.local_proxy_request_overrides.as_ref().unwrap();
+        assert_eq!(overrides.headers["x-keep"], "yes");
+        let body = overrides.body.as_ref().unwrap();
+        assert_eq!(body["temperature"], 0.2);
+        assert_eq!(body["max_tokens"], 12345);
+        assert_eq!(body["chat_template_kwargs"]["clear_thinking"], false);
+
+        assert!(!db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("desktop"))
+            .unwrap());
+        let unchanged = db
+            .get_provider_by_id("desktop", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.settings_config, expected_settings);
+        assert_eq!(
+            serde_json::to_value(&unchanged.meta).unwrap(),
+            expected_meta
+        );
+    }
+
+    #[test]
+    fn claude_desktop_managed_signature_is_exact() {
+        let settings = json!({"env": {"ANTHROPIC_BASE_URL": HOSTED_ENDPOINT}});
+        let meta = managed_desktop_meta(Some(7));
+        assert!(super::has_hosted_signature(
+            &AppType::ClaudeDesktop,
+            &settings,
+            &meta
+        ));
+
+        let mutations: [fn(&mut Value); 6] = [
+            |value| value["apiFormat"] = json!("anthropic"),
+            |value| value["claudeDesktopMode"] = json!("direct"),
+            |value| {
+                value["claudeDesktopModelRoutes"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("claude-fable-5");
+            },
+            |value| {
+                value["claudeDesktopModelRoutes"]["claude-sonnet-5"]["labelOverride"] =
+                    json!("Custom");
+            },
+            |value| {
+                value["claudeDesktopModelRoutes"]["claude-sonnet-5"]["supports1m"] = json!(false);
+            },
+            |value| {
+                value["claudeDesktopModelRoutes"]["custom-role"] = json!({
+                    "model": MODEL,
+                    "labelOverride": MODEL,
+                    "supports1m": true
+                });
+            },
+        ];
+        for mutate in mutations {
+            let mut changed = meta.clone();
+            mutate(&mut changed);
+            assert!(!super::has_hosted_signature(
+                &AppType::ClaudeDesktop,
+                &settings,
+                &changed
+            ));
+        }
+
+        let changed_endpoint = json!({"env": {"ANTHROPIC_BASE_URL": "https://custom.example/v1"}});
+        assert!(!super::has_hosted_signature(
+            &AppType::ClaudeDesktop,
+            &changed_endpoint,
+            &meta
+        ));
+    }
+
+    #[test]
+    fn detaches_changed_claude_desktop_contract_and_skips_future_versions() {
+        let db = Database::memory().unwrap();
+        for (id, version) in [("custom", 7), ("future", 9)] {
+            save_provider(
+                &db,
+                AppType::ClaudeDesktop,
+                id,
+                "Nexus GLM-5.2",
+                json!({"env": {
+                    "ANTHROPIC_BASE_URL": HOSTED_ENDPOINT,
+                    "ANTHROPIC_AUTH_TOKEN": "user-key"
+                }}),
+                json!({
+                    "providerType": "nexus",
+                    "managedNexusPresetVersion": version,
+                    "apiFormat": "openai_chat",
+                    "claudeDesktopMode": "proxy",
+                    "claudeDesktopModelRoutes": {
+                        "claude-sonnet-5": {"model": "custom-model"}
+                    }
+                }),
+            );
+        }
+
+        assert!(db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("custom"))
+            .unwrap());
+        let custom = db
+            .get_provider_by_id("custom", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        let custom_meta = custom.meta.unwrap();
+        assert!(custom_meta.provider_type.is_none());
+        assert!(custom_meta.managed_nexus_preset_version.is_none());
+        assert_eq!(
+            custom_meta.claude_desktop_model_routes["claude-sonnet-5"].model,
+            "custom-model"
+        );
+
+        let future_before = db
+            .get_provider_by_id("future", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert!(!db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("future"))
+            .unwrap());
+        let future = db
+            .get_provider_by_id("future", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            future.meta.as_ref().unwrap().managed_nexus_preset_version,
+            Some(9)
+        );
+        assert_eq!(future.settings_config, future_before.settings_config);
+        assert_eq!(
+            serde_json::to_value(&future.meta).unwrap(),
+            serde_json::to_value(&future_before.meta).unwrap()
+        );
+    }
+
+    #[test]
+    fn preserves_versionless_custom_claude_desktop_provider() {
+        let db = Database::memory().unwrap();
+        save_provider(
+            &db,
+            AppType::ClaudeDesktop,
+            "custom",
+            "Custom Nexus route",
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": "https://custom.example/v1"
+            }}),
+            json!({
+                "providerType": "nexus",
+                "apiFormat": "openai_chat",
+                "claudeDesktopMode": "proxy",
+                "claudeDesktopModelRoutes": {
+                    "custom-role": {"model": "custom-model"}
+                },
+                "localProxyRequestOverrides": {
+                    "body": {"temperature": 0.2}
+                }
+            }),
+        );
+        let before = db
+            .get_provider_by_id("custom", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+
+        assert!(!db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("custom"))
+            .unwrap());
+
+        let after = db
+            .get_provider_by_id("custom", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.settings_config, before.settings_config);
+        assert_eq!(
+            serde_json::to_value(&after.meta).unwrap(),
+            serde_json::to_value(&before.meta).unwrap()
+        );
+    }
+
+    #[test]
+    fn migrates_non_current_claude_desktop_without_requesting_live_sync() {
+        let db = Database::memory().unwrap();
+        save_provider(
+            &db,
+            AppType::ClaudeDesktop,
+            "desktop",
+            "Nexus GLM-5.2",
+            json!({"env": {"ANTHROPIC_BASE_URL": HOSTED_ENDPOINT}}),
+            managed_desktop_meta(Some(7)),
+        );
+
+        assert!(!db
+            .migrate_managed_nexus_for_app(&AppType::ClaudeDesktop, Some("other"))
+            .unwrap());
+        let migrated = db
+            .get_provider_by_id("desktop", AppType::ClaudeDesktop.as_str())
+            .unwrap()
+            .unwrap();
+        assert_eq!(migrated.meta.unwrap().managed_nexus_preset_version, Some(8));
     }
 
     #[test]

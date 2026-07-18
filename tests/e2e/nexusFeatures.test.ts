@@ -13,10 +13,12 @@ import { claudeDesktopProviderPresets } from "@/config/claudeDesktopProviderPres
 import { codexProviderPresets } from "@/config/codexProviderPresets";
 import {
   NEXUS_AUTO_COMPACT_TOKENS,
+  NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
   NEXUS_CLAUDE_MODEL,
   NEXUS_CONTEXT_WINDOW,
   NEXUS_ENDPOINT,
   NEXUS_MAX_OUTPUT_TOKENS,
+  NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -115,6 +117,7 @@ describe("Nexus GLM-5.2 Claude preset config", () => {
 
   it("uses the Chat adapter with text-only continuity defaults", () => {
     const nexus = providerPresets.find((p) => p.name === "Nexus GLM-5.2")!;
+    expect(nexus.managedNexusPresetVersion).toBe(NEXUS_MANAGED_PRESET_VERSION);
     expect(nexus.apiFormat).toBe("openai_chat");
     expect((nexus.settingsConfig as any).modelCatalog).toEqual(
       NEXUS_TEXT_MODEL_CATALOG,
@@ -146,6 +149,7 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
 
   it("uses the Chat adapter with continuity defaults", () => {
     const nexus = codexProviderPresets.find((p) => p.name === "Nexus GLM-5.2")!;
+    expect(nexus.managedNexusPresetVersion).toBe(NEXUS_MANAGED_PRESET_VERSION);
     expect(nexus.apiFormat).toBe("openai_chat");
     expect(nexus.localProxyRequestOverrides).toEqual(NEXUS_REQUEST_OVERRIDES);
     expect(NEXUS_REQUEST_OVERRIDES.body).toEqual({
@@ -190,7 +194,9 @@ describe("Nexus GLM-5.2 Claude Desktop preset config", () => {
       }),
     ]);
     expect(nexus.providerType).toBe("nexus");
-    expect(nexus.managedNexusPresetVersion).toBeDefined();
+    expect(nexus.managedNexusPresetVersion).toBe(
+      NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
+    );
   });
 });
 

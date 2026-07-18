@@ -11,8 +11,8 @@
 import { ProviderCategory, type LocalProxyRequestOverrides } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
 import {
+  NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
   NEXUS_ENDPOINT,
-  NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -182,7 +182,7 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     providerType: "nexus",
     modelCatalog: NEXUS_TEXT_MODEL_CATALOG,
     localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
-    managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+    managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
     endpointCandidates: [NEXUS_ENDPOINT],
     icon: "nexus",
     iconColor: "#6366F1",

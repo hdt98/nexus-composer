@@ -5,8 +5,8 @@ import userEvent from "@testing-library/user-event";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { ClaudeDesktopProviderForm } from "@/components/providers/forms/ClaudeDesktopProviderForm";
 import {
+  NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
   NEXUS_ENDPOINT,
-  NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -53,7 +53,7 @@ function managedNexusProvider() {
     },
     meta: {
       providerType: "nexus",
-      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+      managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
       claudeDesktopMode: "proxy" as const,
       apiFormat: "openai_chat" as const,
@@ -127,7 +127,7 @@ describe("ClaudeDesktopProviderForm", () => {
     );
     expect(submitted.meta).toMatchObject({
       providerType: "nexus",
-      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+      managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     });
     const routes = Object.values(submitted.meta.claudeDesktopModelRoutes) as {
@@ -187,7 +187,7 @@ describe("ClaudeDesktopProviderForm", () => {
     });
     expect(submitted.meta).toMatchObject({
       providerType: "nexus",
-      managedNexusPresetVersion: NEXUS_MANAGED_PRESET_VERSION,
+      managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
       localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     });
   });

@@ -825,7 +825,6 @@ impl ProxyService {
                     true
                 });
             if !desktop_uses_proxy && self.is_running().await {
-                // 此时没有任何 app 处于接管状态，也没有 Claude Desktop 使用本地路由。
                 let _ = self.stop().await;
             }
         }
