@@ -640,15 +640,17 @@ fn inspect_stream_chunk(chunk: &mut Value, state: &mut StreamState) -> Result<bo
     let (tool_output, tool_len) = take_stream_tools(payload)?;
     let output = reasoning.as_ref().is_some_and(|text| !text.is_empty())
         || content.as_ref().is_some_and(|text| !text.is_empty())
+        || matches!(&content_shape, ContentShape::Value(value) if value.as_array().is_some_and(|parts| !parts.is_empty()))
         || tool_output
-        || payload
-            .get("refusal")
-            .and_then(Value::as_str)
-            .is_some_and(|text| !text.is_empty());
+        || payload.get("refusal").is_some_and(|value| match value {
+            Value::Null => false,
+            Value::String(text) => !text.is_empty(),
+            _ => true,
+        });
     if state.finished() {
-        if terminal && !output {
+        if !output {
             restore_content(payload, content_shape, String::new());
-            return Ok(true);
+            return Ok(terminal);
         }
         return Err(ProtocolError::Boundary);
     }
@@ -723,7 +725,7 @@ fn process_sse_block(block: &str, state: &mut StreamState) -> Result<SseBlock, P
     if sanitize_error_field(&mut chunk) {
         return Ok(SseBlock::Error);
     }
-    if safe_reasoning_only_chunk(&chunk)? {
+    if !state.finished() && safe_reasoning_only_chunk(&chunk)? {
         state.seen = true;
         return Ok(SseBlock::Data(chunk, false));
     }
@@ -1290,7 +1292,11 @@ mod tests {
         )
         .await;
 
-        assert!(output.contains(r#""reasoning_content":"abcd""#), "{output}");
+        assert_eq!(
+            output.matches(r#""reasoning_content":"abcd""#).count(),
+            1,
+            "{output}"
+        );
         assert!(output.contains(r#""finish_reason":"stop""#), "{output}");
         assert!(!output.contains("event: error"), "{output}");
     }
@@ -1336,6 +1342,41 @@ mod tests {
 
         let empty = normalized_stream("data: [DONE]\n\n", true).await;
         assert!(empty.contains("stream_protocol_error"), "{empty}");
+    }
+
+    #[tokio::test]
+    async fn stream_accepts_empty_metadata_after_terminal_chunk() {
+        for suffix in [
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":[]},\"finish_reason\":null}]}\n\ndata: [DONE]\n\n",
+        ] {
+            let input = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\n{suffix}"
+            );
+            let output = normalized_stream(&input, true).await;
+
+            assert!(output.contains(r#""reasoning_content":"plan""#), "{output}");
+            assert!(output.contains(r#""content":"answer""#), "{output}");
+            assert!(!output.contains("event: error"), "{output}");
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_rejects_output_after_terminal_chunk() {
+        for late in [
+            r#"{"reasoning_content":"late reasoning"}"#,
+            r#"{"content":[{"type":"text","text":"late answer"}]}"#,
+            r#"{"refusal":{"text":"late refusal"}}"#,
+        ] {
+            let input = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"content\":\"answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: {{\"choices\":[{{\"delta\":{late},\"finish_reason\":null}}]}}\n\ndata: [DONE]\n\n"
+            );
+            let output = normalized_stream(&input, true).await;
+
+            assert!(output.contains("event: error"), "{output}");
+            assert!(output.contains("stream_protocol_error"), "{output}");
+        }
     }
 
     #[tokio::test]
