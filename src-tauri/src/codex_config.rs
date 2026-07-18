@@ -905,8 +905,9 @@ fn set_codex_model_catalog_json_field(
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
     match catalog_path {
-        Some(_) => {
-            doc["model_catalog_json"] = toml_edit::value(NEXUS_CODEX_MODEL_CATALOG_FILENAME);
+        Some(path) => {
+            let path = codex_catalog_config_path(path)?;
+            doc["model_catalog_json"] = toml_edit::value(path);
         }
         None => {
             let should_remove = doc
@@ -921,6 +922,73 @@ fn set_codex_model_catalog_json_field(
     }
 
     Ok(doc.to_string())
+}
+
+fn codex_catalog_config_path(path: &Path) -> Result<String, AppError> {
+    #[cfg(target_os = "windows")]
+    {
+        let path_str = path.to_str().ok_or_else(|| {
+            AppError::Message("Codex model catalog path must be valid UTF-8".to_string())
+        })?;
+        if let Some(path) = wsl_unc_to_posix_path(path_str) {
+            return Ok(path);
+        }
+    }
+
+    let path = std::path::absolute(path).map_err(|error| AppError::io(path, error))?;
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        AppError::Message("Codex model catalog path must be valid UTF-8".to_string())
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn wsl_unc_to_posix_path(path: &str) -> Option<String> {
+    let normalized = path.replace('\\', "/");
+    let lowercase = normalized.to_ascii_lowercase();
+    let path = if lowercase.starts_with("//?/unc/") {
+        &normalized[8..]
+    } else if lowercase.starts_with("//") {
+        &normalized[2..]
+    } else {
+        return None;
+    };
+    let (server, path) = path.split_once('/')?;
+    if !server.eq_ignore_ascii_case("wsl$") && !server.eq_ignore_ascii_case("wsl.localhost") {
+        return None;
+    }
+    let (_, path) = path.split_once('/')?;
+    (!path.is_empty()).then(|| format!("/{path}"))
+}
+
+fn repair_codex_model_catalog_path_file(config_path: &Path) -> Result<bool, AppError> {
+    if !config_path.exists() {
+        return Ok(false);
+    }
+    let config_text =
+        fs::read_to_string(config_path).map_err(|error| AppError::io(config_path, error))?;
+    let doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|error| AppError::Message(format!("Invalid Codex config.toml: {error}")))?;
+    let Some(path) = doc.get("model_catalog_json").and_then(|item| item.as_str()) else {
+        return Ok(false);
+    };
+    let Some(catalog_path) = config_path.parent().map(|parent| parent.join(path)) else {
+        return Ok(false);
+    };
+    let desired = codex_catalog_config_path(&catalog_path)?;
+    if path == desired
+        || Path::new(path).is_absolute()
+        || !is_nexus_model_catalog_path(Path::new(path))
+    {
+        return Ok(false);
+    }
+    let config_text = set_codex_model_catalog_json_field(&config_text, Some(&catalog_path))?;
+    write_text_file(config_path, &config_text)?;
+    Ok(true)
+}
+
+pub fn repair_live_codex_model_catalog_path() -> Result<bool, AppError> {
+    repair_codex_model_catalog_path_file(&get_codex_config_path())
 }
 
 /// Pure toggle for the top-level `web_search` field that turns Codex's built-in
@@ -2591,7 +2659,7 @@ base_url = "https://production.api/v1"
     }
 
     #[test]
-    fn model_catalog_json_field_writes_relative_filename() {
+    fn model_catalog_json_field_writes_absolute_path() {
         let input = r#"model_provider = "any"
 
 [model_providers.any]
@@ -2605,7 +2673,7 @@ name = "any"
             parsed
                 .get("model_catalog_json")
                 .and_then(|value| value.as_str()),
-            Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
+            Some("/tmp/nexus-model-catalog.json")
         );
         assert!(
             parsed
@@ -2964,12 +3032,12 @@ web_search = "disabled"
 
     #[test]
     #[cfg(target_os = "windows")]
-    fn set_catalog_json_field_writes_filename_ignoring_unc_path() {
+    fn set_catalog_json_field_translates_wsl_unc_path() {
         let input = r#"model_provider = "custom"
 model = "glm-5"
 "#;
-        // Simulate a WSL UNC path as Nexus Composer would see it on Windows;
-        // the function now writes just the relative filename.
+        // Codex reads this config inside WSL, where the Windows UNC path is not
+        // absolute. Persist the equivalent Linux path instead.
         let unc_path =
             Path::new(r"\\wsl.localhost\Ubuntu\home\user\.codex\nexus-model-catalog.json");
 
@@ -2981,26 +3049,82 @@ model = "glm-5"
             .and_then(|v| v.as_str())
             .expect("model_catalog_json should be set");
         assert_eq!(
-            written_path, NEXUS_CODEX_MODEL_CATALOG_FILENAME,
-            "should write only the relative filename, not the UNC path"
+            written_path, "/home/user/.codex/nexus-model-catalog.json",
+            "WSL config should contain the absolute path visible to Codex"
         );
     }
 
     #[test]
-    fn set_catalog_json_field_writes_filename_for_any_path() {
-        let input = r#"model_provider = "custom"
-model = "glm-5"
-"#;
-        let regular_path = Path::new("/home/user/.codex/nexus-model-catalog.json");
-
-        let result = set_codex_model_catalog_json_field(input, Some(regular_path)).unwrap();
+    fn set_catalog_json_field_resolves_relative_generated_path() {
+        let result = set_codex_model_catalog_json_field(
+            "model = \"glm-5\"\n",
+            Some(Path::new("nexus-model-catalog.json")),
+        )
+        .expect("relative setting paths should be resolved");
         let parsed: toml::Value = toml::from_str(&result).unwrap();
+        let path = parsed
+            .get("model_catalog_json")
+            .and_then(|value| value.as_str())
+            .expect("catalog path");
 
-        assert_eq!(
-            parsed.get("model_catalog_json").and_then(|v| v.as_str()),
-            Some(NEXUS_CODEX_MODEL_CATALOG_FILENAME),
-            "should write only the relative filename, not the full path"
-        );
+        assert!(Path::new(path).is_absolute());
+        assert!(path.ends_with(NEXUS_CODEX_MODEL_CATALOG_FILENAME));
+    }
+
+    #[test]
+    fn wsl_unc_catalog_paths_translate_to_codex_absolute_paths() {
+        for input in [
+            r"\\wsl$\Ubuntu\home\user\.codex\nexus-model-catalog.json",
+            r"\\WSL.LOCALHOST\Ubuntu\root\.codex\nexus-model-catalog.json",
+            r"\\?\UNC\wsl.localhost\Ubuntu\home\user\.codex\nexus-model-catalog.json",
+        ] {
+            let translated = wsl_unc_to_posix_path(input).expect("WSL path should translate");
+            assert!(translated.starts_with('/'));
+            assert!(translated.ends_with("/.codex/nexus-model-catalog.json"));
+        }
+        assert!(wsl_unc_to_posix_path(r"wsl$\Ubuntu\home\user\catalog.json").is_none());
+        assert!(wsl_unc_to_posix_path(r"C:\Users\user\.codex\catalog.json").is_none());
+        assert!(wsl_unc_to_posix_path(r"\\server\share\catalog.json").is_none());
+    }
+
+    #[test]
+    fn startup_repair_upgrades_owned_relative_catalog_files() {
+        let temp = tempfile::tempdir().unwrap();
+
+        for (index, filename) in [
+            NEXUS_CODEX_MODEL_CATALOG_FILENAME,
+            LEGACY_CODEX_MODEL_CATALOG_FILENAME,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let config_path = temp.path().join(format!("config-{index}.toml"));
+            let catalog_path = temp.path().join(filename);
+            fs::write(&catalog_path, "{\"models\":[]}").unwrap();
+            fs::write(
+                &config_path,
+                format!("model_catalog_json = \"{filename}\"\n"),
+            )
+            .unwrap();
+
+            assert!(repair_codex_model_catalog_path_file(&config_path).unwrap());
+            let repaired = fs::read_to_string(&config_path).unwrap();
+            let parsed: toml::Value = toml::from_str(&repaired).unwrap();
+            let repaired_path = parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str())
+                .map(Path::new)
+                .expect("repaired catalog path");
+            assert_eq!(repaired_path, catalog_path);
+            assert!(repaired_path.exists());
+            assert!(!repair_codex_model_catalog_path_file(&config_path).unwrap());
+        }
+
+        let user_config = temp.path().join("user-config.toml");
+        let user_text = "model_catalog_json = \"my-catalog.json\"\n";
+        fs::write(&user_config, user_text).unwrap();
+        assert!(!repair_codex_model_catalog_path_file(&user_config).unwrap());
+        assert_eq!(fs::read_to_string(user_config).unwrap(), user_text);
     }
 
     #[test]

@@ -667,6 +667,12 @@ pub fn run() {
                 }
             }
 
+            match codex_config::repair_live_codex_model_catalog_path() {
+                Ok(true) => log::info!("Updated Codex model catalog to an absolute path"),
+                Ok(false) => {}
+                Err(error) => log::warn!("Failed to update Codex model catalog path: {error}"),
+            }
+
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {
