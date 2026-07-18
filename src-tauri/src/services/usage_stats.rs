@@ -605,7 +605,7 @@ impl Database {
                     COALESCE(SUM(l.output_tokens), 0) as total_output_tokens,
                     COALESCE(SUM(l.cache_creation_tokens), 0) as total_cache_creation_tokens,
                     COALESCE(SUM(l.cache_read_tokens), 0) as total_cache_read_tokens,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
+                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.error_message IS NULL THEN 1 ELSE 0 END), 0) as success_count
                  FROM proxy_request_logs l {detail_join} {where_clause}) d,
                 (SELECT
                     COALESCE(SUM(r.request_count), 0) as total_requests,
@@ -751,7 +751,7 @@ impl Database {
                     COALESCE(SUM(l.output_tokens), 0) as output_t,
                     COALESCE(SUM(l.cache_creation_tokens), 0) as cache_create_t,
                     COALESCE(SUM(l.cache_read_tokens), 0) as cache_read_t,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count
+                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.error_message IS NULL THEN 1 ELSE 0 END), 0) as success_count
                 FROM proxy_request_logs l {detail_join} {detail_where}
                 GROUP BY l.app_type
                 UNION ALL
@@ -1255,7 +1255,7 @@ impl Database {
                     COUNT(*) as request_count,
                     COALESCE(SUM({fresh_input_detail} + l.output_tokens), 0) as total_tokens,
                     COALESCE(SUM(CAST(l.total_cost_usd AS REAL)), 0) as total_cost,
-                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 THEN 1 ELSE 0 END), 0) as success_count,
+                    COALESCE(SUM(CASE WHEN l.status_code >= 200 AND l.status_code < 300 AND l.error_message IS NULL THEN 1 ELSE 0 END), 0) as success_count,
                     COALESCE(SUM(l.latency_ms), 0) as latency_sum
                 FROM proxy_request_logs l
                 LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
@@ -2856,11 +2856,42 @@ mod tests {
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 params!["req2", "p1", "claude", "claude-3", 200, 100, "0.02", 150, 200, 2000],
             )?;
+            conn.execute(
+                "INSERT INTO proxy_request_logs (
+                    request_id, provider_id, app_type, model,
+                    input_tokens, output_tokens, total_cost_usd,
+                    latency_ms, status_code, error_message, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                params![
+                    "req-incomplete",
+                    "p1",
+                    "claude",
+                    "claude-3",
+                    300,
+                    150,
+                    "0.03",
+                    200,
+                    200,
+                    "upstream_response_incomplete:length",
+                    3000
+                ],
+            )?;
         }
 
+        let expected_success_rate = 200.0 / 3.0;
         let summary = db.get_usage_summary(None, None, None, None, None)?;
-        assert_eq!(summary.total_requests, 2);
-        assert_eq!(summary.success_rate, 100.0);
+        assert_eq!(summary.total_requests, 3);
+        assert!((summary.success_rate - expected_success_rate).abs() < 0.001);
+
+        let by_app = db.get_usage_summary_by_app(None, None, None, None)?;
+        assert_eq!(by_app.len(), 1);
+        assert_eq!(by_app[0].summary.total_requests, 3);
+        assert!((by_app[0].summary.success_rate - expected_success_rate).abs() < 0.001);
+
+        let providers = db.get_provider_stats(None, None, None, None, None)?;
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].request_count, 3);
+        assert!((providers[0].success_rate - expected_success_rate).abs() < 0.001);
 
         Ok(())
     }
