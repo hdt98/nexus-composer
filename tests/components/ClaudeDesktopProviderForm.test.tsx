@@ -23,6 +23,9 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
+const maxOutputTokensLabel =
+  /providerForm\.maxOutputTokens|Maximum output tokens/i;
+
 function renderForm(
   initialData: ComponentProps<typeof ClaudeDesktopProviderForm>["initialData"],
   onSubmit = vi.fn(),
@@ -102,16 +105,20 @@ function expectManagedNexusEndpointDetached(submitted: {
   expect(submitted.meta).not.toHaveProperty("managedNexusPresetVersion");
 }
 
+function selectNexusPreset() {
+  fireEvent.click(
+    screen.getByRole("button", {
+      name: /providerForm\.presets\.nexus|Nexus GLM-5\.2/i,
+    }),
+  );
+}
+
 describe("ClaudeDesktopProviderForm", () => {
   it("persists the managed Nexus preset metadata and request defaults", async () => {
     const onSubmit = vi.fn();
     renderForm(undefined, onSubmit);
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /providerForm\.presets\.nexus|Nexus GLM-5\.2/i,
-      }),
-    );
+    selectNexusPreset();
     expect(
       screen.queryByText("providerForm.getApiKey"),
     ).not.toBeInTheDocument();
@@ -146,11 +153,7 @@ describe("ClaudeDesktopProviderForm", () => {
     const onSubmit = vi.fn();
     renderForm(undefined, onSubmit);
 
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: /providerForm\.presets\.nexus|Nexus GLM-5\.2/i,
-      }),
-    );
+    selectNexusPreset();
     fireEvent.change(screen.getByLabelText("providerForm.apiEndpoint"), {
       target: { value: "http://127.0.0.1:30001/v1" },
     });
@@ -167,7 +170,7 @@ describe("ClaudeDesktopProviderForm", () => {
     expectManagedNexusEndpointDetached(submitted);
   });
 
-  it("preserves managed Nexus ownership for name and API-key edits", async () => {
+  it("preserves managed Nexus ownership and request settings for provider edits", async () => {
     const { onSubmit } = renderForm(managedNexusProvider());
 
     fireEvent.change(screen.getByLabelText("provider.name"), {
@@ -175,6 +178,9 @@ describe("ClaudeDesktopProviderForm", () => {
     });
     fireEvent.change(screen.getByLabelText("API Key"), {
       target: { value: "new-key" },
+    });
+    fireEvent.change(screen.getByLabelText(maxOutputTokensLabel), {
+      target: { value: "32768" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
@@ -188,7 +194,10 @@ describe("ClaudeDesktopProviderForm", () => {
     expect(submitted.meta).toMatchObject({
       providerType: "nexus",
       managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
-      localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
+    });
+    expect(submitted.meta.localProxyRequestOverrides).toEqual({
+      ...NEXUS_REQUEST_OVERRIDES,
+      body: { ...NEXUS_REQUEST_OVERRIDES.body, max_tokens: 32_768 },
     });
   });
 
@@ -211,11 +220,128 @@ describe("ClaudeDesktopProviderForm", () => {
   it("detaches managed Nexus ownership when the routing mode changes", async () => {
     const { onSubmit } = renderForm(managedNexusProvider());
 
+    expect(screen.getByLabelText(maxOutputTokensLabel)).toBeVisible();
     fireEvent.click(screen.getByRole("switch"));
+    expect(
+      screen.queryByLabelText(maxOutputTokensLabel),
+    ).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
     expectManagedNexusDetached(onSubmit.mock.calls[0][0]);
+  });
+
+  it("clears and reseeds proxy request settings across preset changes", () => {
+    renderForm(undefined);
+
+    selectNexusPreset();
+    expect(screen.getByLabelText(maxOutputTokensLabel)).toHaveValue("65536");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "providerPreset.custom" }),
+    );
+    expect(
+      screen.queryByLabelText(maxOutputTokensLabel),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("switch"));
+    expect(screen.getByLabelText(maxOutputTokensLabel)).toHaveValue("");
+
+    selectNexusPreset();
+    expect(screen.getByLabelText(maxOutputTokensLabel)).toHaveValue("65536");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Claude Desktop Official/ }),
+    );
+    expect(
+      screen.queryByLabelText(maxOutputTokensLabel),
+    ).not.toBeInTheDocument();
+  });
+
+  it("rejects invalid max_tokens and clears it without dropping other overrides", async () => {
+    const onSubmit = vi.fn();
+    const initial = managedNexusProvider();
+    renderForm(
+      {
+        ...initial,
+        meta: {
+          ...initial.meta,
+          localProxyRequestOverrides: {
+            ...NEXUS_REQUEST_OVERRIDES,
+            headers: { "x-test": "keep" },
+            body: {
+              ...NEXUS_REQUEST_OVERRIDES.body,
+              max_tokens: "invalid",
+            },
+          },
+        },
+      },
+      onSubmit,
+    );
+
+    const input = screen.getByLabelText(maxOutputTokensLabel);
+    expect(input).toHaveValue("invalid");
+    expect(input).toHaveAttribute("aria-invalid", "true");
+
+    const saveButton = screen.getByRole("button", { name: "Save" });
+    fireEvent.click(saveButton);
+    expect(onSubmit).not.toHaveBeenCalled();
+    await waitFor(() => expect(saveButton).not.toBeDisabled());
+
+    fireEvent.change(input, { target: { value: "" } });
+    await waitFor(() =>
+      expect(screen.getByLabelText(maxOutputTokensLabel)).toHaveAttribute(
+        "aria-invalid",
+        "false",
+      ),
+    );
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides).toEqual({
+      headers: { "x-test": "keep" },
+      body: {
+        chat_template_kwargs: NEXUS_REQUEST_OVERRIDES.body.chat_template_kwargs,
+      },
+    });
+  });
+
+  it("reveals hidden request overrides when legacy data blocks saving", async () => {
+    const initial = managedNexusProvider();
+    const { onSubmit } = renderForm({
+      ...initial,
+      name: "Legacy proxy",
+      settingsConfig: {
+        ...initial.settingsConfig,
+        env: {
+          ...initial.settingsConfig.env,
+          ANTHROPIC_BASE_URL: "https://legacy.example.com/v1",
+        },
+      },
+      meta: {
+        ...initial.meta,
+        providerType: undefined,
+        managedNexusPresetVersion: undefined,
+        localProxyRequestOverrides: {
+          headers: { authorization: "legacy" },
+          body: { stream: false, max_tokens: 65536 },
+        },
+      },
+    });
+
+    fireEvent.change(screen.getByDisplayValue(/authorization/), {
+      target: { value: '{ "x-test": "keep" }' },
+    });
+    fireEvent.change(screen.getByDisplayValue(/stream/), {
+      target: { value: '{ "max_tokens": 32768 }' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].meta.localProxyRequestOverrides).toEqual({
+      headers: { "x-test": "keep" },
+      body: { max_tokens: 32768 },
+    });
   });
 
   it("detaches managed Nexus ownership when the API format changes", async () => {

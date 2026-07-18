@@ -43,8 +43,17 @@ import { ApiKeySection } from "./shared/ApiKeySection";
 import { EndpointField } from "./shared/EndpointField";
 import { ModelDropdown } from "./shared/ModelDropdown";
 import { ProviderPresetSelector } from "./ProviderPresetSelector";
+import {
+  LocalProxyMaxOutputTokensField,
+  LocalProxyRequestOverridesField,
+} from "./LocalProxyRequestOverridesField";
 import { useApiKeyLink } from "./hooks/useApiKeyLink";
 import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
+import {
+  buildLocalProxyRequestOverrides,
+  formatRequestOverrideObject,
+  hasInvalidMaxOutputTokens,
+} from "@/lib/requestOverrides";
 import type {
   ClaudeApiFormat,
   ClaudeDesktopModelRoute,
@@ -308,6 +317,23 @@ export function ClaudeDesktopProviderForm({
   const [codexFastMode, setCodexFastMode] = useState<boolean>(
     () => initialData?.meta?.codexFastMode ?? false,
   );
+  const [localProxyHeadersOverride, setLocalProxyHeadersOverride] = useState(
+    () =>
+      formatRequestOverrideObject(
+        initialData?.meta?.localProxyRequestOverrides?.headers,
+      ),
+  );
+  const [localProxyBodyOverride, setLocalProxyBodyOverride] = useState(() =>
+    formatRequestOverrideObject(
+      initialData?.meta?.localProxyRequestOverrides?.body,
+    ),
+  );
+  const hasInvalidHiddenRequestOverrides = Boolean(
+    buildLocalProxyRequestOverrides(
+      localProxyHeadersOverride,
+      localProxyBodyOverride,
+    ).error,
+  );
   const [selectedPresetId, setSelectedPresetId] = useState<string | null>(
     "custom",
   );
@@ -433,6 +459,12 @@ export function ClaudeDesktopProviderForm({
     setApiKey("");
     setApiKeyField(preset.apiKeyField ?? "ANTHROPIC_AUTH_TOKEN");
     setApiFormat(preset.apiFormat ?? "anthropic");
+    setLocalProxyHeadersOverride(
+      formatRequestOverrideObject(preset.localProxyRequestOverrides?.headers),
+    );
+    setLocalProxyBodyOverride(
+      formatRequestOverrideObject(preset.localProxyRequestOverrides?.body),
+    );
 
     didSeedDefaultRoutes.current = true;
     setMode(preset.mode);
@@ -464,6 +496,8 @@ export function ClaudeDesktopProviderForm({
       setApiKey("");
       setApiKeyField("ANTHROPIC_AUTH_TOKEN");
       setApiFormat("anthropic");
+      setLocalProxyHeadersOverride("");
+      setLocalProxyBodyOverride("");
       didSeedDefaultRoutes.current = false;
       setMode("direct");
       setRoutes([]);
@@ -585,6 +619,21 @@ export function ClaudeDesktopProviderForm({
       });
       return;
     }
+    const overridesResult =
+      mode === "proxy"
+        ? buildLocalProxyRequestOverrides(
+            localProxyHeadersOverride,
+            localProxyBodyOverride,
+          )
+        : {};
+    if (overridesResult.error) {
+      toast.error(overridesResult.error);
+      return;
+    }
+    if (hasInvalidMaxOutputTokens(overridesResult.overrides?.body)) {
+      toast.error(t("providerForm.maxOutputTokensInvalid"));
+      return;
+    }
     if (!baseUrl.trim()) {
       toast.error(
         t("providerForm.fetchModelsNeedEndpoint", {
@@ -702,8 +751,12 @@ export function ClaudeDesktopProviderForm({
 
     meta.claudeDesktopModelRoutes = routeMap;
     meta.providerType = activeProviderType;
+    if (mode === "proxy") {
+      meta.localProxyRequestOverrides = overridesResult.overrides;
+    } else {
+      delete meta.localProxyRequestOverrides;
+    }
     if (activePreset) {
-      meta.localProxyRequestOverrides = activePreset.localProxyRequestOverrides;
       meta.managedNexusPresetVersion = activePreset.managedNexusPresetVersion;
     }
     if (managedNexusProtocolChanged) {
@@ -1191,6 +1244,23 @@ export function ClaudeDesktopProviderForm({
                   </div>
                 </CollapsibleContent>
               </Collapsible>
+            )}
+
+            {needsModelMapping && (
+              <div className="space-y-4">
+                <LocalProxyMaxOutputTokensField
+                  bodyJson={localProxyBodyOverride}
+                  onBodyJsonChange={setLocalProxyBodyOverride}
+                />
+                {hasInvalidHiddenRequestOverrides && (
+                  <LocalProxyRequestOverridesField
+                    headersJson={localProxyHeadersOverride}
+                    bodyJson={localProxyBodyOverride}
+                    onHeadersJsonChange={setLocalProxyHeadersOverride}
+                    onBodyJsonChange={setLocalProxyBodyOverride}
+                  />
+                )}
+              </div>
             )}
 
             <FormField

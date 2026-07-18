@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLocalProxyRequestOverrides,
+  hasInvalidMaxOutputTokens,
   isProtectedLocalProxyHeaderName,
   isValidHttpHeaderName,
   isValidHttpHeaderValue,
@@ -72,4 +73,21 @@ describe("requestOverrides", () => {
       buildLocalProxyRequestOverrides("", '{ "stream": false }').error,
     ).toBeTruthy();
   });
+
+  it.each([
+    [32768, false],
+    [0, true],
+    [1.5, true],
+    ["4096", true],
+    [Number.MAX_SAFE_INTEGER + 1, true],
+  ])(
+    "classifies max_tokens %j as invalid=%s without changing generic parsing",
+    (maxTokens, expectedInvalid) => {
+      const parsed = parseBodyOverrideJson(
+        JSON.stringify({ max_tokens: maxTokens }),
+      );
+      expect(parsed.error).toBeUndefined();
+      expect(hasInvalidMaxOutputTokens(parsed.value)).toBe(expectedInvalid);
+    },
+  );
 });

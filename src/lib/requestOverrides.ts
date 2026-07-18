@@ -10,6 +10,20 @@ export interface HeaderOverrideValidationResult {
   error?: string;
 }
 
+export function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+}
+
+export function hasInvalidMaxOutputTokens(
+  body: Record<string, unknown> | undefined,
+): boolean {
+  return Boolean(
+    body &&
+      Object.prototype.hasOwnProperty.call(body, "max_tokens") &&
+      !isPositiveSafeInteger(body.max_tokens),
+  );
+}
+
 // RFC 9110 HTTP field-name token. Keep this aligned with Rust's
 // http::HeaderName parser for user-facing validation.
 export function isValidHttpHeaderName(name: string): boolean {

@@ -1,10 +1,79 @@
 import { useTranslation } from "react-i18next";
 import { FormLabel } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  formatRequestOverrideObject,
+  hasInvalidMaxOutputTokens,
+  isPositiveSafeInteger,
   parseBodyOverrideJson,
   parseHeaderOverrideJson,
 } from "@/lib/requestOverrides";
+
+interface LocalProxyMaxOutputTokensFieldProps {
+  bodyJson: string;
+  onBodyJsonChange: (value: string) => void;
+}
+
+export function LocalProxyMaxOutputTokensField({
+  bodyJson,
+  onBodyJsonChange,
+}: LocalProxyMaxOutputTokensFieldProps) {
+  const { t } = useTranslation();
+  const parsedBody = parseBodyOverrideJson(bodyJson);
+  const configuredValue = parsedBody.value?.max_tokens;
+  const canEditBody = !parsedBody.error || Boolean(parsedBody.value);
+  const maxOutputTokensInvalid = hasInvalidMaxOutputTokens(parsedBody.value);
+
+  const handleChange = (rawValue: string) => {
+    if (!canEditBody) return;
+    const body = { ...(parsedBody.value ?? {}) };
+    if (!rawValue.trim()) {
+      delete body.max_tokens;
+    } else {
+      const value = Number(rawValue);
+      body.max_tokens = isPositiveSafeInteger(value) ? value : rawValue;
+    }
+    onBodyJsonChange(formatRequestOverrideObject(body));
+  };
+
+  const inputValue =
+    configuredValue === undefined || configuredValue === null
+      ? ""
+      : typeof configuredValue === "object"
+        ? JSON.stringify(configuredValue)
+        : String(configuredValue);
+
+  return (
+    <div className="space-y-2">
+      <FormLabel htmlFor="local-proxy-max-output-tokens">
+        {t("providerForm.maxOutputTokens")}
+      </FormLabel>
+      <Input
+        id="local-proxy-max-output-tokens"
+        type="text"
+        inputMode="numeric"
+        value={inputValue}
+        onChange={(event) => handleChange(event.target.value)}
+        placeholder="65536"
+        disabled={!canEditBody}
+        aria-invalid={Boolean(parsedBody.error || maxOutputTokensInvalid)}
+      />
+      <p className="text-xs text-muted-foreground">
+        {t("providerForm.maxOutputTokensHint")}
+      </p>
+      {(parsedBody.error || maxOutputTokensInvalid) && (
+        <p className="text-xs text-destructive">
+          {maxOutputTokensInvalid
+            ? t("providerForm.maxOutputTokensInvalid")
+            : t("providerForm.localProxyBodyOverridesInvalidDetail", {
+                error: parsedBody.error,
+              })}
+        </p>
+      )}
+    </div>
+  );
+}
 
 interface LocalProxyRequestOverridesFieldProps {
   headersJson: string;

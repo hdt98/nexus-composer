@@ -11,6 +11,9 @@ import { providerSchema, type ProviderFormData } from "@/lib/schemas/provider";
 import {
   buildLocalProxyRequestOverrides,
   formatRequestOverrideObject,
+  hasInvalidMaxOutputTokens,
+  isPlainObject,
+  isPositiveSafeInteger,
 } from "@/lib/requestOverrides";
 import { providersApi, settingsApi, type AppId } from "@/lib/api";
 import { useDarkMode } from "@/hooks/useDarkMode";
@@ -127,6 +130,28 @@ import {
 } from "@/config/nexus";
 import { useOpenClawLiveProviderIds } from "@/hooks/useOpenClaw";
 import { useHermesLiveProviderIds } from "@/hooks/useHermes";
+
+const CLAUDE_CODE_MAX_OUTPUT_TOKENS_ENV =
+  "CLAUDE_CODE_MAX_OUTPUT_TOKENS" as const;
+
+function syncManagedClaudeMaxOutputTokens(
+  settingsConfig: string,
+  overrides: LocalProxyRequestOverrides | undefined,
+): string {
+  const parsed = JSON.parse(settingsConfig) as unknown;
+  if (!isPlainObject(parsed)) return settingsConfig;
+
+  const config = { ...parsed };
+  const env = isPlainObject(config.env) ? { ...config.env } : {};
+  const maxOutputTokens = overrides?.body?.max_tokens;
+  if (isPositiveSafeInteger(maxOutputTokens)) {
+    env[CLAUDE_CODE_MAX_OUTPUT_TOKENS_ENV] = String(maxOutputTokens);
+  } else {
+    delete env[CLAUDE_CODE_MAX_OUTPUT_TOKENS_ENV];
+  }
+  config.env = env;
+  return JSON.stringify(config, null, 2);
+}
 
 type PresetEntry = {
   id: string;
@@ -1022,6 +1047,13 @@ function ProviderFormFull({
       );
       return;
     }
+    if (
+      appId === "claude" &&
+      hasInvalidMaxOutputTokens(overridesResult.overrides?.body)
+    ) {
+      toast.error(t("providerForm.maxOutputTokensInvalid"));
+      return;
+    }
 
     // 软性问题（业务约束，用户可选择仍要保存）
     const issues: string[] = [];
@@ -1478,6 +1510,17 @@ function ProviderFormFull({
           normalizedEndpoint(baseUrl) ===
             normalizedEndpoint(NEXUS_CLAUDE_BASE_URL) &&
           isNexusModel(claudeModel)));
+    if (
+      appId === "claude" &&
+      (managedNexus ||
+        presetProviderType === "nexus" ||
+        initialData?.meta?.providerType === "nexus")
+    ) {
+      payload.settingsConfig = syncManagedClaudeMaxOutputTokens(
+        payload.settingsConfig,
+        managedNexus ? overridesResult.overrides : undefined,
+      );
+    }
     const providerType = managedNexus
       ? "nexus"
       : presetProviderType === "nexus" ||

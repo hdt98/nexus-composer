@@ -48,7 +48,10 @@ import {
   type FetchedModel,
 } from "@/lib/api/model-fetch";
 import { CustomUserAgentField } from "./CustomUserAgentField";
-import { LocalProxyRequestOverridesField } from "./LocalProxyRequestOverridesField";
+import {
+  LocalProxyMaxOutputTokensField,
+  LocalProxyRequestOverridesField,
+} from "./LocalProxyRequestOverridesField";
 import type {
   ProviderCategory,
   ClaudeApiFormat,
@@ -977,7 +980,11 @@ export function ClaudeFormFields({
               onChange={onCustomUserAgentChange}
             />
 
-            <div className="border-t border-border-default pt-3">
+            <div className="space-y-4 border-t border-border-default pt-3">
+              <LocalProxyMaxOutputTokensField
+                bodyJson={localProxyBodyOverride}
+                onBodyJsonChange={onLocalProxyBodyOverrideChange}
+              />
               <LocalProxyRequestOverridesField
                 headersJson={localProxyHeadersOverride}
                 bodyJson={localProxyBodyOverride}
