@@ -32,7 +32,7 @@ pub(crate) use live::sanitize_claude_settings_for_live;
 pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     provider_exists_in_live_config, strip_common_config_from_live_settings,
-    sync_current_provider_for_app_to_live, write_live_with_common_config,
+    sync_codex_desktop_table, sync_current_provider_for_app_to_live, write_live_with_common_config,
 };
 
 // Internal re-exports
@@ -239,6 +239,113 @@ mod tests {
                  wire_api = \"chat\"\n"
             )
         })
+    }
+
+    #[test]
+    #[serial]
+    fn codex_live_sync_preserves_the_existing_desktop_table() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        let db = Database::memory().expect("init db");
+
+        crate::codex_config::write_codex_live_atomic(
+            &json!({ "OPENAI_API_KEY": "old-token" }),
+            Some(
+                r#"model_provider = "old"
+model = "old-model"
+
+[model_providers.old]
+name = "Old"
+base_url = "https://old.example/v1"
+wire_api = "chat"
+
+[desktop]
+show-ultra-in-model-picker-slider = true
+appearanceTheme = "dark"
+dock-icon-preference = "codex-system"
+animations-enabled = false
+sidebar-density = "compact"
+"#,
+            ),
+        )
+        .expect("seed Codex live config");
+
+        let mut provider = Provider::with_id(
+            "nexus".to_string(),
+            "Nexus".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "new-token" },
+                "config": r#"model_provider = "nexus"
+model = "GLM-5.2-FP8"
+
+[model_providers.nexus]
+name = "Nexus"
+base_url = "https://new.example/v1"
+wire_api = "chat"
+
+[desktop]
+show-ultra-in-model-picker-slider = false
+appearanceTheme = "light"
+dock-icon-preference = "classic"
+animations-enabled = true
+provider-only-setting = "stale"
+"#,
+                "modelCatalog": {
+                    "models": [{
+                        "model": "GLM-5.2-FP8",
+                        "displayName": "GLM-5.2",
+                        "contextWindow": 1_048_576,
+                        "inputModalities": ["text"]
+                    }]
+                }
+            }),
+            None,
+        );
+        provider.category = Some("custom".to_string());
+
+        write_live_with_common_config(&db, &AppType::Codex, &provider)
+            .expect("sync Codex provider");
+        let first = crate::codex_config::read_codex_config_text().expect("read synced config");
+        let parsed: toml::Value = toml::from_str(&first).expect("parse synced config");
+
+        assert_eq!(
+            parsed
+                .get("model_providers")
+                .and_then(|value| value.get("nexus"))
+                .and_then(|value| value.get("base_url"))
+                .and_then(|value| value.as_str()),
+            Some("https://new.example/v1")
+        );
+        assert!(
+            parsed
+                .get("model_catalog_json")
+                .and_then(|value| value.as_str())
+                .is_some(),
+            "provider-owned model catalog projection should still update"
+        );
+        let catalog: Value = read_json_file(&crate::codex_config::get_codex_model_catalog_path())
+            .expect("read projected model catalog");
+        assert_eq!(catalog["models"][0]["slug"], "GLM-5.2-FP8");
+        let expected: toml::Value = toml::from_str(
+            r#"[desktop]
+show-ultra-in-model-picker-slider = true
+appearanceTheme = "dark"
+dock-icon-preference = "codex-system"
+animations-enabled = false
+sidebar-density = "compact"
+"#,
+        )
+        .expect("parse expected desktop table");
+        assert_eq!(
+            parsed.get("desktop"),
+            expected.get("desktop"),
+            "the entire live desktop table, including explicit false, should survive sync"
+        );
+
+        write_live_with_common_config(&db, &AppType::Codex, &provider)
+            .expect("repeat Codex provider sync");
+        let second = crate::codex_config::read_codex_config_text().expect("read repeated config");
+        assert_eq!(second, first, "repeated sync should be idempotent");
     }
 
     fn usage_script_with_credentials(
