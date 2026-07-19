@@ -1,5 +1,11 @@
 # Nexus Composer
 
+> [!IMPORTANT]
+> This repository is historical and no longer accepts new development.
+> Use [onenexus-team/nexus-composer](https://github.com/onenexus-team/nexus-composer)
+> for code, issues, pull requests, and releases. Existing history remains here as
+> provenance.
+
 Nexus Composer is a desktop control panel for coding assistants. It connects
 local tools like Claude Code, Codex, Gemini CLI, and more to custom model
 endpoints through a local proxy with protocol conversion.
