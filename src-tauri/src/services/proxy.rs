@@ -2749,15 +2749,24 @@ impl ProxyService {
                     let config_path = get_codex_config_path();
                     crate::config::write_text_file(&config_path, cfg)
                         .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
+                } else if crate::codex_config::codex_stored_auth_regresses_live_on_disk(auth) {
+                    // 备份里的 ChatGPT 登录比磁盘上的更旧（或属于另一个账号）：
+                    // 接管期间用户重新登录/换订阅时会出现。只还原 config，
+                    // 避免把已失效的旧 workspace 凭据写回去。
+                    let config_path = get_codex_config_path();
+                    crate::config::write_text_file(&config_path, cfg)
+                        .map_err(|e| format!("写入 Codex config 失败: {e}"))?;
                 } else {
                     crate::codex_config::write_codex_live_atomic(auth, Some(cfg))
                         .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
                 }
             }
             (Some(auth), None) => {
-                let auth_path = get_codex_auth_path();
-                write_json_file(&auth_path, auth)
-                    .map_err(|e| format!("写入 Codex auth 失败: {e}"))?;
+                if !crate::codex_config::codex_stored_auth_regresses_live_on_disk(auth) {
+                    let auth_path = get_codex_auth_path();
+                    write_json_file(&auth_path, auth)
+                        .map_err(|e| format!("写入 Codex auth 失败: {e}"))?;
+                }
             }
             (None, Some(cfg)) => {
                 let config_path = get_codex_config_path();
