@@ -1,9 +1,8 @@
 /**
  * Nexus Composer switch-back-to-official fix tests.
  *
- * Verifies that the ProviderActions component no longer blocks
- * switching to Official providers when proxy takeover is active.
- * The fix removed the isOfficialBlockedByProxy check.
+ * Verifies that Codex can use its atomic switch-back path while
+ * non-transactional clients remain fail-closed during takeover.
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "fs";
@@ -25,16 +24,23 @@ describe("Switch-back-to-official fix", () => {
     expect(content).not.toContain("isOfficialBlockedByProxy");
   });
 
-  it("provider mod.rs auto-disables takeover when switching to official", () => {
+  it("App keeps durable takeover independent of listener liveness", () => {
+    const content = readFileSync("src/App.tsx", "utf-8");
+
+    expect(content).toMatch(
+      /useProviderActions\(\s*activeApp,\s*isProxyRunning,\s*isCurrentAppTakeoverActive,?\s*\)/,
+    );
+    expect(content).toMatch(
+      /<ProviderList[\s\S]*?isProxyTakeover=\{isCurrentAppTakeoverActive\}/,
+    );
+  });
+
+  it("provider mod.rs blocks non-atomic Official switches", () => {
     const content = readFileSync(
       "src-tauri/src/services/provider/mod.rs",
       "utf-8",
     );
-    // The fix should auto-disable takeover instead of returning an error
-    expect(content).not.toContain("switch.official_blocked_by_proxy");
-    
-    // Should call set_takeover_for_app(false) for official providers
-    expect(content).toContain("set_takeover_for_app(app_type.as_str(), false)");
-    expect(content).toContain("set_takeover_for_app(app_type.as_str(), false)");
+    expect(content).toContain("switch.official_blocked_by_proxy");
+    expect(content).toContain("switch_codex_routing_atomic");
   });
 });

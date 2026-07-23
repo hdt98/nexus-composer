@@ -295,6 +295,26 @@ impl Database {
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
 
+        // 19. Codex Session Sync State 表 (设备本地增量同步检查点)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS codex_session_sync_state_v2 (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                byte_offset INTEGER NOT NULL DEFAULT 0,
+                line_offset INTEGER NOT NULL DEFAULT 0,
+                session_id TEXT,
+                current_model TEXT NOT NULL DEFAULT 'unknown',
+                previous_input INTEGER,
+                previous_cached_input INTEGER,
+                previous_output INTEGER,
+                event_index INTEGER NOT NULL DEFAULT 0,
+                cursor_guard TEXT NOT NULL DEFAULT '',
+                last_synced_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
@@ -1898,7 +1918,14 @@ impl Database {
             ("glm-5", "GLM-5", "1", "3.2", "0.2", "0"),
             ("glm-5.1", "GLM-5.1", "1.4", "4.4", "0.26", "0"),
             ("glm-5.2", "GLM-5.2", "1.4", "4.4", "0.26", "0"),
-            ("glm-5.2-sglang", "GLM-5.2 SGLang", "1.4", "4.4", "0.26", "0"),
+            (
+                "glm-5.2-sglang",
+                "GLM-5.2 SGLang",
+                "1.4",
+                "4.4",
+                "0.26",
+                "0",
+            ),
             // MiMo (小米)
             (
                 "mimo-v2-flash",

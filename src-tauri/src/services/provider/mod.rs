@@ -11,6 +11,8 @@ use indexmap::IndexMap;
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
+use std::future::Future;
+use std::path::PathBuf;
 
 use crate::app_config::AppType;
 use crate::database::{validate_cost_multiplier, validate_pricing_source};
@@ -92,6 +94,181 @@ pub struct ProviderService;
 #[serde(rename_all = "camelCase")]
 pub struct SwitchResult {
     pub warnings: Vec<String>,
+}
+
+fn block_on_provider_transition<F: Future>(future: F) -> F::Output {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        futures::executor::block_on(future)
+    } else {
+        tauri::async_runtime::block_on(future)
+    }
+}
+
+struct FileSnapshot {
+    path: PathBuf,
+    content: Option<Vec<u8>>,
+}
+
+impl FileSnapshot {
+    fn capture(path: PathBuf) -> Result<Self, AppError> {
+        let content = if path.exists() {
+            Some(std::fs::read(&path).map_err(|error| AppError::io(&path, error))?)
+        } else {
+            None
+        };
+        Ok(Self { path, content })
+    }
+
+    fn restore(&self) -> Result<(), AppError> {
+        match &self.content {
+            Some(content) => crate::config::atomic_write(&self.path, content),
+            None => crate::config::delete_file(&self.path),
+        }
+    }
+}
+
+struct CodexRoutingSnapshot {
+    local_current_provider: Option<String>,
+    database_current_provider: Option<String>,
+    providers: IndexMap<String, Provider>,
+    app_proxy_config: crate::proxy::types::AppProxyConfig,
+    shared_proxy_config: crate::proxy::types::ProxyConfig,
+    global_proxy_config: crate::proxy::types::GlobalProxyConfig,
+    live_backup: Option<crate::proxy::types::LiveBackup>,
+    live_files: Vec<FileSnapshot>,
+    listener_running: bool,
+    active_target: Option<(String, String)>,
+}
+
+impl CodexRoutingSnapshot {
+    fn capture(state: &AppState) -> Result<Self, AppError> {
+        let app_type = AppType::Codex;
+        let status = block_on_provider_transition(state.proxy_service.get_status())
+            .map_err(AppError::Message)?;
+        let active_target = status
+            .active_targets
+            .into_iter()
+            .find(|target| target.app_type == app_type.as_str())
+            .map(|target| (target.provider_id, target.provider_name));
+
+        Ok(Self {
+            local_current_provider: crate::settings::get_current_provider(&app_type),
+            database_current_provider: state.db.get_current_provider(app_type.as_str())?,
+            providers: state.db.get_all_providers(app_type.as_str())?,
+            app_proxy_config: block_on_provider_transition(
+                state.db.get_proxy_config_for_app(app_type.as_str()),
+            )?,
+            shared_proxy_config: block_on_provider_transition(state.db.get_proxy_config())?,
+            global_proxy_config: block_on_provider_transition(state.db.get_global_proxy_config())?,
+            live_backup: block_on_provider_transition(state.db.get_live_backup(app_type.as_str()))?,
+            live_files: [
+                crate::codex_config::get_codex_auth_path(),
+                crate::codex_config::get_codex_config_path(),
+                crate::codex_config::get_codex_model_catalog_path(),
+            ]
+            .into_iter()
+            .map(FileSnapshot::capture)
+            .collect::<Result<Vec<_>, _>>()?,
+            listener_running: status.running,
+            active_target,
+        })
+    }
+
+    fn restore(&self, state: &AppState) -> Result<(), String> {
+        let app_type = AppType::Codex;
+        let app_type_str = app_type.as_str();
+        let mut errors = Vec::new();
+
+        for provider in self.providers.values() {
+            if let Err(error) = state.db.save_provider(app_type_str, provider) {
+                errors.push(format!("restore provider '{}': {error}", provider.id));
+            }
+        }
+
+        let restore_database_current = match self.database_current_provider.as_deref() {
+            Some(provider_id) => state.db.set_current_provider(app_type_str, provider_id),
+            None => state.db.clear_current_provider(app_type_str),
+        };
+        if let Err(error) = restore_database_current {
+            errors.push(format!("restore database current provider: {error}"));
+        }
+
+        if let Err(error) =
+            crate::settings::set_current_provider(&app_type, self.local_current_provider.as_deref())
+        {
+            errors.push(format!("restore local current provider: {error}"));
+        }
+
+        if let Err(error) = block_on_provider_transition(
+            state
+                .db
+                .update_proxy_config_for_app(self.app_proxy_config.clone()),
+        ) {
+            errors.push(format!("restore Codex routing state: {error}"));
+        }
+
+        let restore_backup = match &self.live_backup {
+            Some(backup) => block_on_provider_transition(
+                state
+                    .db
+                    .save_live_backup(app_type_str, &backup.original_config),
+            ),
+            None => block_on_provider_transition(state.db.delete_live_backup(app_type_str)),
+        };
+        if let Err(error) = restore_backup {
+            errors.push(format!("restore Codex live backup: {error}"));
+        }
+
+        for snapshot in &self.live_files {
+            if let Err(error) = snapshot.restore() {
+                errors.push(format!("restore '{}': {error}", snapshot.path.display()));
+            }
+        }
+
+        if let Err(error) = block_on_provider_transition(
+            state
+                .db
+                .update_proxy_config(self.shared_proxy_config.clone()),
+        ) {
+            errors.push(format!("restore shared proxy config: {error}"));
+        }
+
+        let currently_running = block_on_provider_transition(state.proxy_service.is_running());
+        if self.listener_running && !currently_running {
+            if let Err(error) = block_on_provider_transition(state.proxy_service.start()) {
+                errors.push(format!("restore proxy listener: {error}"));
+            }
+        } else if !self.listener_running && currently_running {
+            if let Err(error) = block_on_provider_transition(state.proxy_service.stop_server()) {
+                errors.push(format!("stop transition-started proxy listener: {error}"));
+            }
+        }
+
+        if self.listener_running && block_on_provider_transition(state.proxy_service.is_running()) {
+            block_on_provider_transition(
+                state.proxy_service.reconcile_active_target_for_app(
+                    app_type_str,
+                    self.active_target
+                        .as_ref()
+                        .map(|(id, name)| (id.as_str(), name.as_str())),
+                ),
+            );
+        }
+
+        if let Err(error) = block_on_provider_transition(
+            state
+                .db
+                .update_global_proxy_config(self.global_proxy_config.clone()),
+        ) {
+            errors.push(format!("restore global proxy state: {error}"));
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -239,6 +416,997 @@ mod tests {
                  wire_api = \"chat\"\n"
             )
         })
+    }
+
+    fn seed_codex_routing_providers(db: &Database) -> (Provider, Provider) {
+        let mut nexus = Provider::with_id(
+            "nexus-glm".to_string(),
+            "Nexus GLM Direct".to_string(),
+            codex_settings("http://upstream.example/v1", "nexus-key"),
+            None,
+        );
+        nexus.category = Some("custom".to_string());
+        nexus.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &nexus)
+            .expect("save Nexus provider");
+
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {},
+                "config": ""
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &official)
+            .expect("save official provider");
+
+        (nexus, official)
+    }
+
+    fn enable_codex_test_features() {
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
+            ..Default::default()
+        })
+        .expect("enable Codex login preservation and unified history");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_routing_snapshot_restores_ephemeral_proxy_port() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let original_proxy_config = ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        };
+        tauri::async_runtime::block_on(db.update_proxy_config(original_proxy_config.clone()))
+            .expect("configure an ephemeral proxy port");
+        let state = AppState::new(db.clone());
+        let snapshot = CodexRoutingSnapshot::capture(&state).expect("capture routing state");
+
+        let started = tauri::async_runtime::block_on(state.proxy_service.start())
+            .expect("start transition listener");
+        assert_ne!(started.port, 0);
+        assert_eq!(
+            tauri::async_runtime::block_on(db.get_proxy_config())
+                .expect("read persisted transition port")
+                .listen_port,
+            started.port,
+            "starting on port 0 should persist the OS-assigned port"
+        );
+
+        snapshot
+            .restore(&state)
+            .expect("roll back the simulated failed transition");
+
+        let restored = tauri::async_runtime::block_on(db.get_proxy_config())
+            .expect("read restored proxy config");
+        assert_eq!(
+            serde_json::to_value(restored).expect("serialize restored proxy config"),
+            serde_json::to_value(original_proxy_config).expect("serialize original proxy config"),
+            "rollback must restore every shared proxy setting"
+        );
+        assert!(
+            !tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "rollback must stop a transition-started listener"
+        );
+        assert!(
+            !tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read restored global proxy config")
+                .proxy_enabled,
+            "rollback must restore the global master switch"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn claude_official_switch_blocks_enabled_state_without_takeover_files() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+
+        let mut custom = Provider::with_id(
+            "claude-custom".to_string(),
+            "Claude Custom".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "custom-key",
+                    "ANTHROPIC_BASE_URL": "https://claude.example"
+                }
+            }),
+            None,
+        );
+        custom.category = Some("custom".to_string());
+        db.save_provider("claude", &custom)
+            .expect("save custom Claude provider");
+
+        let mut official = Provider::with_id(
+            "claude-official".to_string(),
+            "Anthropic Official".to_string(),
+            json!({ "env": {} }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("claude", &official)
+            .expect("save official Claude provider");
+
+        db.set_current_provider("claude", &custom.id)
+            .expect("set custom current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&custom.id))
+            .expect("set local custom provider");
+        write_json_file(&get_claude_settings_path(), &custom.settings_config)
+            .expect("seed custom Claude live config");
+
+        let mut route = tauri::async_runtime::block_on(db.get_proxy_config_for_app("claude"))
+            .expect("read Claude route");
+        route.enabled = true;
+        tauri::async_runtime::block_on(db.update_proxy_config_for_app(route))
+            .expect("simulate a durable enabled-only crash state");
+        let mut global = tauri::async_runtime::block_on(db.get_global_proxy_config())
+            .expect("read global proxy state");
+        global.proxy_enabled = true;
+        tauri::async_runtime::block_on(db.update_global_proxy_config(global))
+            .expect("simulate a stale global master switch");
+
+        assert!(tauri::async_runtime::block_on(db.get_live_backup("claude"))
+            .expect("read Claude backup")
+            .is_none());
+        assert!(!state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&AppType::Claude));
+        assert!(!tauri::async_runtime::block_on(
+            state.proxy_service.is_running()
+        ));
+
+        let error = ProviderService::switch(&state, AppType::Claude, &official.id)
+            .expect_err("non-atomic Official switching must fail closed");
+
+        assert!(
+            matches!(
+                error,
+                AppError::Localized { key, .. }
+                    if key == "switch.official_blocked_by_proxy"
+            ),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("read current Claude provider"),
+            Some(custom.id)
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_proxy_config_for_app("claude"))
+                .expect("read repaired Claude route")
+                .enabled
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read repaired global route")
+                .proxy_enabled
+        );
+        assert!(tauri::async_runtime::block_on(db.get_live_backup("claude"))
+            .expect("read repaired Claude backup")
+            .is_none());
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read unchanged Claude live config");
+        assert_eq!(live, custom.settings_config);
+    }
+
+    #[test]
+    #[serial]
+    fn codex_chat_switch_repairs_disabled_takeover_residue() {
+        let _home = TempHome::new();
+        enable_codex_test_features();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        tauri::async_runtime::block_on(db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        }))
+        .expect("use an ephemeral proxy port");
+        let state = AppState::new(db.clone());
+        let (nexus, official) = seed_codex_routing_providers(db.as_ref());
+
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let official_config = r#"model_provider = "custom"
+model = "gpt-5"
+
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+wire_api = "responses"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(official_config))
+            .expect("seed Official Codex live config");
+        db.set_current_provider("codex", &official.id)
+            .expect("set Official current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id))
+            .expect("set local Official provider");
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", true))
+            .expect("create a healthy takeover");
+        let mut stale_route = tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+            .expect("read Codex route");
+        stale_route.enabled = false;
+        tauri::async_runtime::block_on(db.update_proxy_config_for_app(stale_route))
+            .expect("simulate disabled crash residue");
+        tauri::async_runtime::block_on(state.proxy_service.stop_server())
+            .expect("simulate a missing listener");
+
+        assert!(tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read stale backup")
+            .is_some());
+        assert!(state
+            .proxy_service
+            .detect_takeover_in_live_config_for_app(&AppType::Codex));
+
+        ProviderService::switch(&state, AppType::Codex, &nexus.id)
+            .expect("repair residue and switch to Nexus");
+
+        assert!(
+            tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read repaired route")
+                .enabled
+        );
+        assert!(
+            tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "Nexus switch should restart the listener"
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read global route")
+                .proxy_enabled
+        );
+        assert!(tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read repaired backup")
+            .is_some());
+        let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read routed config");
+        assert!(live_config.contains("127.0.0.1"));
+        assert!(live_config.contains("PROXY_MANAGED"));
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read preserved OAuth"),
+            oauth_auth
+        );
+        let status = tauri::async_runtime::block_on(state.proxy_service.get_status())
+            .expect("read proxy status");
+        assert!(status.active_targets.iter().any(|target| {
+            target.app_type == AppType::Codex.as_str()
+                && target.provider_id == nexus.id
+                && target.provider_name == nexus.name
+        }));
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", false))
+            .expect("clean up repaired takeover");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_official_switch_repairs_enabled_state_without_takeover_files() {
+        let _home = TempHome::new();
+        enable_codex_test_features();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = AppState::new(db.clone());
+        let (nexus, official) = seed_codex_routing_providers(db.as_ref());
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let nexus_config = r#"model_provider = "custom"
+model = "GLM-5.2-FP8"
+
+[model_providers.custom]
+name = "Nexus GLM-5.2"
+base_url = "http://upstream.example/v1"
+wire_api = "chat"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(nexus_config))
+            .expect("seed direct Nexus config");
+        db.set_current_provider("codex", &nexus.id)
+            .expect("set Nexus current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&nexus.id))
+            .expect("set local Nexus provider");
+
+        let mut stale_route = tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+            .expect("read Codex route");
+        stale_route.enabled = true;
+        tauri::async_runtime::block_on(db.update_proxy_config_for_app(stale_route))
+            .expect("simulate enabled flag without takeover files");
+        let mut stale_global = tauri::async_runtime::block_on(db.get_global_proxy_config())
+            .expect("read global route");
+        stale_global.proxy_enabled = true;
+        tauri::async_runtime::block_on(db.update_global_proxy_config(stale_global))
+            .expect("simulate stale global switch");
+        tauri::async_runtime::block_on(db.update_provider_health_with_threshold(
+            &nexus.id,
+            AppType::Codex.as_str(),
+            false,
+            Some("pre-switch failure".to_string()),
+            1,
+        ))
+        .expect("seed Codex health state");
+
+        ProviderService::switch(&state, AppType::Codex, &official.id)
+            .expect("repair enabled state and switch Official");
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some(official.id)
+        );
+        assert!(
+            !tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read repaired route")
+                .enabled
+        );
+        assert!(
+            !tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read repaired global route")
+                .proxy_enabled
+        );
+        assert!(tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read backup")
+            .is_none());
+        assert!(
+            !tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "Official switch must leave no listener"
+        );
+        let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Official config");
+        assert!(live_config.contains("name = \"OpenAI\""));
+        assert!(!live_config.contains("127.0.0.1"));
+        assert!(!live_config.contains("PROXY_MANAGED"));
+        let reset_health = tauri::async_runtime::block_on(
+            db.get_provider_health(&nexus.id, AppType::Codex.as_str()),
+        )
+        .expect("read reset Codex health");
+        assert!(reset_health.is_healthy && reset_health.consecutive_failures == 0);
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read preserved OAuth"),
+            oauth_auth
+        );
+
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_chat_switch_repairs_enabled_state_without_takeover_files() {
+        let _home = TempHome::new();
+        enable_codex_test_features();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        tauri::async_runtime::block_on(db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        }))
+        .expect("use an ephemeral proxy port");
+        let state = AppState::new(db.clone());
+        let (nexus, official) = seed_codex_routing_providers(db.as_ref());
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let official_config = r#"model_provider = "custom"
+model = "gpt-5"
+
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+wire_api = "responses"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(official_config))
+            .expect("seed Official config");
+        db.set_current_provider("codex", &official.id)
+            .expect("set Official current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id))
+            .expect("set local Official provider");
+
+        let mut stale_route = tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+            .expect("read Codex route");
+        stale_route.enabled = true;
+        tauri::async_runtime::block_on(db.update_proxy_config_for_app(stale_route))
+            .expect("simulate enabled flag without takeover files");
+
+        ProviderService::switch(&state, AppType::Codex, &nexus.id)
+            .expect("repair enabled state and switch Nexus");
+
+        assert!(
+            tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read repaired route")
+                .enabled
+        );
+        assert!(
+            tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "repair should start the listener"
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read repaired global route")
+                .proxy_enabled
+        );
+        assert!(tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read repaired backup")
+            .is_some());
+        let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read routed config");
+        assert!(live_config.contains("127.0.0.1"));
+        assert!(live_config.contains("PROXY_MANAGED"));
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read preserved OAuth"),
+            oauth_auth
+        );
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", false))
+            .expect("clean up repaired takeover");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_switch_to_official_disables_takeover_without_deadlocking() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
+            ..Default::default()
+        })
+        .expect("enable Codex login preservation and unified history");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        tauri::async_runtime::block_on(db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        }))
+        .expect("use an ephemeral proxy port");
+        let state = AppState::new(db.clone());
+
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let nexus_config = r#"model_provider = "custom"
+model = "GLM-5.2-FP8"
+
+[model_providers.custom]
+name = "Nexus GLM-5.2"
+base_url = "http://127.0.0.1:18967/v1"
+wire_api = "chat"
+experimental_bearer_token = "nexus-key"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(nexus_config))
+            .expect("seed Codex live config");
+
+        let nexus = Provider::with_id(
+            "nexus-glm".to_string(),
+            "Nexus GLM Direct".to_string(),
+            codex_settings("http://127.0.0.1:18967/v1", "nexus-key"),
+            None,
+        );
+        db.save_provider("codex", &nexus)
+            .expect("save Nexus provider");
+
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {},
+                "config": ""
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &official)
+            .expect("save official provider");
+        db.set_current_provider("codex", "nexus-glm")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("nexus-glm"))
+            .expect("set local current provider");
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", true))
+            .expect("enable Codex takeover");
+        assert!(
+            tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "takeover should start the listener"
+        );
+        let mut shared_route =
+            tauri::async_runtime::block_on(db.get_proxy_config_for_app(AppType::Claude.as_str()))
+                .expect("read shared Claude route");
+        shared_route.enabled = true;
+        tauri::async_runtime::block_on(db.update_proxy_config_for_app(shared_route.clone()))
+            .expect("keep the shared listener alive");
+        tauri::async_runtime::block_on(state.proxy_service.reconcile_active_target_for_app(
+            AppType::Codex.as_str(),
+            Some((&nexus.id, &nexus.name)),
+        ));
+        tauri::async_runtime::block_on(db.update_provider_health_with_threshold(
+            &nexus.id,
+            AppType::Codex.as_str(),
+            false,
+            Some("pre-switch failure".to_string()),
+            1,
+        ))
+        .expect("seed Codex health state");
+
+        ProviderService::switch(&state, AppType::Codex, "codex-official")
+            .expect("switch to official provider");
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("codex-official".to_string())
+        );
+        assert!(
+            !tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read Codex proxy config")
+                .enabled,
+            "switching to Official should disable Codex takeover"
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_live_backup("codex"))
+                .expect("read Codex backup")
+                .is_none(),
+            "the restored takeover backup should be deleted"
+        );
+        assert!(
+            tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "another routed app should keep the shared listener alive"
+        );
+        let official_status = tauri::async_runtime::block_on(state.proxy_service.get_status())
+            .expect("read Official proxy status");
+        assert!(
+            official_status
+                .active_targets
+                .iter()
+                .all(|target| target.app_type != AppType::Codex.as_str()),
+            "switching to Official must clear the stale Codex runtime target"
+        );
+        let reset_health = tauri::async_runtime::block_on(
+            db.get_provider_health(&nexus.id, AppType::Codex.as_str()),
+        )
+        .expect("read reset Codex health");
+        assert!(
+            reset_health.is_healthy && reset_health.consecutive_failures == 0,
+            "a committed takeover release should reset Codex health"
+        );
+
+        let live_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read Codex auth");
+        assert_eq!(
+            live_auth, oauth_auth,
+            "Official switch should preserve OAuth"
+        );
+
+        let live_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read Codex config");
+        assert!(live_config.contains("model_provider = \"custom\""));
+        assert!(live_config.contains("name = \"OpenAI\""));
+        assert!(!live_config.contains("127.0.0.1"));
+        assert!(!live_config.contains("PROXY_MANAGED"));
+
+        ProviderService::switch(&state, AppType::Codex, "nexus-glm")
+            .expect("switch back to Nexus provider");
+        assert_eq!(
+            db.get_current_provider("codex").expect("read current"),
+            Some("nexus-glm".to_string())
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read Codex proxy config")
+                .enabled,
+            "switching to a Chat provider should enable Codex takeover atomically"
+        );
+        assert!(
+            tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "switching to a Chat provider should start the listener"
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_live_backup("codex"))
+                .expect("read Codex backup")
+                .is_some(),
+            "the restored Official config should be retained for takeover rollback"
+        );
+        let routed_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read routed Codex auth");
+        assert_eq!(
+            routed_auth, oauth_auth,
+            "Nexus routing should preserve OAuth"
+        );
+        let routed_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read routed Codex config");
+        assert!(routed_config.contains("127.0.0.1"));
+        assert!(routed_config.contains("PROXY_MANAGED"));
+        let routed_status = tauri::async_runtime::block_on(state.proxy_service.get_status())
+            .expect("read routed proxy status");
+        assert!(
+            routed_status.active_targets.iter().any(|target| {
+                target.app_type == AppType::Codex.as_str()
+                    && target.provider_id == nexus.id
+                    && target.provider_name == nexus.name
+            }),
+            "a successful Chat transition must set the Codex runtime target"
+        );
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", false))
+            .expect("clean up Codex takeover");
+        shared_route.enabled = false;
+        tauri::async_runtime::block_on(db.update_proxy_config_for_app(shared_route))
+            .expect("clear shared Claude route");
+        tauri::async_runtime::block_on(state.proxy_service.stop()).expect("stop shared listener");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_chat_switch_rolls_back_when_takeover_start_fails() {
+        let home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
+            ..Default::default()
+        })
+        .expect("enable Codex login preservation and unified history");
+
+        let occupied =
+            std::net::TcpListener::bind(("127.0.0.1", 0)).expect("reserve a proxy failure port");
+        let occupied_port = occupied.local_addr().expect("read occupied port").port();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        tauri::async_runtime::block_on(db.update_proxy_config(ProxyConfig {
+            listen_port: occupied_port,
+            ..Default::default()
+        }))
+        .expect("configure the occupied proxy port");
+        let state = AppState::new(db.clone());
+
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let official_config = r#"model_provider = "custom"
+model = "gpt-5"
+
+[model_providers.custom]
+name = "OpenAI"
+requires_openai_auth = true
+wire_api = "responses"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(official_config))
+            .expect("seed official Codex live config");
+        let history_path = home.dir.path().join(".codex").join("state_5.sqlite");
+        fs::write(&history_path, b"history-must-survive").expect("seed immutable history sentinel");
+
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {},
+                "config": ""
+            }),
+            None,
+        );
+        official.category = Some("official".to_string());
+        db.save_provider("codex", &official)
+            .expect("save official provider");
+
+        let mut nexus = Provider::with_id(
+            "nexus-glm".to_string(),
+            "Nexus GLM Direct".to_string(),
+            codex_settings("http://127.0.0.1:18967/v1", "nexus-key"),
+            None,
+        );
+        nexus.category = Some("custom".to_string());
+        nexus.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &nexus)
+            .expect("save Nexus provider");
+        db.set_current_provider("codex", "codex-official")
+            .expect("set official current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("codex-official"))
+            .expect("set local official provider");
+
+        let original_auth =
+            fs::read(crate::codex_config::get_codex_auth_path()).expect("read original auth");
+        let original_config =
+            fs::read(crate::codex_config::get_codex_config_path()).expect("read original config");
+        let original_official =
+            serde_json::to_value(db.get_provider_by_id("codex-official", "codex").unwrap())
+                .expect("serialize official provider");
+        let original_global_proxy = serde_json::to_value(
+            tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read original global proxy state"),
+        )
+        .expect("serialize original global proxy state");
+        let error = ProviderService::switch(&state, AppType::Codex, "nexus-glm")
+            .expect_err("occupied proxy port should abort the complete transition");
+        assert!(
+            error.to_string().contains("启动代理服务器失败"),
+            "the original takeover failure should be surfaced: {error}"
+        );
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read DB current"),
+            Some("codex-official".to_string())
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex),
+            Some("codex-official".to_string())
+        );
+        assert!(
+            !tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read proxy config")
+                .enabled
+        );
+        assert!(
+            !tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "failed activation must not leave a listener"
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_live_backup("codex"))
+                .expect("read backup")
+                .is_none(),
+            "failed activation must not leave a backup"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                tauri::async_runtime::block_on(db.get_global_proxy_config())
+                    .expect("read rolled-back global proxy state")
+            )
+            .expect("serialize rolled-back global proxy state"),
+            original_global_proxy,
+            "failed activation must restore the global routing toggle and port"
+        );
+        assert_eq!(
+            fs::read(crate::codex_config::get_codex_auth_path()).expect("read rolled-back auth"),
+            original_auth,
+            "OAuth auth must be byte-for-byte unchanged"
+        );
+        assert_eq!(
+            fs::read(crate::codex_config::get_codex_config_path())
+                .expect("read rolled-back config"),
+            original_config,
+            "official live config must be byte-for-byte unchanged"
+        );
+        assert_eq!(
+            serde_json::to_value(db.get_provider_by_id("codex-official", "codex").unwrap())
+                .expect("serialize rolled-back provider"),
+            original_official,
+            "backfill mutations must be rolled back with the transition"
+        );
+        assert_eq!(
+            fs::read(history_path).expect("read history sentinel"),
+            b"history-must-survive",
+            "provider transitions must never mutate Codex history"
+        );
+
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_official_switch_rolls_back_when_live_write_fails() {
+        let home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
+            ..Default::default()
+        })
+        .expect("enable Codex login preservation and unified history");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        tauri::async_runtime::block_on(db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        }))
+        .expect("use an ephemeral proxy port");
+        let state = AppState::new(db.clone());
+
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let nexus_config = r#"model_provider = "custom"
+model = "GLM-5.2-FP8"
+
+[model_providers.custom]
+name = "Nexus GLM-5.2"
+base_url = "http://127.0.0.1:18967/v1"
+wire_api = "chat"
+experimental_bearer_token = "nexus-key"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(nexus_config))
+            .expect("seed Nexus Codex live config");
+        let history_path = home.dir.path().join(".codex").join("state_5.sqlite");
+        fs::write(&history_path, b"history-must-survive").expect("seed immutable history sentinel");
+
+        let mut nexus = Provider::with_id(
+            "nexus-glm".to_string(),
+            "Nexus GLM Direct".to_string(),
+            codex_settings("http://127.0.0.1:18967/v1", "nexus-key"),
+            None,
+        );
+        nexus.category = Some("custom".to_string());
+        nexus.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &nexus)
+            .expect("save Nexus provider");
+
+        let mut invalid_official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {},
+                "config": "[invalid"
+            }),
+            None,
+        );
+        invalid_official.category = Some("official".to_string());
+        db.save_provider("codex", &invalid_official)
+            .expect("save invalid official provider");
+        db.set_current_provider("codex", "nexus-glm")
+            .expect("set Nexus current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("nexus-glm"))
+            .expect("set local Nexus provider");
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", true))
+            .expect("enable Codex takeover");
+        let original_auth =
+            fs::read(crate::codex_config::get_codex_auth_path()).expect("read takeover auth");
+        let original_config =
+            fs::read(crate::codex_config::get_codex_config_path()).expect("read takeover config");
+        let original_backup = tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read takeover backup")
+            .expect("takeover backup");
+        let original_nexus =
+            serde_json::to_value(db.get_provider_by_id("nexus-glm", "codex").unwrap())
+                .expect("serialize Nexus provider");
+        let original_global_proxy = serde_json::to_value(
+            tauri::async_runtime::block_on(db.get_global_proxy_config())
+                .expect("read original global proxy state"),
+        )
+        .expect("serialize original global proxy state");
+        tauri::async_runtime::block_on(db.update_provider_health_with_threshold(
+            &nexus.id,
+            AppType::Codex.as_str(),
+            false,
+            Some("health-must-survive".to_string()),
+            1,
+        ))
+        .expect("seed Codex health state");
+        let original_health = serde_json::to_value(
+            tauri::async_runtime::block_on(
+                db.get_provider_health(&nexus.id, AppType::Codex.as_str()),
+            )
+            .expect("read original health"),
+        )
+        .expect("serialize original health");
+
+        ProviderService::switch(&state, AppType::Codex, "codex-official")
+            .expect_err("invalid official config should abort the complete transition");
+
+        assert_eq!(
+            db.get_current_provider("codex").expect("read DB current"),
+            Some("nexus-glm".to_string())
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex),
+            Some("nexus-glm".to_string())
+        );
+        assert!(
+            tauri::async_runtime::block_on(db.get_proxy_config_for_app("codex"))
+                .expect("read proxy config")
+                .enabled
+        );
+        assert!(
+            tauri::async_runtime::block_on(state.proxy_service.is_running()),
+            "failed Official transition must restore the listener"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                tauri::async_runtime::block_on(db.get_global_proxy_config())
+                    .expect("read rolled-back global proxy state")
+            )
+            .expect("serialize rolled-back global proxy state"),
+            original_global_proxy,
+            "failed Official transition must restore global routing state"
+        );
+        assert_eq!(
+            serde_json::to_value(
+                tauri::async_runtime::block_on(
+                    db.get_provider_health(&nexus.id, AppType::Codex.as_str())
+                )
+                .expect("read health after failed transition")
+            )
+            .expect("serialize health after failed transition"),
+            original_health,
+            "failed Official transition must not delete provider health"
+        );
+        assert_eq!(
+            tauri::async_runtime::block_on(db.get_live_backup("codex"))
+                .expect("read rolled-back backup")
+                .expect("backup must be restored")
+                .original_config,
+            original_backup.original_config,
+            "the takeover restore source must be unchanged"
+        );
+        assert_eq!(
+            fs::read(crate::codex_config::get_codex_auth_path()).expect("read rolled-back auth"),
+            original_auth,
+            "OAuth auth must be byte-for-byte unchanged"
+        );
+        assert_eq!(
+            fs::read(crate::codex_config::get_codex_config_path())
+                .expect("read rolled-back config"),
+            original_config,
+            "takeover live config must be byte-for-byte unchanged"
+        );
+        assert_eq!(
+            serde_json::to_value(db.get_provider_by_id("nexus-glm", "codex").unwrap())
+                .expect("serialize rolled-back provider"),
+            original_nexus,
+            "backfill mutations must be rolled back with the transition"
+        );
+        assert_eq!(
+            fs::read(history_path).expect("read history sentinel"),
+            b"history-must-survive",
+            "provider transitions must never mutate Codex history"
+        );
+
+        tauri::async_runtime::block_on(state.proxy_service.set_takeover_for_app("codex", false))
+            .expect("clean up takeover");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
     }
 
     #[test]
@@ -2223,26 +3391,39 @@ impl ProviderService {
         let live_taken_over = state
             .proxy_service
             .detect_takeover_in_live_config_for_app(&app_type);
+        let takeover_enabled =
+            futures::executor::block_on(state.db.get_proxy_config_for_app(app_type.as_str()))
+                .map(|config| config.enabled)
+                .unwrap_or(false);
 
         let should_hot_switch = is_app_taken_over || live_taken_over;
 
-        // Switching to an official provider while proxy takeover is active:
-        // automatically disable takeover first (restore original Live config),
-        // then proceed with a normal switch. This is safe because switching TO
-        // official means the user wants to stop using the proxy entirely.
-        if should_hot_switch && _provider.category.as_deref() == Some("official") {
-            log::info!(
-                "切换到官方供应商 {}，自动关闭 {} 的代理接管",
+        let is_codex_chat_target = matches!(app_type, AppType::Codex)
+            && _provider.category.as_deref() != Some("official")
+            && crate::proxy::providers::codex_provider_uses_chat_completions(_provider);
+        if matches!(app_type, AppType::Codex)
+            && (_provider.category.as_deref() == Some("official") || is_codex_chat_target)
+        {
+            return Self::switch_codex_routing_atomic(
+                state,
                 id,
-                app_type.as_str()
+                &providers,
+                _provider.category.as_deref() == Some("official"),
             );
-            futures::executor::block_on(
-                state.proxy_service.set_takeover_for_app(app_type.as_str(), false),
-            ).map_err(|e| AppError::Message(format!("关闭代理接管失败: {e}")))?;
+        }
 
-            // After disabling takeover, the Live config has been restored from backup.
-            // Fall through to switch_normal which will write the official provider config.
-            return Self::switch_normal(state, app_type, id, &providers);
+        // Codex owns an atomic route-to-Official transition above. Claude and
+        // Gemini do not, so fail closed whenever any durable takeover signal
+        // remains, even if the listener disappeared after a crash.
+        if !matches!(app_type, AppType::Codex)
+            && (takeover_enabled || should_hot_switch)
+            && _provider.category.as_deref() == Some("official")
+        {
+            return Err(AppError::localized(
+                "switch.official_blocked_by_proxy",
+                "本地路由接管仍处于启用或恢复状态，无法安全切换到官方供应商",
+                "Cannot safely switch to the Official provider while local routing takeover is active or awaiting recovery",
+            ));
         }
 
         if should_hot_switch {
@@ -2269,6 +3450,117 @@ impl ProviderService {
 
         // Normal mode: full switch with Live config write
         Self::switch_normal(state, app_type, id, &providers)
+    }
+
+    fn switch_codex_routing_atomic(
+        state: &AppState,
+        id: &str,
+        providers: &IndexMap<String, Provider>,
+        target_is_official: bool,
+    ) -> Result<SwitchResult, AppError> {
+        let snapshot = CodexRoutingSnapshot::capture(state)?;
+        let takeover_enabled = snapshot.app_proxy_config.enabled;
+        let takeover_residue = snapshot.live_backup.is_some()
+            || state
+                .proxy_service
+                .detect_takeover_in_live_config_for_app(&AppType::Codex);
+
+        let transition = if target_is_official {
+            if takeover_enabled || takeover_residue {
+                block_on_provider_transition(
+                    state
+                        .proxy_service
+                        .set_takeover_for_app_inner_deferred_health_reset(
+                            AppType::Codex.as_str(),
+                            false,
+                        ),
+                )
+                .map_err(|error| AppError::Message(format!("关闭代理接管失败: {error}")))
+                .and_then(|()| Self::switch_normal(state, AppType::Codex, id, providers))
+                .and_then(|result| {
+                    block_on_provider_transition(
+                        state
+                            .db
+                            .clear_provider_health_for_app(AppType::Codex.as_str()),
+                    )
+                    .map(|()| result)
+                    .map_err(|error| AppError::Message(format!("清除 Codex 健康状态失败: {error}")))
+                })
+            } else {
+                Self::switch_normal(state, AppType::Codex, id, providers)
+            }
+        } else {
+            let prepare = if takeover_enabled {
+                // Repair missing backup/live/listener state before hot-switching.
+                block_on_provider_transition(
+                    state
+                        .proxy_service
+                        .set_takeover_for_app_inner(AppType::Codex.as_str(), true),
+                )
+                .map_err(|error| AppError::Message(format!("修复本地路由失败: {error}")))
+            } else if takeover_residue {
+                // A disabled route with backup/placeholder residue is not active
+                // takeover. Restore it before normal switching so backfill never
+                // persists proxy placeholders into a provider.
+                block_on_provider_transition(
+                    state
+                        .proxy_service
+                        .set_takeover_for_app_inner_deferred_health_reset(
+                            AppType::Codex.as_str(),
+                            false,
+                        ),
+                )
+                .map_err(|error| AppError::Message(format!("清理本地路由残留失败: {error}")))
+            } else {
+                Ok(())
+            };
+
+            prepare.and_then(|()| {
+                if takeover_enabled {
+                    block_on_provider_transition(
+                        state
+                            .proxy_service
+                            .hot_switch_provider_inner(AppType::Codex.as_str(), id),
+                    )
+                    .map(|_| SwitchResult::default())
+                    .map_err(|error| AppError::Message(format!("热切换失败: {error}")))
+                } else {
+                    Self::switch_normal(state, AppType::Codex, id, providers).and_then(|result| {
+                        block_on_provider_transition(
+                            state
+                                .proxy_service
+                                .set_takeover_for_app_inner(AppType::Codex.as_str(), true),
+                        )
+                        .map(|()| result)
+                        .map_err(|error| AppError::Message(format!("启用本地路由失败: {error}")))
+                    })
+                }
+            })
+        };
+
+        match transition {
+            Ok(result) => {
+                let active_target = if target_is_official {
+                    None
+                } else {
+                    providers
+                        .get(id)
+                        .map(|provider| (provider.id.as_str(), provider.name.as_str()))
+                };
+                block_on_provider_transition(
+                    state
+                        .proxy_service
+                        .reconcile_active_target_for_app(AppType::Codex.as_str(), active_target),
+                );
+                Ok(result)
+            }
+            Err(error) => match snapshot.restore(state) {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(AppError::Message(format!(
+                    "{error}; transition rollback failed: {rollback_error}"
+                ))),
+            },
+        }
     }
 
     /// Normal switch flow (non-proxy mode)

@@ -22,6 +22,7 @@ const SYNC_SKIP_TABLES: &[&str] = &[
     "provider_health",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "codex_session_sync_state_v2",
 ];
 
 /// Tables whose local data is preserved (restored from local snapshot) during WebDAV import.
@@ -31,6 +32,7 @@ const SYNC_PRESERVE_TABLES: &[&str] = &[
     "stream_check_logs",
     "proxy_live_backup",
     "usage_daily_rollups",
+    "codex_session_sync_state_v2",
 ];
 
 /// A database backup entry for the UI
@@ -693,6 +695,181 @@ mod tests {
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
     use serial_test::serial;
+
+    fn create_codex_sync_checkpoint_table(conn: &rusqlite::Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS codex_session_sync_state_v2 (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                byte_offset INTEGER NOT NULL DEFAULT 0,
+                line_offset INTEGER NOT NULL DEFAULT 0,
+                session_id TEXT,
+                current_model TEXT NOT NULL DEFAULT 'unknown',
+                previous_input INTEGER,
+                previous_cached_input INTEGER,
+                previous_output INTEGER,
+                event_index INTEGER NOT NULL DEFAULT 0,
+                cursor_guard TEXT NOT NULL DEFAULT '',
+                last_synced_at INTEGER NOT NULL
+            );",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn sync_import_preserves_local_codex_checkpoint_when_remote_dump_lacks_table(
+    ) -> Result<(), AppError> {
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute("DROP TABLE IF EXISTS codex_session_sync_state_v2", [])?;
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+        }
+        let remote_sql = remote_db.export_sql_string_for_sync()?;
+        assert!(
+            !remote_sql.contains("codex_session_sync_state_v2"),
+            "fixture must represent a remote dump created before the checkpoint table existed"
+        );
+
+        let local_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            create_codex_sync_checkpoint_table(&conn)?;
+            conn.execute(
+                "INSERT INTO codex_session_sync_state_v2 (
+                    file_path, last_modified, byte_offset, line_offset, session_id,
+                    current_model, event_index, cursor_guard, last_synced_at
+                ) VALUES (
+                    '/Users/local/.codex/sessions/local.jsonl', 1000, 4096, 42,
+                    'local-session', 'gpt-5', 7, 'local-private-guard', 1001
+                )",
+                [],
+            )?;
+        }
+
+        local_db.import_sql_string_for_sync(&remote_sql)?;
+
+        let checkpoint: (String, i64, String) = {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            conn.query_row(
+                "SELECT file_path, byte_offset, cursor_guard
+                 FROM codex_session_sync_state_v2",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?
+        };
+        assert_eq!(
+            checkpoint,
+            (
+                "/Users/local/.codex/sessions/local.jsonl".to_string(),
+                4096,
+                "local-private-guard".to_string(),
+            ),
+            "legacy sync import must preserve the device-local checkpoint"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn sync_export_excludes_codex_session_checkpoint_rows() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(db.conn);
+            create_codex_sync_checkpoint_table(&conn)?;
+            conn.execute(
+                "INSERT INTO codex_session_sync_state_v2 (
+                    file_path, last_modified, byte_offset, line_offset, session_id,
+                    current_model, event_index, cursor_guard, last_synced_at
+                ) VALUES (
+                    '/Users/local/.codex/sessions/private.jsonl', 1000, 4096, 42,
+                    'local-session', 'gpt-5', 7, 'local-private-guard', 1001
+                )",
+                [],
+            )?;
+        }
+
+        let sync_sql = db.export_sql_string_for_sync()?;
+
+        assert!(
+            !sync_sql.contains("INSERT INTO \"codex_session_sync_state_v2\""),
+            "sync export must not contain device-local Codex checkpoint rows"
+        );
+        assert!(
+            !sync_sql.contains("local-private-guard"),
+            "sync export must not leak checkpoint guard data"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn sync_import_preserves_local_codex_session_checkpoint() -> Result<(), AppError> {
+        let remote_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(remote_db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, meta)
+                 VALUES ('remote-provider', 'claude', 'Remote Provider', '{}', '{}')",
+                [],
+            )?;
+            create_codex_sync_checkpoint_table(&conn)?;
+            conn.execute(
+                "INSERT INTO codex_session_sync_state_v2 (
+                    file_path, last_modified, byte_offset, line_offset, session_id,
+                    current_model, event_index, cursor_guard, last_synced_at
+                ) VALUES (
+                    '/Users/remote/.codex/sessions/remote.jsonl', 2000, 8192, 84,
+                    'remote-session', 'gpt-5', 9, 'remote-private-guard', 2001
+                )",
+                [],
+            )?;
+        }
+        let remote_sql = remote_db.export_sql_string()?;
+
+        let local_db = Database::memory()?;
+        {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            create_codex_sync_checkpoint_table(&conn)?;
+            conn.execute(
+                "INSERT INTO codex_session_sync_state_v2 (
+                    file_path, last_modified, byte_offset, line_offset, session_id,
+                    current_model, event_index, cursor_guard, last_synced_at
+                ) VALUES (
+                    '/Users/local/.codex/sessions/local.jsonl', 1000, 4096, 42,
+                    'local-session', 'gpt-5', 7, 'local-private-guard', 1001
+                )",
+                [],
+            )?;
+        }
+
+        local_db.import_sql_string_for_sync(&remote_sql)?;
+
+        let checkpoints: Vec<(String, String)> = {
+            let conn = crate::database::lock_conn!(local_db.conn);
+            let mut stmt = conn.prepare(
+                "SELECT file_path, cursor_guard
+                 FROM codex_session_sync_state_v2
+                 ORDER BY file_path",
+            )?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        assert_eq!(
+            checkpoints,
+            vec![(
+                "/Users/local/.codex/sessions/local.jsonl".to_string(),
+                "local-private-guard".to_string(),
+            )],
+            "sync import must preserve the local checkpoint and discard remote checkpoint state"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn sync_import_preserves_local_only_tables() -> Result<(), AppError> {

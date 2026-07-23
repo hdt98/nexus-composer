@@ -168,7 +168,11 @@ export function useProviderActions(
 
       // Determine why this provider requires the proxy
       let proxyRequiredReason: string | null = null;
-      if (!isProxyRunning && provider.category !== "official") {
+      if (
+        !isProxyRunning &&
+        provider.category !== "official" &&
+        !isCodexChatFormat
+      ) {
         if (isCopilotProvider) {
           proxyRequiredReason = t("notifications.proxyReasonCopilot", {
             defaultValue: "使用 GitHub Copilot 作为 Claude 供应商",
@@ -218,8 +222,13 @@ export function useProviderActions(
         );
       }
 
-      // Block official providers when proxy takeover is active
-      if (isProxyTakeover && provider.category === "official") {
+      // Only Codex has an atomic takeover-to-Official transition. Keep the
+      // existing guard for other apps until they have equivalent rollback.
+      if (
+        activeApp !== "codex" &&
+        isProxyTakeover &&
+        provider.category === "official"
+      ) {
         toast.error(
           t("notifications.officialBlockedByProxy", {
             defaultValue:
@@ -232,6 +241,22 @@ export function useProviderActions(
 
       try {
         const result = await switchProviderMutation.mutateAsync(provider.id);
+
+        // A Codex provider switch can change routing in either direction:
+        // the backend atomically enables takeover for Chat Completions and
+        // disables it when switching to Official.
+        if (activeApp === "codex") {
+          await Promise.all([
+            queryClient.invalidateQueries({ queryKey: ["proxyStatus"] }),
+            queryClient.invalidateQueries({
+              queryKey: ["proxyTakeoverStatus"],
+            }),
+            queryClient.invalidateQueries({
+              queryKey: ["liveTakeoverActive"],
+            }),
+          ]);
+        }
+
         await syncClaudePlugin(provider);
 
         // Show backfill warning if present
@@ -279,6 +304,7 @@ export function useProviderActions(
       activeApp,
       isProxyRunning,
       isProxyTakeover,
+      queryClient,
       t,
     ],
   );
