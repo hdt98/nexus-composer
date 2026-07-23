@@ -242,6 +242,163 @@ describe("useProviderActions", () => {
     expect(switchProviderMutateAsync).toHaveBeenCalledWith(provider.id);
   });
 
+  it("allows switching Codex takeover back to Official", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper, queryClient } = createWrapper();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const provider = createProvider({
+      id: "official-openai",
+      category: "official",
+    });
+
+    const { result } = renderHook(
+      () => useProviderActions("codex", true, true),
+      {
+        wrapper,
+      },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith("official-openai");
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["proxyStatus"],
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["proxyTakeoverStatus"],
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["liveTakeoverActive"],
+    });
+  });
+
+  it("keeps Official switching blocked for non-transactional Claude takeover", async () => {
+    const { wrapper, queryClient } = createWrapper();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const provider = createProvider({
+      id: "official-anthropic",
+      category: "official",
+    });
+
+    const { result } = renderHook(
+      () => useProviderActions("claude", true, true),
+      {
+        wrapper,
+      },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+    expect(invalidateQueries).not.toHaveBeenCalled();
+  });
+
+  it("keeps Official switching blocked when Claude takeover outlives its listener", async () => {
+    const { wrapper } = createWrapper();
+    const provider = createProvider({
+      id: "official-anthropic",
+      category: "official",
+    });
+
+    const { result } = renderHook(
+      () => useProviderActions("claude", false, true),
+      {
+        wrapper,
+      },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps Official switching blocked for non-transactional Gemini takeover", async () => {
+    const { wrapper } = createWrapper();
+    const provider = createProvider({
+      id: "official-google",
+      category: "official",
+    });
+
+    const { result } = renderHook(
+      () => useProviderActions("gemini", true, true),
+      {
+        wrapper,
+      },
+    );
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).not.toHaveBeenCalled();
+    expect(toastErrorMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not refresh routing state for a normal Claude provider switch", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper, queryClient } = createWrapper();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const provider = createProvider({
+      id: "custom-anthropic",
+      category: "custom",
+    });
+
+    const { result } = renderHook(() => useProviderActions("claude", true), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith("custom-anthropic");
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(invalidateQueries).not.toHaveBeenCalled();
+  });
+
+  it("refreshes backend-owned Codex routing when switching to a Chat Completions provider", async () => {
+    switchProviderMutateAsync.mockResolvedValueOnce(undefined);
+    const { wrapper, queryClient } = createWrapper();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const provider = createProvider({
+      id: "nexus-glm-direct",
+      category: "custom",
+      meta: {
+        apiFormat: "openai_chat",
+      },
+    });
+
+    const { result } = renderHook(() => useProviderActions("codex", false), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.switchProvider(provider);
+    });
+
+    expect(switchProviderMutateAsync).toHaveBeenCalledWith("nexus-glm-direct");
+    expect(toastWarningMock).not.toHaveBeenCalled();
+    expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["proxyStatus"],
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["proxyTakeoverStatus"],
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["liveTakeoverActive"],
+    });
+  });
+
   it("should sync plugin config when switching Claude provider with integration enabled", async () => {
     switchProviderMutateAsync.mockResolvedValueOnce(undefined);
     settingsApiGetMock.mockResolvedValueOnce({

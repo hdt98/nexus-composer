@@ -85,9 +85,10 @@ pub fn sync_claude_session_logs(db: &Database) -> Result<SessionSyncResult, AppE
         result.files_scanned += 1;
 
         match sync_single_file(db, file_path) {
-            Ok((imported, skipped)) => {
+            Ok((imported, skipped, errors)) => {
                 result.imported += imported;
                 result.skipped += skipped;
+                result.errors.extend(errors);
             }
             Err(e) => {
                 let msg = format!("{}: {e}", file_path.display());
@@ -180,8 +181,8 @@ fn push_jsonl_children(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// 同步单个 JSONL 文件，返回 (imported, skipped)
-fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+/// Synchronize one JSONL file and return (imported, skipped, errors).
+fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32, Vec<String>), AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
     // 获取文件元数据
@@ -194,7 +195,7 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
-        return Ok((0, 0));
+        return Ok((0, 0, Vec::new()));
     }
 
     // 从上次偏移位置开始增量解析
@@ -314,6 +315,7 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
     // 写入数据库
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
+    let mut errors = Vec::new();
 
     for msg in messages.values() {
         // 只要产生了真实计费 token 就导入，不再强制要求 stop_reason 或 output>0。
@@ -346,16 +348,27 @@ fn sync_single_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppEr
             Ok(true) => imported += 1,
             Ok(false) => skipped += 1,
             Err(e) => {
-                log::warn!("[SESSION-SYNC] 插入失败 ({}): {e}", msg.message_id);
+                let error = format!(
+                    "{}: insert failed ({}): {e}",
+                    file_path.display(),
+                    msg.message_id
+                );
+                log::warn!("[SESSION-SYNC] {error}");
+                errors.push(error);
                 skipped += 1;
             }
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    update_sync_state_after_records(
+        db,
+        &file_path_str,
+        file_modified,
+        line_offset,
+        !errors.is_empty(),
+    )?;
 
-    Ok((imported, skipped))
+    Ok((imported, skipped, errors))
 }
 
 /// 获取 session_log_sync 表中某条目的同步进度。
@@ -405,6 +418,19 @@ pub(crate) fn update_sync_state(
         rusqlite::params![file_path, last_modified, last_offset, now],
     )
     .map_err(|e| AppError::Database(format!("更新同步状态失败: {e}")))?;
+    Ok(())
+}
+
+pub(crate) fn update_sync_state_after_records(
+    db: &Database,
+    file_path: &str,
+    last_modified: i64,
+    last_offset: i64,
+    had_errors: bool,
+) -> Result<(), AppError> {
+    if !had_errors {
+        update_sync_state(db, file_path, last_modified, last_offset)?;
+    }
     Ok(())
 }
 
@@ -546,7 +572,6 @@ fn insert_session_log_entry(
     Ok(true)
 }
 
-
 /// Resolve the actual upstream model for pricing when proxy takeover is active.
 ///
 /// When the proxy is active, Claude Code's session logs report the client-side
@@ -627,6 +652,78 @@ pub fn get_data_source_breakdown(db: &Database) -> Result<Vec<DataSourceSummary>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn partial_record_failure_keeps_file_retryable() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_one_session_record
+                 BEFORE INSERT ON proxy_request_logs
+                 WHEN NEW.request_id = 'session:msg_fail'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced insert failure');
+                 END;",
+            )?;
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "nexus-composer-partial-sync-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("partial.jsonl");
+        let success = r#"{"type":"assistant","message":{"id":"msg_ok","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:23Z","sessionId":"session-partial"}"#;
+        let failure = r#"{"type":"assistant","message":{"id":"msg_fail","model":"claude-opus-4-8","usage":{"input_tokens":2,"output_tokens":1},"stop_reason":"end_turn"},"timestamp":"2026-06-07T13:01:24Z","sessionId":"session-partial"}"#;
+        fs::write(&file, format!("{success}\n{failure}\n")).unwrap();
+
+        let (imported, _skipped, errors) = sync_single_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (0, 0),
+            "a partial insert failure must leave the file eligible for retry"
+        );
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch("DROP TRIGGER fail_one_session_record;")?;
+        }
+
+        let (retry_imported, retry_skipped, retry_errors) = sync_single_file(&db, &file)?;
+        assert_eq!(
+            retry_imported, 1,
+            "the failed record should import on retry"
+        );
+        assert_eq!(retry_skipped, 1, "the successful record should deduplicate");
+        assert!(retry_errors.is_empty());
+
+        let modified = metadata_modified_nanos(&fs::metadata(&file).unwrap());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (modified, 2),
+            "the cursor should advance after every record is durable"
+        );
+
+        let conn = lock_conn!(db.conn);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE session_id = 'session-partial'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 2);
+        drop(conn);
+
+        let (unchanged_imported, unchanged_skipped, unchanged_errors) =
+            sync_single_file(&db, &file)?;
+        assert_eq!((unchanged_imported, unchanged_skipped), (0, 0));
+        assert!(unchanged_errors.is_empty());
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
 
     #[test]
     fn test_parse_usage_from_jsonl_line() {
@@ -762,7 +859,8 @@ mod tests {
 
     #[test]
     fn test_collect_jsonl_files_includes_subagents() {
-        let tmp = std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
         let project = tmp.join("project");
         let session_dir = project.join("test-session");
         let subagents_dir = session_dir.join("subagents");
@@ -787,7 +885,8 @@ mod tests {
     fn test_collect_jsonl_files_includes_workflow_subagents() {
         // Claude Code Workflow 把子 agent transcript 嵌在
         // 项目/SESSION_ID/subagents/workflows/wf_<ID>/ 下，比普通子 agent 深一层。
-        let tmp = std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
         let project = tmp.join("project");
         let session_dir = project.join("test-session");
         let subagents_dir = session_dir.join("subagents");
@@ -824,7 +923,8 @@ mod tests {
         // 子 agent 常见的「只有 message_start 快照、没写最终块」形态）必须被计入，
         // 不能因缺 stop_reason 或 output==0 而整条丢弃；全 0 token 的占位行仍应跳过。
         let db = Database::memory()?;
-        let tmp = std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-composer-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         let file = tmp.join("agent-wf.jsonl");
 
@@ -834,11 +934,12 @@ mod tests {
         let empty = r#"{"type":"assistant","message":{"id":"msg_empty","model":"claude-opus-4-8","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"timestamp":"2026-06-07T13:01:24Z","sessionId":"session-wf"}"#;
         fs::write(&file, format!("{billable}\n{empty}\n")).unwrap();
 
-        let (imported, _skipped) = sync_single_file(&db, &file)?;
+        let (imported, _skipped, errors) = sync_single_file(&db, &file)?;
         assert_eq!(
             imported, 1,
             "有 cache 成本但无 stop_reason 的 message 必须被导入"
         );
+        assert!(errors.is_empty());
 
         let conn = lock_conn!(db.conn);
         let cache_read: i64 = conn.query_row(

@@ -658,54 +658,102 @@ impl ProxyService {
         let app_type_str = app.as_str();
         let _guard = self.switch_locks.lock_for_app(app_type_str).await;
 
-        if enabled {
-            // 1) 代理服务未运行则自动启动
-            if !self.is_running().await {
-                self.start().await?;
-            }
+        self.set_takeover_for_app_inner(app_type_str, enabled).await
+    }
 
-            // 2) 已接管则直接返回（幂等）；但如果缺少备份或占位符残留，需要重建接管
+    /// Apply a takeover change while the caller holds this app's switch lock.
+    pub(crate) async fn set_takeover_for_app_inner(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.set_takeover_for_app_inner_with_health_reset(app_type, enabled, true)
+            .await
+    }
+
+    /// Apply a takeover change while deferring health reset until a larger
+    /// provider/routing transition has committed.
+    pub(crate) async fn set_takeover_for_app_inner_deferred_health_reset(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        self.set_takeover_for_app_inner_with_health_reset(app_type, enabled, false)
+            .await
+    }
+
+    async fn set_takeover_for_app_inner_with_health_reset(
+        &self,
+        app_type: &str,
+        enabled: bool,
+        reset_health_on_disable: bool,
+    ) -> Result<(), String> {
+        let app = AppType::from_str(app_type).map_err(|e| format!("无效的应用类型: {e}"))?;
+        let app_type_str = app.as_str();
+
+        if enabled {
+            // 1) Start is idempotent and also reconciles the persisted global
+            // master switch when a listener survived but that flag did not.
+            self.start().await?;
+
+            // 2) Reconcile all takeover signals before deciding whether this is
+            // already active. A crash can leave enabled out of sync with the
+            // backup/live placeholder, so enabled alone is not authoritative.
             let current_config = self
                 .db
                 .get_proxy_config_for_app(app_type_str)
                 .await
                 .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
-
-            let mut restore_existing_backup_before_takeover = false;
-            if current_config.enabled {
-                let has_backup = match self.db.get_live_backup(app_type_str).await {
-                    Ok(v) => v.is_some(),
+            let existing_backup = self
+                .db
+                .get_live_backup(app_type_str)
+                .await
+                .map_err(|e| format!("读取 {app_type_str} 备份失败: {e}"))?;
+            let backup_is_usable = existing_backup.as_ref().is_some_and(|backup| {
+                serde_json::from_str::<Value>(&backup.original_config)
+                    .ok()
+                    .is_some_and(|config| !Self::live_has_proxy_placeholder_for_app(&app, &config))
+            });
+            let live_taken_over = self.detect_takeover_in_live_config_for_app(&app);
+            let live_matches_current_proxy =
+                match self.live_takeover_matches_current_proxy(&app).await {
+                    Ok(value) => value,
                     Err(e) => {
-                        log::warn!("读取 {app_type_str} 备份失败（将继续重建接管）: {e}");
+                        log::warn!("检测 {app_type_str} 接管配置失败（将继续重建接管）: {e}");
                         false
                     }
                 };
-                let live_matches_current_proxy =
-                    match self.live_takeover_matches_current_proxy(&app).await {
-                        Ok(value) => value,
-                        Err(e) => {
-                            log::warn!("检测 {app_type_str} 接管配置失败（将继续重建接管）: {e}");
-                            false
-                        }
-                    };
 
-                // 必须 backup 存在，且 live 确实指向当前代理地址，才算真接管。
-                // 只看占位符会把半接管/旧端口残留误判为可复用，导致开启接管后
-                // live 文件仍停留在普通供应商配置。
-                if has_backup && live_matches_current_proxy {
-                    return Ok(());
-                }
-                restore_existing_backup_before_takeover = has_backup;
+            // A healthy active takeover requires all three durable signals.
+            if current_config.enabled && backup_is_usable && live_matches_current_proxy {
+                return Ok(());
+            }
 
+            if current_config.enabled || existing_backup.is_some() || live_taken_over {
                 log::warn!(
-                    "{app_type_str} 标记为已接管，但 backup={has_backup} live_matches_current_proxy={live_matches_current_proxy}，正在重新接管并补齐 Live"
+                    "{app_type_str} 接管状态不完整: enabled={} backup={} usable_backup={} live_taken_over={} live_matches_current_proxy={}，正在修复",
+                    current_config.enabled,
+                    existing_backup.is_some(),
+                    backup_is_usable,
+                    live_taken_over,
+                    live_matches_current_proxy
                 );
             }
 
             // 3) 备份 Live 配置（严格：目标 app 不存在则报错）
-            if restore_existing_backup_before_takeover {
+            if backup_is_usable {
                 self.restore_live_config_for_app_inner(&app).await?;
             } else {
+                if existing_backup.is_some() {
+                    self.db
+                        .delete_live_backup(app_type_str)
+                        .await
+                        .map_err(|e| format!("删除无效的 {app_type_str} Live 备份失败: {e}"))?;
+                }
+                if live_taken_over {
+                    self.restore_live_config_for_app_with_fallback_inner(&app)
+                        .await?;
+                }
                 self.backup_live_config_strict(&app).await?;
 
                 // 4) 同步 Live Token 到数据库（仅当前 app）
@@ -769,14 +817,23 @@ impl ProxyService {
             return Ok(());
         }
 
-        // 关闭接管：检查 enabled 状态
+        // 关闭接管：同时检查 enabled、备份和 Live 占位符。异常退出可能只
+        // 持久化了其中一部分；这种残留仍必须恢复并清理，不能按 enabled=false
+        // 直接返回。
         let current_config = self
             .db
             .get_proxy_config_for_app(app_type_str)
             .await
             .map_err(|e| format!("获取 {app_type_str} 配置失败: {e}"))?;
+        let has_backup = self
+            .db
+            .get_live_backup(app_type_str)
+            .await
+            .map_err(|e| format!("获取 {app_type_str} Live 备份失败: {e}"))?
+            .is_some();
+        let live_taken_over = self.detect_takeover_in_live_config_for_app(&app);
 
-        if !current_config.enabled {
+        if !current_config.enabled && !has_backup && !live_taken_over {
             return Ok(()); // 未接管，幂等返回
         }
 
@@ -806,11 +863,15 @@ impl ProxyService {
             .await
             .map_err(|e| format!("清除 {app_type_str} enabled 状态失败: {e}"))?;
 
-        // 4) 清除该应用的健康状态（关闭代理时重置队列状态）
-        self.db
-            .clear_provider_health_for_app(app_type_str)
-            .await
-            .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
+        // 4) 清除该应用的健康状态（关闭代理时重置队列状态）。
+        // Atomic provider transitions defer this irreversible delete until
+        // the target provider and Live config have both committed.
+        if reset_health_on_disable {
+            self.db
+                .clear_provider_health_for_app(app_type_str)
+                .await
+                .map_err(|e| format!("清除 {app_type_str} 健康状态失败: {e}"))?;
+        }
 
         // 5) 若无其它接管，更新旧标志，并停止代理服务
         // 检查是否还有其它 app 的 enabled = true
@@ -830,8 +891,26 @@ impl ProxyService {
                     );
                     true
                 });
-            if !desktop_uses_proxy && self.is_running().await {
-                let _ = self.stop().await;
+            if !desktop_uses_proxy {
+                if self.is_running().await {
+                    let _ = self.stop().await;
+                } else {
+                    // A crash can leave the persisted master switch on after the
+                    // listener disappeared. Reconcile it even when there is no
+                    // server object for stop() to consume.
+                    let mut global_config = self
+                        .db
+                        .get_global_proxy_config()
+                        .await
+                        .map_err(|e| format!("读取全局代理配置失败: {e}"))?;
+                    if global_config.proxy_enabled {
+                        global_config.proxy_enabled = false;
+                        self.db
+                            .update_global_proxy_config(global_config)
+                            .await
+                            .map_err(|e| format!("清除全局代理开关失败: {e}"))?;
+                    }
+                }
             }
         }
 
@@ -1619,20 +1698,26 @@ impl ProxyService {
             .await
             .map_err(|e| format!("获取 {app_type_str} Live 备份失败: {e}"))?;
         if let Some(backup) = backup {
-            let config: Value = serde_json::from_str(&backup.original_config)
-                .map_err(|e| format!("解析 {app_type_str} 备份失败: {e}"))?;
-
-            // 备份若是代理占位符（异常历史：上次 stop 失败导致 Live 留在了代理状态，
-            // 下次接管时又被错误地备份成"原始 Live"），不能直接用 — 否则 stop 后
-            // Live 永远卡在 127.0.0.1:15721。落到下面的 SSOT 兜底重建。
-            if Self::live_has_proxy_placeholder_for_app(app_type, &config) {
-                log::warn!(
-                    "{app_type_str} 备份本身已是代理占位符（异常历史状态），跳过备份，改走 SSOT 重建 Live"
-                );
-            } else {
-                self.write_live_config_for_app(app_type, &config)?;
-                log::info!("{app_type_str} Live 配置已从备份恢复");
-                return Ok(());
+            match serde_json::from_str::<Value>(&backup.original_config) {
+                Ok(config) => {
+                    // 备份若是代理占位符（异常历史：上次 stop 失败导致 Live 留在了代理状态，
+                    // 下次接管时又被错误地备份成"原始 Live"），不能直接用 — 否则 stop 后
+                    // Live 永远卡在 127.0.0.1:15721。落到下面的 SSOT 兜底重建。
+                    if Self::live_has_proxy_placeholder_for_app(app_type, &config) {
+                        log::warn!(
+                            "{app_type_str} 备份本身已是代理占位符（异常历史状态），跳过备份，改走 SSOT 重建 Live"
+                        );
+                    } else {
+                        self.write_live_config_for_app(app_type, &config)?;
+                        log::info!("{app_type_str} Live 配置已从备份恢复");
+                        return Ok(());
+                    }
+                }
+                Err(error) => {
+                    log::warn!(
+                        "{app_type_str} Live 备份无法解析（将改走 SSOT/占位符清理）: {error}"
+                    );
+                }
             }
         }
 
@@ -2819,6 +2904,22 @@ impl ProxyService {
     /// 检查服务器是否正在运行
     pub async fn is_running(&self) -> bool {
         self.server.read().await.is_some()
+    }
+
+    pub(crate) async fn reconcile_active_target_for_app(
+        &self,
+        app_type: &str,
+        target: Option<(&str, &str)>,
+    ) {
+        if let Some(server) = self.server.read().await.as_ref() {
+            if let Some((provider_id, provider_name)) = target {
+                server
+                    .set_active_target(app_type, provider_id, provider_name)
+                    .await;
+            } else {
+                server.clear_active_target(app_type).await;
+            }
+        }
     }
 
     /// 热更新熔断器配置

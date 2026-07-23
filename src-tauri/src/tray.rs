@@ -34,6 +34,14 @@ const TIER_LABEL_GROUPS: &[(&str, &[&str])] = &[
     ("l", GEMINI_FLASH_LITE_TIER_NAMES),
 ];
 
+fn official_provider_blocked_by_takeover(
+    app_type: &AppType,
+    takeover_active: bool,
+    is_official: bool,
+) -> bool {
+    !matches!(app_type, AppType::Codex) && takeover_active && is_official
+}
+
 /// 每个 app 分区的子菜单句柄，用于 usage 更新时就地改 label 而非整菜单重建。
 /// `create_tray_menu` 每次重建都会整表覆盖写入，保证句柄始终指向当前活跃菜单。
 static TRAY_SECTION_SUBMENUS: Lazy<
@@ -503,9 +511,6 @@ pub fn create_tray_menu(
         .item(&open_website_item)
         .separator();
 
-    // Pre-compute proxy running state (used to disable official providers in tray menu)
-    let is_proxy_running = futures::executor::block_on(app_state.proxy_service.is_running());
-
     // 每个应用类型折叠为子菜单，避免供应商过多时菜单过长
     for section in TRAY_SECTIONS.iter() {
         if !visible_apps.is_visible(&section.app_type) {
@@ -539,22 +544,32 @@ pub fn create_tray_menu(
             };
             let submenu_id = format!("submenu_{}", app_type_str);
 
-            // Check if this app is under proxy takeover (for disabling official providers)
-            let is_app_taken_over = is_proxy_running
-                && (futures::executor::block_on(app_state.db.get_live_backup(app_type_str))
+            // Listener liveness is not takeover ownership. A crash can leave the
+            // durable route enabled while the listener is down, and backup/live
+            // residue also remains owned until recovery completes.
+            let takeover_enabled =
+                futures::executor::block_on(app_state.db.get_proxy_config_for_app(app_type_str))
+                    .map(|config| config.enabled)
+                    .unwrap_or(false);
+            let has_takeover_residue =
+                futures::executor::block_on(app_state.db.get_live_backup(app_type_str))
                     .ok()
                     .flatten()
                     .is_some()
                     || app_state
                         .proxy_service
-                        .detect_takeover_in_live_config_for_app(&section.app_type));
+                        .detect_takeover_in_live_config_for_app(&section.app_type);
+            let is_app_taken_over = takeover_enabled || has_takeover_residue;
 
             let mut submenu_builder = SubmenuBuilder::with_id(app, &submenu_id, &submenu_label);
 
             for (id, provider) in sort_providers(&providers) {
                 let is_current = current_id == *id;
-                let is_official_blocked =
-                    is_app_taken_over && provider.category.as_deref() == Some("official");
+                let is_official_blocked = official_provider_blocked_by_takeover(
+                    &section.app_type,
+                    is_app_taken_over,
+                    provider.category.as_deref() == Some("official"),
+                );
                 let label = if is_official_blocked {
                     format!("{} \u{26D4}", &provider.name) // ⛔ emoji
                 } else {
@@ -858,7 +873,11 @@ pub(crate) async fn refresh_all_usage_in_tray(app: &tauri::AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_script_summary, format_subscription_summary, TrayTexts, TRAY_ID};
+    use super::{
+        format_script_summary, format_subscription_summary, official_provider_blocked_by_takeover,
+        TrayTexts, TRAY_ID,
+    };
+    use crate::app_config::AppType;
     use crate::provider::{UsageData, UsageResult};
     use crate::services::subscription::{
         CredentialStatus, QuotaTier, SubscriptionQuota, TIER_FIVE_HOUR, TIER_GEMINI_FLASH,
@@ -870,6 +889,30 @@ mod tests {
     fn tray_id_is_unique_to_app() {
         assert_eq!(TRAY_ID, "nexus-composer");
         assert_ne!(TRAY_ID, "main");
+    }
+
+    #[test]
+    fn tray_blocks_non_atomic_official_switches_during_takeover() {
+        assert!(official_provider_blocked_by_takeover(
+            &AppType::Claude,
+            true,
+            true
+        ));
+        assert!(official_provider_blocked_by_takeover(
+            &AppType::Gemini,
+            true,
+            true
+        ));
+        assert!(!official_provider_blocked_by_takeover(
+            &AppType::Codex,
+            true,
+            true
+        ));
+        assert!(!official_provider_blocked_by_takeover(
+            &AppType::Claude,
+            false,
+            true
+        ));
     }
 
     #[test]

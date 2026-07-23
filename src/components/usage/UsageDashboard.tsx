@@ -43,6 +43,7 @@ import { getLocaleFromLanguage } from "./format";
 import { getUsageRangePresetLabel, resolveUsageRange } from "@/lib/usageRange";
 import { UsageDateRangePicker } from "./UsageDateRangePicker";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { SessionSyncButton } from "./SessionSyncButton";
 
 const APP_FILTER_OPTIONS: AppTypeFilter[] = ["all", ...KNOWN_APP_TYPES];
 
@@ -261,6 +262,8 @@ export function UsageDashboard() {
           </Select>
 
           <div className="flex items-center gap-2 ml-auto lg:ml-0">
+            <SessionSyncButton />
+
             <Select
               value={String(refreshIntervalMs)}
               onValueChange={(v) => changeRefreshInterval(Number(v))}

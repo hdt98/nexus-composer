@@ -18,15 +18,17 @@ use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
-use crate::services::session_usage::{
-    get_sync_state, metadata_modified_nanos, update_sync_state, SessionSyncResult,
-};
+use crate::services::session_usage::{get_sync_state, metadata_modified_nanos, SessionSyncResult};
 use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
 use rust_decimal::Decimal;
+use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+const CODEX_CURSOR_GUARD_BYTES: u64 = 64;
+const CODEX_CURSOR_GUARD_VERSION: &str = "v2";
 
 /// 累计 token 用量（跟踪 total_token_usage 字段）
 #[derive(Debug, Clone, Default)]
@@ -51,11 +53,42 @@ impl DeltaTokens {
 }
 
 /// 单文件解析时的运行状态
+#[derive(Clone)]
 struct FileParseState {
     session_id: Option<String>,
     current_model: String,
     prev_total: Option<CumulativeTokens>,
     event_index: u32,
+}
+
+impl Default for FileParseState {
+    fn default() -> Self {
+        Self {
+            session_id: None,
+            current_model: "unknown".to_string(),
+            prev_total: None,
+            event_index: 0,
+        }
+    }
+}
+
+struct CodexSyncCheckpoint {
+    last_modified: i64,
+    byte_offset: i64,
+    line_offset: i64,
+    state: FileParseState,
+    cursor_guard: String,
+}
+
+#[derive(Debug, Default)]
+struct CodexFileSyncStats {
+    imported: u32,
+    skipped: u32,
+    errors: Vec<String>,
+    bytes_read: u64,
+    lines_parsed: u64,
+    start_byte: i64,
+    reset: bool,
 }
 
 /// 归一化 Codex 模型名
@@ -142,6 +175,229 @@ fn parse_cumulative_tokens(total_usage: &serde_json::Value) -> Option<Cumulative
     })
 }
 
+fn ensure_codex_sync_state_table(db: &Database) -> Result<(), AppError> {
+    let conn = lock_conn!(db.conn);
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS codex_session_sync_state_v2 (
+            file_path TEXT PRIMARY KEY,
+            last_modified INTEGER NOT NULL,
+            byte_offset INTEGER NOT NULL DEFAULT 0,
+            line_offset INTEGER NOT NULL DEFAULT 0,
+            session_id TEXT,
+            current_model TEXT NOT NULL DEFAULT 'unknown',
+            previous_input INTEGER,
+            previous_cached_input INTEGER,
+            previous_output INTEGER,
+            event_index INTEGER NOT NULL DEFAULT 0,
+            cursor_guard TEXT NOT NULL DEFAULT '',
+            last_synced_at INTEGER NOT NULL
+        );",
+    )
+    .map_err(|e| AppError::Database(format!("创建 Codex 增量同步状态表失败: {e}")))
+}
+
+fn load_codex_checkpoint(
+    db: &Database,
+    file_path: &str,
+) -> Result<Option<CodexSyncCheckpoint>, AppError> {
+    let conn = lock_conn!(db.conn);
+    let result = conn.query_row(
+        "SELECT last_modified, byte_offset, line_offset, session_id, current_model,
+                previous_input, previous_cached_input, previous_output, event_index, cursor_guard
+         FROM codex_session_sync_state_v2
+         WHERE file_path = ?1",
+        rusqlite::params![file_path],
+        |row| {
+            let previous_input = row.get::<_, Option<i64>>(5)?;
+            let previous_cached_input = row.get::<_, Option<i64>>(6)?;
+            let previous_output = row.get::<_, Option<i64>>(7)?;
+            let prev_total = match (previous_input, previous_cached_input, previous_output) {
+                (Some(input), Some(cached_input), Some(output)) => Some(CumulativeTokens {
+                    input: input.max(0) as u64,
+                    cached_input: cached_input.max(0) as u64,
+                    output: output.max(0) as u64,
+                }),
+                _ => None,
+            };
+            let event_index = row.get::<_, i64>(8)?.clamp(0, u32::MAX as i64) as u32;
+
+            Ok(CodexSyncCheckpoint {
+                last_modified: row.get(0)?,
+                byte_offset: row.get::<_, i64>(1)?.max(0),
+                line_offset: row.get::<_, i64>(2)?.max(0),
+                state: FileParseState {
+                    session_id: row.get(3)?,
+                    current_model: row.get(4)?,
+                    prev_total,
+                    event_index,
+                },
+                cursor_guard: row.get(9)?,
+            })
+        },
+    );
+
+    match result {
+        Ok(checkpoint) => Ok(Some(checkpoint)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(AppError::Database(format!(
+            "读取 Codex 增量同步状态失败: {e}"
+        ))),
+    }
+}
+
+fn save_codex_checkpoint(
+    db: &Database,
+    file_path: &str,
+    checkpoint: &CodexSyncCheckpoint,
+) -> Result<(), AppError> {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or(0);
+    let (previous_input, previous_cached_input, previous_output) =
+        match checkpoint.state.prev_total.as_ref() {
+            Some(total) => (
+                Some(total.input.min(i64::MAX as u64) as i64),
+                Some(total.cached_input.min(i64::MAX as u64) as i64),
+                Some(total.output.min(i64::MAX as u64) as i64),
+            ),
+            None => (None, None, None),
+        };
+
+    let mut conn = lock_conn!(db.conn);
+    let transaction = conn
+        .transaction()
+        .map_err(|e| AppError::Database(format!("开始 Codex 同步状态事务失败: {e}")))?;
+    transaction
+        .execute(
+            "INSERT INTO codex_session_sync_state_v2 (
+                file_path, last_modified, byte_offset, line_offset, session_id, current_model,
+                previous_input, previous_cached_input, previous_output, event_index,
+                cursor_guard, last_synced_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(file_path) DO UPDATE SET
+                last_modified = excluded.last_modified,
+                byte_offset = excluded.byte_offset,
+                line_offset = excluded.line_offset,
+                session_id = excluded.session_id,
+                current_model = excluded.current_model,
+                previous_input = excluded.previous_input,
+                previous_cached_input = excluded.previous_cached_input,
+                previous_output = excluded.previous_output,
+                event_index = excluded.event_index,
+                cursor_guard = excluded.cursor_guard,
+                last_synced_at = excluded.last_synced_at",
+            rusqlite::params![
+                file_path,
+                checkpoint.last_modified,
+                checkpoint.byte_offset,
+                checkpoint.line_offset,
+                checkpoint.state.session_id.as_deref(),
+                &checkpoint.state.current_model,
+                previous_input,
+                previous_cached_input,
+                previous_output,
+                checkpoint.state.event_index as i64,
+                &checkpoint.cursor_guard,
+                now,
+            ],
+        )
+        .map_err(|e| AppError::Database(format!("更新 Codex 增量同步状态失败: {e}")))?;
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO session_log_sync (
+                file_path, last_modified, last_line_offset, last_synced_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                file_path,
+                checkpoint.last_modified,
+                checkpoint.line_offset,
+                now
+            ],
+        )
+        .map_err(|e| AppError::Database(format!("更新兼容同步状态失败: {e}")))?;
+    transaction
+        .commit()
+        .map_err(|e| AppError::Database(format!("提交 Codex 同步状态事务失败: {e}")))
+}
+
+#[cfg(unix)]
+fn cursor_guard_metadata(metadata: &fs::Metadata) -> (String, String) {
+    use std::os::unix::fs::MetadataExt;
+
+    (
+        format!("{}:{}", metadata.dev(), metadata.ino()),
+        format!("{}:{}", metadata.ctime(), metadata.ctime_nsec()),
+    )
+}
+
+#[cfg(not(unix))]
+fn cursor_guard_metadata(metadata: &fs::Metadata) -> (String, String) {
+    let created = metadata
+        .created()
+        .ok()
+        .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    (
+        created.to_string(),
+        metadata_modified_nanos(metadata).to_string(),
+    )
+}
+
+fn cursor_guard(file: &mut fs::File, byte_offset: i64) -> Result<String, AppError> {
+    let byte_offset = byte_offset.max(0) as u64;
+    let metadata = file
+        .metadata()
+        .map_err(|e| AppError::Config(format!("无法读取 Codex 同步校验元数据: {e}")))?;
+    let (file_identity, change_marker) = cursor_guard_metadata(&metadata);
+    let mut hasher = Sha256::new();
+    hasher.update(byte_offset.to_le_bytes());
+
+    if byte_offset > 0 {
+        let guard_len = byte_offset.min(CODEX_CURSOR_GUARD_BYTES);
+        let latest_start = byte_offset - guard_len;
+        let middle_start = (byte_offset / 2)
+            .saturating_sub(guard_len / 2)
+            .min(latest_start);
+        let mut sample_starts = vec![0, middle_start, latest_start];
+        sample_starts.sort_unstable();
+        sample_starts.dedup();
+
+        let mut bytes = vec![0u8; guard_len as usize];
+        for start in sample_starts {
+            file.seek(SeekFrom::Start(start))
+                .map_err(|e| AppError::Config(format!("无法定位 Codex 同步校验位置: {e}")))?;
+            file.read_exact(&mut bytes)
+                .map_err(|e| AppError::Config(format!("无法读取 Codex 同步校验数据: {e}")))?;
+            hasher.update(start.to_le_bytes());
+            hasher.update(&bytes);
+        }
+    }
+
+    // Persist only metadata and a digest, never raw prompt or response bytes.
+    Ok(format!(
+        "{CODEX_CURSOR_GUARD_VERSION}|{file_identity}|{change_marker}|{:x}",
+        hasher.finalize()
+    ))
+}
+
+fn cursor_guard_matches(stored: &str, current: &str, allow_changed_marker: bool) -> bool {
+    let stored_parts: Vec<&str> = stored.split('|').collect();
+    let current_parts: Vec<&str> = current.split('|').collect();
+    if stored_parts.len() != 4
+        || current_parts.len() != 4
+        || stored_parts[0] != CODEX_CURSOR_GUARD_VERSION
+        || current_parts[0] != CODEX_CURSOR_GUARD_VERSION
+    {
+        return false;
+    }
+
+    stored_parts[1] == current_parts[1]
+        && stored_parts[3] == current_parts[3]
+        && (allow_changed_marker || stored_parts[2] == current_parts[2])
+}
+
 /// 同步 Codex 使用数据（从 JSONL 会话日志）
 pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let codex_dir = get_codex_config_dir();
@@ -159,11 +415,23 @@ pub fn sync_codex_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
         return Ok(result);
     }
 
+    ensure_codex_sync_state_table(db)?;
+
     for file_path in &files {
-        match sync_single_codex_file(db, file_path) {
-            Ok((imported, skipped)) => {
-                result.imported += imported;
-                result.skipped += skipped;
+        match sync_single_codex_file_with_stats(db, file_path) {
+            Ok(stats) => {
+                if stats.bytes_read > 0 || stats.reset {
+                    log::debug!(
+                        "[CODEX-SYNC] incremental file pass: start_byte={}, bytes_read={}, parsed_lines={}, reset={}",
+                        stats.start_byte,
+                        stats.bytes_read,
+                        stats.lines_parsed,
+                        stats.reset
+                    );
+                }
+                result.imported += stats.imported;
+                result.skipped += stats.skipped;
+                result.errors.extend(stats.errors);
             }
             Err(e) => {
                 let msg = format!("Codex 会话文件解析失败 {}: {e}", file_path.display());
@@ -228,68 +496,130 @@ fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>, depth: u32, max
     }
 }
 
-/// 同步单个 Codex JSONL 文件，返回 (imported, skipped)
-fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32), AppError> {
+/// Synchronize one Codex JSONL file and return (imported, skipped, errors).
+#[cfg(test)]
+fn sync_single_codex_file(
+    db: &Database,
+    file_path: &Path,
+) -> Result<(u32, u32, Vec<String>), AppError> {
+    ensure_codex_sync_state_table(db)?;
+    let stats = sync_single_codex_file_with_stats(db, file_path)?;
+    Ok((stats.imported, stats.skipped, stats.errors))
+}
+
+fn sync_single_codex_file_with_stats(
+    db: &Database,
+    file_path: &Path,
+) -> Result<CodexFileSyncStats, AppError> {
     let file_path_str = file_path.to_string_lossy().to_string();
 
-    // 获取文件元数据
-    let metadata = fs::metadata(file_path)
+    let mut file =
+        fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
+    let metadata = file
+        .metadata()
         .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
     let file_modified = metadata_modified_nanos(&metadata);
+    let file_len = metadata.len().min(i64::MAX as u64) as i64;
+    let mut stats = CodexFileSyncStats::default();
 
-    // 检查同步状态
-    let (last_modified, last_offset) = get_sync_state(db, &file_path_str)?;
-
-    // 文件未变化则跳过
-    if file_modified <= last_modified {
-        return Ok((0, 0));
-    }
-
-    // 打开文件逐行解析
-    let file =
-        fs::File::open(file_path).map_err(|e| AppError::Config(format!("无法打开文件: {e}")))?;
-    let reader = BufReader::new(file);
-
-    let mut state = FileParseState {
-        session_id: None,
-        current_model: "unknown".to_string(),
-        prev_total: None,
-        event_index: 0,
-    };
-
-    let mut line_offset: i64 = 0;
-    let mut imported: u32 = 0;
-    let mut skipped: u32 = 0;
-
-    for line_result in reader.lines() {
-        line_offset += 1;
-
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => continue, // 容忍不完整的最后一行
-        };
-
-        if line.trim().is_empty() {
-            continue;
+    let checkpoint = load_codex_checkpoint(db, &file_path_str)?;
+    let (mut state, mut line_offset, start_byte) = match checkpoint {
+        Some(mut checkpoint) => {
+            let file_grew = checkpoint.byte_offset < file_len;
+            let can_resume = checkpoint.byte_offset <= file_len
+                && cursor_guard_matches(
+                    &checkpoint.cursor_guard,
+                    &cursor_guard(&mut file, checkpoint.byte_offset)?,
+                    file_grew,
+                );
+            if can_resume {
+                if checkpoint.byte_offset == file_len {
+                    if checkpoint.last_modified != file_modified {
+                        checkpoint.last_modified = file_modified;
+                        checkpoint.cursor_guard = cursor_guard(&mut file, checkpoint.byte_offset)?;
+                        save_codex_checkpoint(db, &file_path_str, &checkpoint)?;
+                    }
+                    stats.start_byte = checkpoint.byte_offset;
+                    return Ok(stats);
+                }
+                (
+                    checkpoint.state,
+                    checkpoint.line_offset,
+                    checkpoint.byte_offset,
+                )
+            } else {
+                stats.reset = true;
+                (FileParseState::default(), 0, 0)
+            }
         }
+        None => {
+            // Existing installations only have the legacy line cursor. Keep unchanged
+            // files cold; the first changed pass safely rebuilds parser state from byte
+            // zero and stable request IDs deduplicate already imported records.
+            let (legacy_modified, _) = get_sync_state(db, &file_path_str)?;
+            if legacy_modified > 0 && file_modified <= legacy_modified {
+                return Ok(stats);
+            }
+            (FileParseState::default(), 0, 0)
+        }
+    };
+    stats.start_byte = start_byte;
 
-        // 快速过滤：在 JSON 反序列化前跳过无关行
+    file.seek(SeekFrom::Start(start_byte as u64))
+        .map_err(|e| AppError::Config(format!("无法定位 Codex 增量同步位置: {e}")))?;
+    let mut reader = BufReader::new(file);
+    let mut current_byte = start_byte;
+    let mut line_bytes = Vec::new();
+
+    loop {
+        line_bytes.clear();
+        let bytes_read = reader
+            .read_until(b'\n', &mut line_bytes)
+            .map_err(|e| AppError::Config(format!("无法读取 Codex 会话文件: {e}")))?;
+        if bytes_read == 0 {
+            break;
+        }
+        stats.bytes_read += bytes_read as u64;
+
+        let next_byte = current_byte.saturating_add(bytes_read as i64);
+        let has_newline = line_bytes.last() == Some(&b'\n');
+        let json_bytes = if has_newline {
+            &line_bytes[..line_bytes.len() - 1]
+        } else {
+            &line_bytes[..]
+        };
+        let line = String::from_utf8_lossy(json_bytes);
+
         let is_event_msg = line.contains("\"event_msg\"");
         let is_turn_context = line.contains("\"turn_context\"");
         let is_session_meta = line.contains("\"session_meta\"");
+        let is_relevant = is_event_msg || is_turn_context || is_session_meta;
+        let is_token_event = !is_event_msg || line.contains("\"token_count\"");
 
-        if !is_event_msg && !is_turn_context && !is_session_meta {
-            continue;
-        }
-        if is_event_msg && !line.contains("\"token_count\"") {
-            continue;
-        }
-
-        let value: serde_json::Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(_) => continue,
+        let value = if !has_newline || (is_relevant && is_token_event) {
+            match serde_json::from_slice::<serde_json::Value>(json_bytes) {
+                Ok(value) => {
+                    stats.lines_parsed += 1;
+                    Some(value)
+                }
+                Err(_) if !has_newline => {
+                    // The writer may still be appending this JSON value. Leave both
+                    // byte and line checkpoints before the fragment so it is retried.
+                    break;
+                }
+                Err(_) => None,
+            }
+        } else {
+            None
         };
 
+        current_byte = next_byte;
+        line_offset += 1;
+
+        let value = match value {
+            Some(value) if is_relevant && is_token_event => value,
+            _ => continue,
+        };
         let event_type = match value.get("type").and_then(|t| t.as_str()) {
             Some(t) => t,
             None => continue,
@@ -385,11 +715,6 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
 
                 state.event_index += 1;
 
-                // 跳过已处理的行（但仍需解析以恢复状态）
-                if line_offset <= last_offset {
-                    continue;
-                }
-
                 // 生成唯一 request_id
                 let session_id_str = state.session_id.as_deref().unwrap_or("unknown");
                 let request_id = format!("codex_session:{}:{}", session_id_str, state.event_index);
@@ -408,11 +733,14 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
                     state.session_id.as_deref(),
                     timestamp.as_deref(),
                 ) {
-                    Ok(true) => imported += 1,
-                    Ok(false) => skipped += 1,
+                    Ok(true) => stats.imported += 1,
+                    Ok(false) => stats.skipped += 1,
                     Err(e) => {
-                        log::warn!("[CODEX-SYNC] 插入失败 ({}): {e}", request_id);
-                        skipped += 1;
+                        let error =
+                            format!("{}: insert failed ({request_id}): {e}", file_path.display());
+                        log::warn!("[CODEX-SYNC] {error}");
+                        stats.errors.push(error);
+                        stats.skipped += 1;
                     }
                 }
             }
@@ -420,10 +748,27 @@ fn sync_single_codex_file(db: &Database, file_path: &Path) -> Result<(u32, u32),
         }
     }
 
-    // 更新同步状态
-    update_sync_state(db, &file_path_str, file_modified, line_offset)?;
+    if stats.errors.is_empty() {
+        let final_metadata = reader
+            .get_ref()
+            .metadata()
+            .map_err(|e| AppError::Config(format!("无法读取 Codex 文件最终状态: {e}")))?;
+        let final_modified = metadata_modified_nanos(&final_metadata);
+        let guard = cursor_guard(reader.get_mut(), current_byte)?;
+        save_codex_checkpoint(
+            db,
+            &file_path_str,
+            &CodexSyncCheckpoint {
+                last_modified: final_modified,
+                byte_offset: current_byte,
+                line_offset,
+                state,
+                cursor_guard: guard,
+            },
+        )?;
+    }
 
-    Ok((imported, skipped))
+    Ok(stats)
 }
 
 /// 插入单条 Codex 会话记录到 proxy_request_logs
@@ -710,6 +1055,502 @@ mod tests {
         })?;
         assert_eq!(count, 1);
 
+        Ok(())
+    }
+
+    #[test]
+    fn failed_codex_insert_retries_before_advancing_cursor() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "CREATE TRIGGER fail_codex_session_record
+                 BEFORE INSERT ON proxy_request_logs
+                 WHEN NEW.request_id = 'codex_session:retry-session:1'
+                 BEGIN
+                   SELECT RAISE(FAIL, 'forced insert failure');
+                 END;",
+            )?;
+        }
+
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-retry-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("retry.jsonl");
+        let lines = [
+            r#"{"type":"session_meta","payload":{"session_id":"retry-session"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+        ];
+        fs::write(&file, lines.join("\n")).unwrap();
+
+        let (_, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(errors.len(), 1);
+        assert_eq!(get_sync_state(&db, &file.to_string_lossy())?, (0, 0));
+        assert!(
+            load_codex_checkpoint(&db, &file.to_string_lossy())?.is_none(),
+            "a failed insert must not advance the byte/parser checkpoint"
+        );
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch("DROP TRIGGER fail_codex_session_record;")?;
+        }
+
+        let (imported, _, errors) = sync_single_codex_file(&db, &file)?;
+        assert_eq!(imported, 1);
+        assert!(errors.is_empty());
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?,
+            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 3)
+        );
+        assert_eq!(
+            load_codex_checkpoint(&db, &file.to_string_lossy())?
+                .expect("checkpoint after successful retry")
+                .byte_offset,
+            fs::metadata(&file).unwrap().len() as i64
+        );
+        assert_eq!(sync_single_codex_file(&db, &file)?.0, 0);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn appended_codex_sync_reads_only_the_new_tail() -> Result<(), AppError> {
+        use std::io::Write;
+
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-append-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("append.jsonl");
+        let initial = [
+            r#"{"type":"session_meta","payload":{"session_id":"append-session"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, &initial).unwrap();
+
+        let first = sync_single_codex_file_with_stats(&db, &file)?;
+        assert_eq!(first.start_byte, 0);
+        assert_eq!(first.bytes_read, initial.len() as u64);
+        assert_eq!(first.imported, 1);
+
+        let old_len = fs::metadata(&file).unwrap().len();
+        let appended = [
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:01:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":3}}}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(appended.as_bytes())
+            .unwrap();
+        {
+            // Simulate a filesystem whose timestamp did not advance: growth must
+            // still be authoritative and force a tail read.
+            let appended_mtime = metadata_modified_nanos(&fs::metadata(&file).unwrap());
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE codex_session_sync_state_v2
+                 SET last_modified = ?1
+                 WHERE file_path = ?2",
+                rusqlite::params![appended_mtime, file.to_string_lossy()],
+            )?;
+        }
+
+        let second = sync_single_codex_file_with_stats(&db, &file)?;
+        assert_eq!(second.start_byte, old_len as i64);
+        assert_eq!(second.bytes_read, appended.len() as u64);
+        assert_eq!(second.imported, 1);
+        assert!(!second.reset);
+
+        let conn = lock_conn!(db.conn);
+        let second_delta: (i64, i64) = conn.query_row(
+            "SELECT input_tokens, output_tokens
+             FROM proxy_request_logs
+             WHERE request_id = 'codex_session:append-session:2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(second_delta, (3, 2));
+        drop(conn);
+
+        let unchanged = sync_single_codex_file_with_stats(&db, &file)?;
+        assert_eq!(
+            unchanged.start_byte,
+            fs::metadata(&file).unwrap().len() as i64
+        );
+        assert_eq!(unchanged.bytes_read, 0);
+        assert_eq!(unchanged.lines_parsed, 0);
+        assert_eq!(unchanged.imported, 0);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_legacy_cursor_does_not_trigger_upgrade_rescan() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-legacy-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("legacy.jsonl");
+        let content = [
+            r#"{"type":"session_meta","payload":{"session_id":"legacy"}}"#,
+            r#"{"type":"event_msg","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":3,"output_tokens":1}}}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, content).unwrap();
+        let modified = metadata_modified_nanos(&fs::metadata(&file).unwrap());
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO session_log_sync (
+                    file_path, last_modified, last_line_offset, last_synced_at
+                 ) VALUES (?1, ?2, 2, 0)",
+                rusqlite::params![file.to_string_lossy(), modified],
+            )?;
+        }
+
+        let stats = sync_single_codex_file_with_stats(&db, &file)?;
+        assert_eq!(stats.bytes_read, 0);
+        assert_eq!(stats.lines_parsed, 0);
+        assert_eq!(stats.imported, 0);
+        assert!(
+            load_codex_checkpoint(&db, &file.to_string_lossy())?.is_none(),
+            "unchanged legacy files should remain cold until their first append"
+        );
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn truncated_codex_file_resets_parser_checkpoint() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp = std::env::temp_dir().join(format!(
+            "nexus-codex-sync-truncate-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("truncate.jsonl");
+        let initial = [
+            r#"{"type":"session_meta","payload":{"session_id":"old-session-with-a-long-name"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":20,"output_tokens":10}}}}"#,
+            r#"{"type":"irrelevant","padding":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, initial).unwrap();
+        assert_eq!(sync_single_codex_file_with_stats(&db, &file)?.imported, 1);
+
+        let replacement = [
+            r#"{"type":"session_meta","payload":{"session_id":"new"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:02:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":4,"output_tokens":2}}}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, replacement.as_bytes()).unwrap();
+
+        let reset = sync_single_codex_file_with_stats(&db, &file)?;
+        assert!(reset.reset);
+        assert_eq!(reset.start_byte, 0);
+        assert_eq!(reset.bytes_read, replacement.len() as u64);
+        assert_eq!(reset.imported, 1);
+
+        let conn = lock_conn!(db.conn);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs
+             WHERE request_id = 'codex_session:new:1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn replaced_codex_file_with_larger_tail_resets_on_guard_mismatch() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-rotate-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("rotate.jsonl");
+        let initial = [
+            r#"{"type":"session_meta","payload":{"session_id":"old"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, initial).unwrap();
+        assert_eq!(sync_single_codex_file_with_stats(&db, &file)?.imported, 1);
+
+        let replacement = [
+            r#"{"type":"session_meta","payload":{"session_id":"rotated-session"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:03:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":8,"output_tokens":4}}}}"#,
+            r#"{"type":"irrelevant","padding":"make-the-replacement-longer-than-the-original-checkpoint"}"#,
+        ]
+        .join("\n")
+            + "\n";
+        assert!(replacement.len() > fs::metadata(&file).unwrap().len() as usize);
+        fs::write(&file, replacement.as_bytes()).unwrap();
+
+        let reset = sync_single_codex_file_with_stats(&db, &file)?;
+        assert!(reset.reset);
+        assert_eq!(reset.start_byte, 0);
+        assert_eq!(reset.imported, 1);
+
+        let conn = lock_conn!(db.conn);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs
+             WHERE request_id = 'codex_session:rotated-session:1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn equal_size_equal_mtime_codex_replacement_resets_checkpoint() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp = std::env::temp_dir().join(format!(
+            "nexus-codex-sync-equal-metadata-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("equal-metadata.jsonl");
+        let initial = [
+            r#"{"type":"session_meta","payload":{"session_id":"old-a"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+            r#"{"type":"irrelevant","padding":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}"#,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, initial.as_bytes()).unwrap();
+        assert_eq!(sync_single_codex_file_with_stats(&db, &file)?.imported, 1);
+
+        let replacement = [
+            r#"{"type":"session_meta","payload":{"session_id":"new-b"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":8,"output_tokens":4}}}}"#,
+            r#"{"type":"irrelevant","padding":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(replacement.len(), initial.len());
+        fs::write(&file, replacement.as_bytes()).unwrap();
+        {
+            // Model a replacement whose mtime was preserved: from the syncer's
+            // perspective, the current metadata exactly matches the checkpoint.
+            let replacement_mtime = metadata_modified_nanos(&fs::metadata(&file).unwrap());
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE codex_session_sync_state_v2
+                 SET last_modified = ?1
+                 WHERE file_path = ?2",
+                rusqlite::params![replacement_mtime, file.to_string_lossy()],
+            )?;
+        }
+
+        let reset = sync_single_codex_file_with_stats(&db, &file)?;
+        assert!(reset.reset);
+        assert_eq!(reset.start_byte, 0);
+        assert_eq!(reset.imported, 1);
+
+        let conn = lock_conn!(db.conn);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs
+             WHERE request_id = 'codex_session:new-b:1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn equal_metadata_codex_replacement_with_shared_suffix_resets_checkpoint(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp = std::env::temp_dir().join(format!(
+            "nexus-codex-sync-shared-suffix-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("shared-suffix.jsonl");
+        let shared_suffix = r#"{"type":"irrelevant","padding":"shared-shared-shared-shared-shared-shared-shared-shared-shared-shared-shared-shared"}"#;
+        let initial = [
+            r#"{"type":"session_meta","payload":{"session_id":"old-c"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":3,"output_tokens":1}}}}"#,
+            shared_suffix,
+        ]
+        .join("\n")
+            + "\n";
+        fs::write(&file, initial.as_bytes()).unwrap();
+        assert_eq!(sync_single_codex_file_with_stats(&db, &file)?.imported, 1);
+        let original_guard = load_codex_checkpoint(&db, &file.to_string_lossy())?
+            .expect("checkpoint after initial shared-suffix import")
+            .cursor_guard;
+
+        let replacement = [
+            r#"{"type":"session_meta","payload":{"session_id":"new-d"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":9,"output_tokens":5}}}}"#,
+            shared_suffix,
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(replacement.len(), initial.len());
+        assert_eq!(
+            &replacement.as_bytes()[replacement.len() - CODEX_CURSOR_GUARD_BYTES as usize..],
+            &initial.as_bytes()[initial.len() - CODEX_CURSOR_GUARD_BYTES as usize..],
+            "the adversarial replacement must preserve the old suffix guard"
+        );
+        fs::write(&file, replacement.as_bytes()).unwrap();
+        {
+            let replacement_mtime = metadata_modified_nanos(&fs::metadata(&file).unwrap());
+            let mut replacement_file = fs::File::open(&file).unwrap();
+            let replacement_guard = cursor_guard(&mut replacement_file, replacement.len() as i64)?;
+            let original_digest = original_guard
+                .rsplit('|')
+                .next()
+                .expect("versioned original guard digest");
+            let replacement_parts: Vec<&str> = replacement_guard.split('|').collect();
+            assert_eq!(replacement_parts.len(), 4);
+            assert_ne!(
+                replacement_parts[3], original_digest,
+                "start/middle anchors must distinguish content with a shared suffix"
+            );
+            let metadata_colliding_guard = format!(
+                "{}|{}|{}|{}",
+                replacement_parts[0], replacement_parts[1], replacement_parts[2], original_digest
+            );
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE codex_session_sync_state_v2
+                 SET last_modified = ?1, cursor_guard = ?2
+                 WHERE file_path = ?3",
+                rusqlite::params![
+                    replacement_mtime,
+                    metadata_colliding_guard,
+                    file.to_string_lossy()
+                ],
+            )?;
+        }
+
+        let reset = sync_single_codex_file_with_stats(&db, &file)?;
+        assert!(reset.reset);
+        assert_eq!(reset.start_byte, 0);
+        assert_eq!(reset.imported, 1);
+
+        let conn = lock_conn!(db.conn);
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs
+             WHERE request_id = 'codex_session:new-d:1'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn valid_unterminated_codex_json_is_checkpointed_once() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        ensure_codex_sync_state_table(&db)?;
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-no-eol-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("no-eol.jsonl");
+        let content = [
+            r#"{"type":"session_meta","payload":{"session_id":"no-eol"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:04:00Z","payload":{"type":"token_count","info":{"model":"glm-5.2","total_token_usage":{"input_tokens":3,"output_tokens":1}}}}"#,
+        ]
+        .join("\n");
+        fs::write(&file, content.as_bytes()).unwrap();
+
+        let first = sync_single_codex_file_with_stats(&db, &file)?;
+        assert_eq!(first.imported, 1);
+        assert_eq!(first.bytes_read, content.len() as u64);
+        assert_eq!(
+            load_codex_checkpoint(&db, &file.to_string_lossy())?
+                .expect("valid EOF record should be checkpointed")
+                .byte_offset,
+            content.len() as i64
+        );
+
+        let second = sync_single_codex_file_with_stats(&db, &file)?;
+        assert_eq!(second.bytes_read, 0);
+        assert_eq!(second.imported, 0);
+
+        fs::remove_dir_all(&tmp).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn incomplete_codex_tail_is_retried_after_append() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let tmp =
+            std::env::temp_dir().join(format!("nexus-codex-sync-tail-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("partial.jsonl");
+        let complete_lines = [
+            r#"{"type":"session_meta","payload":{"session_id":"partial-session"}}"#,
+            r#"{"type":"turn_context","payload":{"model":"glm-5.2"}}"#,
+            r#"{"type":"event_msg","timestamp":"2026-07-18T00:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2,"output_tokens":1}}}}"#,
+        ]
+        .join("\n");
+        let partial = r#"{"type":"event_msg","timestamp":"2026-07-18T00:01:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5"#;
+        fs::write(&file, format!("{complete_lines}\n{partial}")).unwrap();
+
+        assert_eq!(sync_single_codex_file(&db, &file)?.0, 1);
+        assert_eq!(
+            get_sync_state(&db, &file.to_string_lossy())?.1,
+            3,
+            "the cursor must stay before an unterminated JSON fragment"
+        );
+
+        use std::io::Write;
+        let mut output = fs::OpenOptions::new().append(true).open(&file).unwrap();
+        output.write_all(br#","output_tokens":2}}}}"#).unwrap();
+        output.write_all(b"\n").unwrap();
+
+        assert_eq!(sync_single_codex_file(&db, &file)?.0, 1);
+
+        let conn = lock_conn!(db.conn);
+        let second_delta: (i64, i64) = conn.query_row(
+            "SELECT input_tokens, output_tokens
+             FROM proxy_request_logs
+             WHERE request_id = 'codex_session:partial-session:2'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(second_delta, (3, 1));
+
+        fs::remove_dir_all(&tmp).ok();
         Ok(())
     }
 
