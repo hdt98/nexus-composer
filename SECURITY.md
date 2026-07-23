@@ -1,15 +1,7 @@
 # Security Policy
 
-## Reporting a Vulnerability
+This repository is historical and no longer accepts vulnerability reports.
 
-Please do NOT report security vulnerabilities through public GitHub issues.
-
-Instead, report them through
-[GitHub Security Advisories](https://github.com/hdt98/nexus-composer/security/advisories/new).
-
-Include:
-- A description of the vulnerability
-- Steps to reproduce
-- Potential impact
-
-We will acknowledge within 48 hours and work on a fix.
+Follow the authoritative repository's [private reporting instructions](https://github.com/onenexus-team/nexus-composer/blob/main/SECURITY.md).
+Do not disclose vulnerability details, credentials, private endpoints, or
+personal data in a public issue or pull request.
