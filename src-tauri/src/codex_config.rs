@@ -339,6 +339,92 @@ pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// ChatGPT 登录的新鲜度指纹：`(account_id, last_refresh)`。
+///
+/// 仅当 auth 真的携带 ChatGPT 登录（`tokens.access_token` 非空）时返回
+/// `Some`；API key 形态的 auth 返回 `None`，避免把普通密钥切换误判成登录回退。
+fn codex_chatgpt_login_stamp(auth: &Value) -> Option<(Option<String>, Option<String>)> {
+    let tokens = auth.get("tokens")?.as_object()?;
+    let has_access_token = tokens
+        .get("access_token")
+        .and_then(|value| value.as_str())
+        .is_some_and(|token| !token.trim().is_empty());
+    if !has_access_token {
+        return None;
+    }
+
+    let account_id = tokens
+        .get("account_id")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    let last_refresh = auth
+        .get("last_refresh")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|stamp| !stamp.is_empty())
+        .map(str::to_string);
+
+    Some((account_id, last_refresh))
+}
+
+/// 判断把 `stored` 官方登录快照写回 live `auth.json` 是否会造成凭据回退。
+///
+/// `preserveCodexOfficialAuthOnSwitch` 会在切回官方供应商时用数据库里的
+/// 快照覆盖 live `auth.json`。快照是**切走那一刻**抓取的，可能已经过期数天：
+/// 用户重新订阅 / 换 workspace 后重新登录，live 里是新凭据，而快照仍指向
+/// 旧（可能已停用）的 workspace。直接覆盖会把 Codex 打回旧账号，官方端返回
+/// `402 deactivated_workspace`，Codex 加载不到 workspace 托管策略而白屏。
+///
+/// 只在“双方都是 ChatGPT 登录”时介入，两种情况判为回退：
+/// - 账号不同：快照属于另一个账号，覆盖等于把用户踢回旧账号；
+/// - live 的 `last_refresh` 比快照更新：快照是旧的。
+fn codex_stored_auth_regresses_live(stored: &Value, live: &Value) -> bool {
+    let (Some((live_account, live_refresh)), Some((stored_account, stored_refresh))) = (
+        codex_chatgpt_login_stamp(live),
+        codex_chatgpt_login_stamp(stored),
+    ) else {
+        return false;
+    };
+
+    if let (Some(live_account), Some(stored_account)) = (&live_account, &stored_account) {
+        if live_account != stored_account {
+            return true;
+        }
+    }
+
+    match (live_refresh, stored_refresh) {
+        (Some(live_refresh), Some(stored_refresh)) => {
+            match (
+                chrono::DateTime::parse_from_rfc3339(&live_refresh),
+                chrono::DateTime::parse_from_rfc3339(&stored_refresh),
+            ) {
+                (Ok(live_at), Ok(stored_at)) => live_at > stored_at,
+                // 时间戳解析不了就退回字符串比较：两边都是 Codex 写的
+                // RFC3339 UTC 串，字典序与时序一致。
+                _ => live_refresh > stored_refresh,
+            }
+        }
+        // live 有时间戳而快照没有：快照形态更旧，保守保留 live。
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+/// 读取磁盘上的 live `auth.json` 并判断快照回写是否会造成登录回退。
+/// 读不到 live（首次写入 / 文件损坏）时放行，保持原有行为。
+pub(crate) fn codex_stored_auth_regresses_live_on_disk(stored: &Value) -> bool {
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return false;
+    }
+    let Ok(live) = read_json_file::<Value>(&auth_path) else {
+        return false;
+    };
+    codex_stored_auth_regresses_live(stored, &live)
+}
+
 pub fn codex_auth_has_login_material(auth: &Value) -> bool {
     let Some(obj) = auth.as_object() else {
         return false;
@@ -1587,7 +1673,9 @@ pub fn write_codex_live_for_provider(
         };
     let config_text = unified_official_config.as_deref().or(config_text);
 
-    let should_write_auth = (category == Some("official") && codex_auth_has_login_material(auth))
+    let should_write_auth = (category == Some("official")
+        && codex_auth_has_login_material(auth)
+        && !codex_stored_auth_regresses_live_on_disk(auth))
         || (category != Some("official")
             && !crate::settings::preserve_codex_official_auth_on_switch());
 
@@ -1795,6 +1883,89 @@ pub fn remove_codex_toml_base_url_if(toml_str: &str, predicate: impl Fn(&str) ->
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// 构造一个 ChatGPT 登录形态的 auth。
+    fn chatgpt_auth(account_id: &str, last_refresh: &str) -> Value {
+        json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": null,
+            "last_refresh": last_refresh,
+            "tokens": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "id_token": "id",
+                "account_id": account_id,
+            }
+        })
+    }
+
+    #[test]
+    fn stale_official_snapshot_does_not_overwrite_newer_live_login() {
+        // 复现线上事故：快照是 7/17 抓的（workspace 已停用），
+        // 用户当天重新订阅并登录，live 是 7/24 的新凭据。
+        let stored = chatgpt_auth("acct-old", "2026-07-17T11:31:13.290203Z");
+        let live = chatgpt_auth("acct-old", "2026-07-24T02:10:00.000000Z");
+
+        assert!(
+            codex_stored_auth_regresses_live(&stored, &live),
+            "older snapshot must not clobber a newer live ChatGPT login"
+        );
+    }
+
+    #[test]
+    fn snapshot_from_another_account_does_not_overwrite_live_login() {
+        // 换订阅通常同时换 workspace/账号：即使时间戳更新也不能覆盖。
+        let stored = chatgpt_auth("acct-old", "2026-07-30T00:00:00.000000Z");
+        let live = chatgpt_auth("acct-new", "2026-07-24T02:10:00.000000Z");
+
+        assert!(
+            codex_stored_auth_regresses_live(&stored, &live),
+            "a snapshot for a different account must not clobber the live login"
+        );
+    }
+
+    #[test]
+    fn fresh_official_snapshot_still_restores_over_older_live_login() {
+        // 正常路径不能被破坏：快照更新时仍要恢复官方登录。
+        let stored = chatgpt_auth("acct-same", "2026-07-24T09:00:00.000000Z");
+        let live = chatgpt_auth("acct-same", "2026-07-24T02:10:00.000000Z");
+
+        assert!(
+            !codex_stored_auth_regresses_live(&stored, &live),
+            "a newer snapshot must still be restored"
+        );
+    }
+
+    #[test]
+    fn api_key_auth_is_not_treated_as_login_regression() {
+        // live 是 API key 形态（第三方供应商接管中）时不介入。
+        let stored = chatgpt_auth("acct-same", "2026-07-17T11:31:13.290203Z");
+        let live = json!({ "auth_mode": "apikey", "OPENAI_API_KEY": "sk-live", "tokens": null });
+
+        assert!(
+            !codex_stored_auth_regresses_live(&stored, &live),
+            "restoring a ChatGPT login over an API-key live auth is the point of the feature"
+        );
+    }
+
+    #[test]
+    fn missing_live_timestamp_prefers_the_live_login() {
+        let stored = chatgpt_auth("acct-same", "2026-07-17T11:31:13.290203Z");
+        let mut live = chatgpt_auth("acct-same", "2026-07-24T02:10:00.000000Z");
+        live.as_object_mut().unwrap().remove("last_refresh");
+
+        // live 无时间戳、快照有：无法证明 live 更旧，保持既有恢复行为。
+        assert!(!codex_stored_auth_regresses_live(&stored, &live));
+
+        // 反过来 live 有、快照没有：快照形态更旧，保留 live。
+        let mut stored_no_stamp = chatgpt_auth("acct-same", "2026-07-17T11:31:13.290203Z");
+        stored_no_stamp
+            .as_object_mut()
+            .unwrap()
+            .remove("last_refresh");
+        let live = chatgpt_auth("acct-same", "2026-07-24T02:10:00.000000Z");
+        assert!(codex_stored_auth_regresses_live(&stored_no_stamp, &live));
+    }
 
     #[test]
     fn unified_session_bucket_injects_for_empty_official_config() {
