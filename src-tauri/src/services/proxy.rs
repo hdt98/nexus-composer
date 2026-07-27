@@ -1305,10 +1305,11 @@ impl ProxyService {
         }
 
         // Codex
-        if let Ok(config) = self.read_codex_live() {
+        if let Ok(mut config) = self.read_codex_live() {
             if Self::live_has_proxy_placeholder_for_app(&AppType::Codex, &config) {
                 log::warn!("codex Live 已被代理接管，不备份（避免把代理配置固化进备份槽）；下次 stop 会从 SSOT 重建 Live");
             } else {
+                self.normalize_codex_live_backup_route(&mut config)?;
                 let json_str = serde_json::to_string(&config)
                     .map_err(|e| format!("序列化 Codex 配置失败: {e}"))?;
                 self.db
@@ -1338,7 +1339,7 @@ impl ProxyService {
 
     /// 备份指定应用的 Live 配置（严格模式：目标配置不存在则返回错误）
     async fn backup_live_config_strict(&self, app_type: &AppType) -> Result<(), String> {
-        let (app_type_str, config) = match app_type {
+        let (app_type_str, mut config) = match app_type {
             AppType::Claude => ("claude", self.read_claude_live()?),
             AppType::Codex => ("codex", self.read_codex_live()?),
             AppType::Gemini => ("gemini", self.read_gemini_live()?),
@@ -1354,6 +1355,9 @@ impl ProxyService {
             return Ok(());
         }
 
+        if matches!(app_type, AppType::Codex) {
+            self.normalize_codex_live_backup_route(&mut config)?;
+        }
         let json_str = serde_json::to_string(&config)
             .map_err(|e| format!("序列化 {app_type_str} 配置失败: {e}"))?;
         self.db
@@ -1362,6 +1366,17 @@ impl ProxyService {
             .map_err(|e| format!("备份 {app_type_str} 配置失败: {e}"))?;
 
         Ok(())
+    }
+
+    fn normalize_codex_live_backup_route(&self, config: &mut Value) -> Result<(), String> {
+        let provider = self.get_current_provider_for_app(&AppType::Codex)?;
+        crate::codex_config::apply_codex_unified_session_bucket_to_settings(
+            provider
+                .as_ref()
+                .and_then(|provider| provider.category.as_deref()),
+            config,
+        )
+        .map_err(|e| format!("Failed to normalize Codex backup history route: {e}"))
     }
 
     /// 构造写入 Live 的代理地址（处理 0.0.0.0 / IPv6 等特殊情况）
@@ -2198,8 +2213,8 @@ impl ProxyService {
                     .map_err(|e| format!("Failed to clear stale Codex desktop settings: {e}"))?;
             }
 
-            // 统一会话开关：备份是接管释放时恢复 live 的来源，官方配置的
-            // 共享 custom 路由注入必须落在备份里，否则恢复后开关失效。
+            // The backup is the restore source when proxy takeover is released,
+            // so it must carry the same shared history route as the live config.
             crate::codex_config::apply_codex_unified_session_bucket_to_settings(
                 provider.category.as_deref(),
                 &mut effective_settings,
@@ -2691,6 +2706,15 @@ impl ProxyService {
                         config, config_str, profile,
                     )
                     .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+                let prepared_config = if let Some(provider) = provider {
+                    crate::codex_config::apply_codex_unified_session_bucket_to_config(
+                        provider.category.as_deref(),
+                        &prepared_config,
+                    )
+                    .map_err(|e| format!("Failed to write Codex config: {e}"))?
+                } else {
+                    prepared_config
+                };
                 let live_config =
                     crate::codex_config::prepare_codex_provider_live_config(auth, &prepared_config)
                         .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
@@ -2740,11 +2764,17 @@ impl ProxyService {
             })
             .transpose()
             .map_err(|e| format!("写入 Codex 配置失败: {e}"))?;
+        let preserve_live_oauth =
+            auth.is_some_and(crate::codex_config::should_preserve_live_codex_oauth_for_restore);
 
         match (auth, prepared_cfg.as_deref()) {
             (Some(auth), Some(cfg)) => {
                 let auth_path = get_codex_auth_path();
-                if auth.as_object().is_some_and(|obj| obj.is_empty()) {
+                if preserve_live_oauth {
+                    let config_path = get_codex_config_path();
+                    crate::config::write_text_file(&config_path, cfg)
+                        .map_err(|e| format!("Failed to write Codex config: {e}"))?;
+                } else if auth.as_object().is_some_and(|obj| obj.is_empty()) {
                     let _ = crate::config::delete_file(&auth_path);
                     let config_path = get_codex_config_path();
                     crate::config::write_text_file(&config_path, cfg)
@@ -2762,7 +2792,9 @@ impl ProxyService {
                 }
             }
             (Some(auth), None) => {
-                if !crate::codex_config::codex_stored_auth_regresses_live_on_disk(auth) {
+                if !preserve_live_oauth
+                    && !crate::codex_config::codex_stored_auth_regresses_live_on_disk(auth)
+                {
                     let auth_path = get_codex_auth_path();
                     write_json_file(&auth_path, auth)
                         .map_err(|e| format!("写入 Codex auth 失败: {e}"))?;
@@ -4064,14 +4096,15 @@ wire_api = "responses"
 
     #[tokio::test]
     #[serial]
-    async fn codex_takeover_preserves_oauth_auth_json_when_preserve_enabled() {
+    async fn codex_takeover_preserves_oauth_and_routes_unified_history_to_custom() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
             preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: true,
             ..Default::default()
         })
-        .expect("enable Codex official auth preservation");
+        .expect("enable Codex auth preservation and unified history");
 
         let db = Arc::new(Database::memory().expect("init db"));
         let service = ProxyService::new(db.clone());
@@ -4121,6 +4154,10 @@ wire_api = "responses"
             .expect("set local current provider");
 
         service
+            .backup_live_config_strict(&AppType::Codex)
+            .await
+            .expect("back up Codex live config");
+        service
             .takeover_live_config_strict(&AppType::Codex)
             .await
             .expect("take over Codex live config");
@@ -4133,8 +4170,51 @@ wire_api = "responses"
             "Codex takeover should not overwrite ChatGPT OAuth auth when preservation is enabled"
         );
 
+        let backup = db
+            .get_live_backup("codex")
+            .await
+            .expect("read Codex backup")
+            .expect("Codex backup exists");
+        let backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse Codex backup");
+        assert_eq!(
+            backup.get("auth"),
+            Some(&oauth_auth),
+            "the restore backup should retain the live ChatGPT OAuth cache"
+        );
+        let backup_config = backup
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("backup config");
+        let backup_doc = backup_config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse backup config");
+        assert_eq!(
+            backup_doc
+                .get("model_provider")
+                .and_then(|item| item.as_str()),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID),
+            "releasing takeover should not restore a split third-party history route"
+        );
+
         let live_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
             .expect("read live config");
+        let live_doc = live_config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse live config");
+        assert_eq!(
+            live_doc
+                .get("model_provider")
+                .and_then(|item| item.as_str()),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID),
+            "unified history should route third-party Codex sessions through the shared custom bucket"
+        );
+        assert!(
+            live_doc["model_providers"]
+                .get(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+                .is_some(),
+            "the active third-party provider table should move with the shared custom route"
+        );
         assert!(
             live_config.contains(PROXY_TOKEN_PLACEHOLDER),
             "takeover placeholder should move into config.toml"
@@ -4142,6 +4222,30 @@ wire_api = "responses"
         assert!(
             service.detect_takeover_in_live_config_for_app(&AppType::Codex),
             "Codex takeover detection should recognize config.toml placeholders"
+        );
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore Codex live config");
+        let restored_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read restored auth");
+        assert_eq!(
+            restored_auth, oauth_auth,
+            "releasing takeover should preserve ChatGPT OAuth"
+        );
+        let restored_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config");
+        let restored_doc = restored_config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse restored config");
+        assert_eq!(
+            restored_doc
+                .get("model_provider")
+                .and_then(|item| item.as_str()),
+            Some(crate::codex_config::CC_SWITCH_CODEX_MODEL_PROVIDER_ID),
+            "releasing takeover should retain the shared history route"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
@@ -5972,6 +6076,8 @@ base_url = "https://new.example/v1"
                 },
                 "config": r#"model_provider = "rightcode"
 model = "gpt-5.4"
+model_context_window = 1048576
+model_auto_compact_token_limit = 252000
 
 [model_providers.rightcode]
 name = "RightCode"
@@ -5995,6 +6101,8 @@ dock-icon-preference = "classic"
                 },
                 "config": r#"model_provider = "aihubmix"
 model = "gpt-5.4"
+model_context_window = 131072
+model_auto_compact_token_limit = 100000
 
 [model_providers.aihubmix]
 name = "AiHubMix"
@@ -6029,6 +6137,8 @@ provider-only-setting = "stale"
         .expect("seed live backup");
         let takeover_config = r#"model_provider = "rightcode"
 model = "gpt-5.4"
+model_context_window = 1048576
+model_auto_compact_token_limit = 252000
 
 [model_providers.rightcode]
 name = "RightCode"
@@ -6077,6 +6187,20 @@ sidebar-density = "compact"
             Some("aihubmix"),
             "provider-derived restore backup should preserve the provider's model_provider"
         );
+        assert_eq!(
+            parsed_backup
+                .get("model_context_window")
+                .and_then(|v| v.as_integer()),
+            Some(131072),
+            "provider-derived restore backup should refresh the selected provider's context window"
+        );
+        assert_eq!(
+            parsed_backup
+                .get("model_auto_compact_token_limit")
+                .and_then(|v| v.as_integer()),
+            Some(100000),
+            "provider-derived restore backup should refresh the selected provider's compact limit"
+        );
         let backup_model_providers = parsed_backup
             .get("model_providers")
             .and_then(|v| v.as_table())
@@ -6106,6 +6230,20 @@ sidebar-density = "compact"
             parsed_live.get("model_provider").and_then(|v| v.as_str()),
             Some("aihubmix"),
             "hot-switched Codex live config should expose the selected provider"
+        );
+        assert_eq!(
+            parsed_live
+                .get("model_context_window")
+                .and_then(|v| v.as_integer()),
+            Some(131072),
+            "hot-switched Codex live config should use the selected provider's context window"
+        );
+        assert_eq!(
+            parsed_live
+                .get("model_auto_compact_token_limit")
+                .and_then(|v| v.as_integer()),
+            Some(100000),
+            "hot-switched Codex live config should use the selected provider's compact limit"
         );
         assert_eq!(
             parsed_live
@@ -6740,6 +6878,74 @@ requires_openai_auth = true
             restored.contains(pointer.as_str()),
             "restored pointer must still reference the Nexus Composer generated catalog file"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_restore_third_party_backup_preserves_live_oauth_when_enabled() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .expect("enable Codex official auth preservation");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            Some(
+                "model_provider = \"custom\"\n\
+                 [model_providers.custom]\n\
+                 name = \"Proxy\"\n\
+                 base_url = \"http://127.0.0.1:15721/v1\"\n\
+                 wire_api = \"responses\"\n",
+            ),
+        )
+        .expect("seed live OAuth auth and proxy config");
+
+        let backup = json!({
+            "auth": { "OPENAI_API_KEY": "provider-key" },
+            "config": "model_provider = \"nexus\"\n\
+                       model = \"glm52-logged\"\n\
+                       [model_providers.nexus]\n\
+                       name = \"Nexus\"\n\
+                       base_url = \"https://nexus.example/v1\"\n\
+                       wire_api = \"responses\"\n",
+        });
+        db.save_live_backup("codex", &backup.to_string())
+            .await
+            .expect("seed stale third-party backup");
+
+        service
+            .restore_live_config_for_app_with_fallback(&AppType::Codex)
+            .await
+            .expect("restore Codex backup");
+
+        let restored_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read restored auth");
+        assert_eq!(
+            restored_auth, oauth_auth,
+            "restoring a third-party backup must not replace a live ChatGPT OAuth login"
+        );
+        let restored_config = std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored config");
+        assert!(
+            restored_config.contains("https://nexus.example/v1"),
+            "the third-party route should still be restored"
+        );
+
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
     }
 
     /// Regression: a hot-switch during takeover rebuilds the backup from the DB

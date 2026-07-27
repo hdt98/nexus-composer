@@ -35,6 +35,7 @@ pub(crate) use live::{
     build_effective_settings_with_common_config, normalize_provider_common_config_for_storage,
     provider_exists_in_live_config, strip_common_config_from_live_settings,
     sync_codex_desktop_table, sync_current_provider_for_app_to_live, write_live_with_common_config,
+    write_live_with_selected_official_codex_account,
 };
 
 // Internal re-exports
@@ -44,11 +45,12 @@ use live::{
 };
 use usage::validate_usage_script;
 
-/// 统一会话开关变更后，立即按新开关状态重写当前官方 Codex 供应商的
-/// live 配置，使开关即时生效（无需等下一次切换）。
-/// 当前供应商非官方（或不存在）时为 no-op：注入只作用于官方配置，
-/// 第三方 live 配置不受开关影响。
-pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, AppError> {
+/// Reapply the current Codex provider after a live-routing or auth policy changes.
+///
+/// During proxy takeover, both the restore backup and the proxy-owned live
+/// config must be refreshed. Otherwise restarting Codex keeps the old session
+/// bucket or OAuth policy until another provider switch occurs.
+pub fn reapply_current_codex_live(state: &AppState) -> Result<bool, AppError> {
     let current_id = ProviderService::current(state, AppType::Codex)?;
     if current_id.is_empty() {
         return Ok(false);
@@ -57,13 +59,7 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
     let Some(provider) = providers.get(&current_id) else {
         return Ok(false);
     };
-    if provider.category.as_deref() != Some("official") {
-        return Ok(false);
-    }
 
-    // 代理接管期间 live 归代理所有（开启代理时官方供应商只警告不拦截，
-    // 二者可以共存）。与切换/保存路径一致：以 backup/占位符为所有权信号，
-    // 只更新备份，注入后的配置由接管释放时的恢复路径落盘。
     let has_live_backup =
         futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
             .ok()
@@ -78,7 +74,17 @@ pub fn reapply_current_codex_official_live(state: &AppState) -> Result<bool, App
                 .proxy_service
                 .update_live_backup_from_provider(AppType::Codex.as_str(), provider),
         )
-        .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+        .map_err(|e| AppError::Message(format!("Failed to update Codex live backup: {e}")))?;
+        if live_taken_over {
+            futures::executor::block_on(
+                state
+                    .proxy_service
+                    .sync_codex_live_from_provider_while_proxy_active(provider),
+            )
+            .map_err(|e| {
+                AppError::Message(format!("Failed to reapply the active Codex provider: {e}"))
+            })?;
+        }
         return Ok(true);
     }
 
@@ -457,6 +463,130 @@ mod tests {
             ..Default::default()
         })
         .expect("enable Codex login preservation and unified history");
+    }
+
+    #[test]
+    #[serial]
+    fn codex_toggle_reapply_refreshes_third_party_takeover_route_and_auth_policy() {
+        let _home = TempHome::new();
+        enable_codex_test_features();
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        tauri::async_runtime::block_on(db.update_proxy_config(ProxyConfig {
+            listen_port: 0,
+            ..Default::default()
+        }))
+        .expect("use an ephemeral proxy port");
+        let state = AppState::new(db.clone());
+
+        let mut provider = Provider::with_id(
+            "nexus-glm".to_string(),
+            "Nexus GLM".to_string(),
+            json!({
+                "auth": { "OPENAI_API_KEY": "nexus-key" },
+                "config": r#"model_provider = "nexus"
+model = "glm52-logged"
+
+[model_providers.nexus]
+name = "Nexus GLM"
+base_url = "https://nexus.example/v1"
+wire_api = "chat"
+"#
+            }),
+            None,
+        );
+        provider.category = Some("third_party".to_string());
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            ..Default::default()
+        });
+        db.save_provider("codex", &provider)
+            .expect("save third-party provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("set local current provider");
+
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(
+            &oauth_auth,
+            provider
+                .settings_config
+                .get("config")
+                .and_then(Value::as_str),
+        )
+        .expect("seed third-party config with preserved OAuth");
+
+        tauri::async_runtime::block_on(
+            state
+                .proxy_service
+                .set_takeover_for_app(AppType::Codex.as_str(), true),
+        )
+        .expect("enable Codex takeover");
+        let taken_over = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read taken-over config");
+        assert!(taken_over.contains("model_provider = \"custom\""));
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read preserved OAuth"),
+            oauth_auth
+        );
+
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: false,
+            unify_codex_session_history: false,
+            ..Default::default()
+        })
+        .expect("disable Codex compatibility settings");
+
+        assert!(
+            reapply_current_codex_live(&state).expect("reapply current Codex provider"),
+            "the active third-party provider must be reapplied"
+        );
+
+        let reapplied = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read reapplied live config");
+        assert!(reapplied.contains("model_provider = \"nexus\""));
+        assert!(reapplied.contains("base_url = \"http://127.0.0.1:"));
+        let reapplied_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read reapplied provider auth");
+        assert!(
+            !crate::codex_config::codex_auth_has_oauth_login_material(&reapplied_auth),
+            "disabling login preservation should remove live OAuth material"
+        );
+
+        let backup = tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read Codex backup")
+            .expect("Codex backup exists");
+        let backup: Value =
+            serde_json::from_str(&backup.original_config).expect("parse Codex backup");
+        let backup_config = backup
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("backup config");
+        assert!(backup_config.contains("model_provider = \"nexus\""));
+        assert!(
+            !backup
+                .get("auth")
+                .is_some_and(crate::codex_config::codex_auth_has_oauth_login_material),
+            "disabling login preservation should remove OAuth from the restore backup"
+        );
+
+        tauri::async_runtime::block_on(
+            state
+                .proxy_service
+                .set_takeover_for_app(AppType::Codex.as_str(), false),
+        )
+        .expect("stop Codex takeover");
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
     }
 
     #[test]
@@ -3598,6 +3728,14 @@ impl ProviderService {
         // Backfill: Backfill current live config to current provider
         // Use effective current provider (validated existence) to ensure backfill targets valid provider
         let current_id = crate::settings::get_effective_current_provider(&state.db, &app_type)?;
+        let selecting_another_official_codex_account = matches!(app_type, AppType::Codex)
+            && provider.category.as_deref() == Some("official")
+            && current_id.as_deref().is_some_and(|current_id| {
+                current_id != id
+                    && providers
+                        .get(current_id)
+                        .is_some_and(|current| current.category.as_deref() == Some("official"))
+            });
 
         if let Some(current_id) = current_id {
             if current_id != id {
@@ -3649,7 +3787,11 @@ impl ProviderService {
         }
 
         // Sync to live (write_gemini_live handles security flag internally for Gemini)
-        write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        if selecting_another_official_codex_account {
+            write_live_with_selected_official_codex_account(state.db.as_ref(), provider)?;
+        } else {
+            write_live_with_common_config(state.db.as_ref(), &app_type, provider)?;
+        }
 
         // Hermes is additive, so "switching" doesn't overwrite a live config file
         // — we instead update the top-level `model:` section to point at this
