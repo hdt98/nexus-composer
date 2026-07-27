@@ -1,6 +1,6 @@
 [package]
 name = "nexus-composer"
-version = "3.16.5"
+version = "3.16.6"
 description = "Model endpoint management and routing for coding assistants"
 authors = ["Jason Young"]
 license = "MIT"
