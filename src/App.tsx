@@ -25,6 +25,7 @@ import {
   Shield,
   Cpu,
   LayoutDashboard,
+  Server,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { Provider, VisibleApps } from "@/types";
@@ -78,6 +79,7 @@ import {
 } from "@/components/skills/SkillsPage";
 import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
+import { RemoteProviderPage } from "@/components/remote/RemoteProviderPage";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { AgentsPanel } from "@/components/agents/AgentsPanel";
 import { UniversalProviderPanel } from "@/components/universal";
@@ -109,7 +111,8 @@ type View =
   | "openclawEnv"
   | "openclawTools"
   | "openclawAgents"
-  | "hermesMemory";
+  | "hermesMemory"
+  | "remote";
 
 interface SyncStatusUpdatedPayload {
   source?: string;
@@ -155,6 +158,7 @@ const VALID_VIEWS: View[] = [
   "openclawTools",
   "openclawAgents",
   "hermesMemory",
+  "remote",
 ];
 
 const getInitialView = (): View => {
@@ -206,7 +210,7 @@ function App() {
     if (visibleApps.opencode) return "opencode";
     if (visibleApps.openclaw) return "openclaw";
     if (visibleApps.hermes) return "hermes";
-    return "claude"; // fallback
+    return "claude";
   };
 
   useEffect(() => {
@@ -944,6 +948,14 @@ function App() {
           return <ToolsPanel />;
         case "openclawAgents":
           return <AgentsDefaultsPanel />;
+        case "remote":
+          return (
+            <RemoteProviderPage
+              appId={sharedFeatureApp}
+              providers={providers}
+              currentProviderId={currentProviderId}
+            />
+          );
         default:
           return (
             <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden">
@@ -1164,6 +1176,7 @@ function App() {
                   {currentView === "openclawAgents" &&
                     t("openclaw.agents.title")}
                   {currentView === "hermesMemory" && t("hermes.memory.title")}
+                  {currentView === "remote" && "Remote"}
                 </h1>
               </div>
             ) : (
@@ -1367,6 +1380,16 @@ function App() {
                       visibleApps={visibleApps}
                       compact={isToolbarCompact}
                     />
+
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setCurrentView("remote")}
+                      className="text-muted-foreground hover:text-foreground hover:bg-black/5 dark:hover:bg-white/5 w-8 px-2"
+                      title="Remote"
+                    >
+                      <Server className="w-4 h-4" />
+                    </Button>
 
                     <div className="flex items-center gap-1 p-1 bg-muted rounded-xl">
                       <AnimatePresence mode="wait">

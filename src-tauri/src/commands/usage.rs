@@ -1,22 +1,26 @@
-//! 使用统计相关命令
+//! Usage statistics commands
 
+use crate::database::Database;
 use crate::error::AppError;
 use crate::services::usage_stats::*;
 use crate::store::AppState;
 use rust_decimal::Decimal;
+use serde::Serialize;
 use std::str::FromStr;
 use tauri::State;
 
-/// 获取使用量汇总
+/// Get usage summary
 #[tauri::command]
 pub fn get_usage_summary(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
+    source: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<UsageSummary, AppError> {
+    let _ = source; // reserved for future data_source filtering
     state.db.get_usage_summary(
         start_date,
         end_date,
@@ -26,15 +30,17 @@ pub fn get_usage_summary(
     )
 }
 
-/// 获取按 app_type 拆分的使用量汇总
+/// Get usage summary split by app_type
 #[tauri::command]
 pub fn get_usage_summary_by_app(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
+    source: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<UsageSummaryByApp>, AppError> {
+    let _ = source;
     state.db.get_usage_summary_by_app(
         start_date,
         end_date,
@@ -43,16 +49,18 @@ pub fn get_usage_summary_by_app(
     )
 }
 
-/// 获取每日趋势
+/// Get daily trends
 #[tauri::command]
 pub fn get_usage_trends(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
+    source: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<DailyStats>, AppError> {
+    let _ = source;
     state.db.get_daily_trends(
         start_date,
         end_date,
@@ -62,16 +70,18 @@ pub fn get_usage_trends(
     )
 }
 
-/// 获取 Provider 统计
+/// Get provider statistics
 #[tauri::command]
 pub fn get_provider_stats(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
+    source: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<ProviderStats>, AppError> {
+    let _ = source;
     state.db.get_provider_stats(
         start_date,
         end_date,
@@ -81,16 +91,18 @@ pub fn get_provider_stats(
     )
 }
 
-/// 获取模型统计
+/// Get model statistics
 #[tauri::command]
 pub fn get_model_stats(
     state: State<'_, AppState>,
     start_date: Option<i64>,
     end_date: Option<i64>,
     app_type: Option<String>,
+    source: Option<String>,
     provider_name: Option<String>,
     model: Option<String>,
 ) -> Result<Vec<ModelStats>, AppError> {
+    let _ = source;
     state.db.get_model_stats(
         start_date,
         end_date,
@@ -274,64 +286,11 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
 }
 
 /// Manually synchronize session logs.
-fn merge_session_sync_result(
-    total: &mut crate::services::session_usage::SessionSyncResult,
-    error_prefix: &str,
-    next: Result<crate::services::session_usage::SessionSyncResult, AppError>,
-) {
-    match next {
-        Ok(next) => {
-            total.imported += next.imported;
-            total.skipped += next.skipped;
-            total.files_scanned += next.files_scanned;
-            total.errors.extend(next.errors);
-        }
-        Err(error) => total.errors.push(format!("{error_prefix}: {error}")),
-    }
-}
-
 #[tauri::command]
 pub async fn sync_session_usage(
     state: State<'_, AppState>,
 ) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
-    let db = state.db.clone();
-    tauri::async_runtime::spawn_blocking(move || sync_session_usage_from_db(&db))
-        .await
-        .map_err(|error| AppError::Message(format!("Session sync task failed: {error}")))?
-}
-
-fn sync_session_usage_from_db(
-    db: &crate::database::Database,
-) -> Result<crate::services::session_usage::SessionSyncResult, AppError> {
-    let mut result = crate::services::session_usage::SessionSyncResult {
-        imported: 0,
-        skipped: 0,
-        files_scanned: 0,
-        errors: Vec::new(),
-    };
-
-    merge_session_sync_result(
-        &mut result,
-        "Claude sync failed",
-        crate::services::session_usage::sync_claude_session_logs(db),
-    );
-    merge_session_sync_result(
-        &mut result,
-        "Codex sync failed",
-        crate::services::session_usage_codex::sync_codex_usage(db),
-    );
-    merge_session_sync_result(
-        &mut result,
-        "Gemini sync failed",
-        crate::services::session_usage_gemini::sync_gemini_usage(db),
-    );
-    merge_session_sync_result(
-        &mut result,
-        "OpenCode sync failed",
-        crate::services::session_usage_opencode::sync_opencode_usage(db),
-    );
-
-    Ok(result)
+    crate::services::session_usage::sync_all_session_usage(state.db.clone()).await
 }
 
 /// 获取数据来源分布
@@ -340,6 +299,152 @@ pub fn get_usage_data_sources(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::services::session_usage::DataSourceSummary>, AppError> {
     crate::services::session_usage::get_data_source_breakdown(&state.db)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRemoteUsageDataResult {
+    pub data_source: String,
+    pub deleted_request_logs: usize,
+    pub deleted_rollups: usize,
+    pub deleted_sync_states: usize,
+}
+
+/// Deletes locally stored usage data for one remote source.
+#[tauri::command]
+pub fn delete_remote_usage_data(
+    state: State<'_, AppState>,
+    data_source: String,
+) -> Result<DeleteRemoteUsageDataResult, AppError> {
+    delete_remote_usage_data_for_source(&state.db, data_source)
+}
+
+fn delete_remote_usage_data_for_source(
+    db: &Database,
+    data_source: String,
+) -> Result<DeleteRemoteUsageDataResult, AppError> {
+    let data_source = data_source.trim().to_string();
+    let host_alias = data_source
+        .strip_prefix("remote:")
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| {
+            AppError::localized(
+                "usage.sourceFilter.deleteInvalidSource",
+                "只能删除远端用量数据",
+                "Only remote usage data can be deleted",
+            )
+        })?;
+
+    let sync_prefix = format!("remote://{host_alias}/");
+    let sync_prefix_len = sync_prefix.len() as i64;
+    let conn = crate::database::lock_conn!(db.conn);
+
+    let deleted_request_logs = conn
+        .execute(
+            "DELETE FROM proxy_request_logs WHERE COALESCE(data_source, 'proxy') = ?1",
+            rusqlite::params![data_source],
+        )
+        .map_err(|e| AppError::Database(format!("删除远端用量明细失败: {e}")))?;
+
+    let deleted_rollups = conn
+        .execute(
+            "DELETE FROM usage_daily_rollups WHERE data_source = ?1",
+            rusqlite::params![data_source],
+        )
+        .map_err(|e| AppError::Database(format!("删除远端用量聚合失败: {e}")))?;
+
+    let deleted_sync_states = conn
+        .execute(
+            "DELETE FROM session_log_sync WHERE substr(file_path, 1, ?1) = ?2",
+            rusqlite::params![sync_prefix_len, sync_prefix],
+        )
+        .map_err(|e| AppError::Database(format!("删除远端同步状态失败: {e}")))?;
+
+    Ok(DeleteRemoteUsageDataResult {
+        data_source,
+        deleted_request_logs,
+        deleted_rollups,
+        deleted_sync_states,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::lock_conn;
+
+    #[test]
+    fn delete_remote_usage_data_removes_only_selected_host() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        {
+            let conn = lock_conn!(db.conn);
+            for (request_id, source) in [
+                ("remote-pjlab-1", "remote:pjlab"),
+                ("remote-jd-1", "remote:jd"),
+            ] {
+                conn.execute(
+                    "INSERT INTO proxy_request_logs (
+                        request_id, provider_id, app_type, model,
+                        latency_ms, status_code, created_at, data_source
+                    ) VALUES (?1, ?2, 'codex', 'gpt-5.4', 0, 200, 1000, ?3)",
+                    rusqlite::params![request_id, "_remote:codex:test", source],
+                )?;
+            }
+            for source in ["remote:pjlab", "remote:jd"] {
+                conn.execute(
+                    "INSERT INTO usage_daily_rollups (
+                        date, app_type, provider_id, data_source, model
+                    ) VALUES ('2026-05-22', 'codex', '_remote:codex:test', ?1, 'gpt-5.4')",
+                    rusqlite::params![source],
+                )?;
+            }
+            for path in [
+                "remote://pjlab/codex/session.jsonl",
+                "remote://jd/codex/session.jsonl",
+            ] {
+                conn.execute(
+                    "INSERT INTO session_log_sync (
+                        file_path, last_modified, last_line_offset, last_synced_at
+                    ) VALUES (?1, 1, 2, 3)",
+                    rusqlite::params![path],
+                )?;
+            }
+        }
+
+        let result = delete_remote_usage_data_for_source(&db, "remote:pjlab".to_string())?;
+        assert_eq!(result.deleted_request_logs, 1);
+        assert_eq!(result.deleted_rollups, 1);
+        assert_eq!(result.deleted_sync_states, 1);
+
+        let conn = lock_conn!(db.conn);
+        let pjlab_logs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'remote:pjlab'",
+            [],
+            |row| row.get(0),
+        )?;
+        let jd_logs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM proxy_request_logs WHERE data_source = 'remote:jd'",
+            [],
+            |row| row.get(0),
+        )?;
+        let pjlab_sync: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_log_sync WHERE file_path LIKE 'remote://pjlab/%'",
+            [],
+            |row| row.get(0),
+        )?;
+        let jd_sync: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM session_log_sync WHERE file_path LIKE 'remote://jd/%'",
+            [],
+            |row| row.get(0),
+        )?;
+
+        assert_eq!(pjlab_logs, 0);
+        assert_eq!(jd_logs, 1);
+        assert_eq!(pjlab_sync, 0);
+        assert_eq!(jd_sync, 1);
+        Ok(())
+    }
 }
 
 /// 模型定价信息
@@ -352,48 +457,4 @@ pub struct ModelPricingInfo {
     pub output_cost_per_million: String,
     pub cache_read_cost_per_million: String,
     pub cache_creation_cost_per_million: String,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::services::session_usage::SessionSyncResult;
-
-    #[test]
-    fn session_sync_merge_preserves_success_and_source_errors() {
-        let mut total = SessionSyncResult {
-            imported: 1,
-            skipped: 2,
-            files_scanned: 3,
-            errors: vec!["record error".to_string()],
-        };
-
-        merge_session_sync_result(
-            &mut total,
-            "Codex sync failed",
-            Ok(SessionSyncResult {
-                imported: 4,
-                skipped: 5,
-                files_scanned: 6,
-                errors: vec!["second record error".to_string()],
-            }),
-        );
-        merge_session_sync_result(
-            &mut total,
-            "Gemini sync failed",
-            Err(AppError::Message("unavailable".to_string())),
-        );
-
-        assert_eq!(total.imported, 5);
-        assert_eq!(total.skipped, 7);
-        assert_eq!(total.files_scanned, 9);
-        assert_eq!(
-            total.errors,
-            vec![
-                "record error",
-                "second record error",
-                "Gemini sync failed: unavailable",
-            ]
-        );
-    }
 }

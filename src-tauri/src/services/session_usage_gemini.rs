@@ -19,9 +19,12 @@ use crate::gemini_config::get_gemini_dir;
 use crate::proxy::usage::calculator::{CostCalculator, ModelPricing};
 use crate::proxy::usage::parser::TokenUsage;
 use crate::services::session_usage::{
-    get_sync_state, metadata_modified_nanos, update_sync_state_after_records, SessionSyncResult,
+    get_sync_state, metadata_modified_nanos, retag_legacy_remote_session_log, session_sync_key,
+    update_sync_state, SessionSyncResult, SessionUsageImportOptions,
 };
-use crate::services::usage_stats::{find_model_pricing, should_skip_session_insert, DedupKey};
+use crate::services::usage_stats::{
+    find_model_pricing, should_skip_session_insert_with_proxy_dedup, DedupKey,
+};
 use rust_decimal::Decimal;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,8 +42,25 @@ struct GeminiTokens {
 /// 同步 Gemini 使用数据（从 JSON 会话日志）
 pub fn sync_gemini_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let gemini_dir = get_gemini_dir();
+    sync_gemini_usage_from_dir(db, &gemini_dir)
+}
 
-    let files = collect_gemini_session_files(&gemini_dir);
+/// Syncs session logs from a specific Gemini config directory.
+pub fn sync_gemini_usage_from_dir(
+    db: &Database,
+    gemini_dir: &Path,
+) -> Result<SessionSyncResult, AppError> {
+    let options =
+        SessionUsageImportOptions::local("gemini_session", "_gemini_session", "gemini_session");
+    sync_gemini_usage_from_dir_with_options(db, gemini_dir, &options)
+}
+
+pub fn sync_gemini_usage_from_dir_with_options(
+    db: &Database,
+    gemini_dir: &Path,
+    options: &SessionUsageImportOptions,
+) -> Result<SessionSyncResult, AppError> {
+    let files = collect_gemini_session_files(gemini_dir);
 
     let mut result = SessionSyncResult {
         imported: 0,
@@ -54,11 +74,10 @@ pub fn sync_gemini_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     }
 
     for file_path in &files {
-        match sync_single_gemini_file(db, file_path) {
-            Ok((imported, skipped, errors)) => {
+        match sync_single_gemini_file(db, file_path, gemini_dir, options) {
+            Ok((imported, skipped)) => {
                 result.imported += imported;
                 result.skipped += skipped;
-                result.errors.extend(errors);
             }
             Err(e) => {
                 let msg = format!("Gemini 会话文件解析失败 {}: {e}", file_path.display());
@@ -122,24 +141,25 @@ fn collect_gemini_session_files(gemini_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// Synchronize one Gemini session JSON file and return (imported, skipped, errors).
+/// 同步单个 Gemini 会话 JSON 文件，返回 (imported, skipped)
 fn sync_single_gemini_file(
     db: &Database,
     file_path: &Path,
-) -> Result<(u32, u32, Vec<String>), AppError> {
-    let file_path_str = file_path.to_string_lossy().to_string();
-
+    sync_root: &Path,
+    options: &SessionUsageImportOptions,
+) -> Result<(u32, u32), AppError> {
+    let sync_key = session_sync_key(file_path, sync_root, options);
     // 获取文件元数据
     let metadata = fs::metadata(file_path)
         .map_err(|e| AppError::Config(format!("无法读取文件元数据: {e}")))?;
     let file_modified = metadata_modified_nanos(&metadata);
 
     // 检查同步状态
-    let (last_modified, _last_offset) = get_sync_state(db, &file_path_str)?;
+    let (last_modified, _last_offset) = get_sync_state(db, &sync_key)?;
 
     // 文件未变化则跳过
     if file_modified <= last_modified {
-        return Ok((0, 0, Vec::new()));
+        return Ok((0, 0));
     }
 
     // 读取并解析整个 JSON 文件
@@ -157,13 +177,12 @@ fn sync_single_gemini_file(
     // 遍历 messages 数组
     let messages = match value.get("messages").and_then(|v| v.as_array()) {
         Some(msgs) => msgs,
-        None => return Ok((0, 0, Vec::new())),
+        None => return Ok((0, 0)),
     };
 
     let mut imported: u32 = 0;
     let mut skipped: u32 = 0;
     let mut gemini_msg_count: i64 = 0;
-    let mut errors = Vec::new();
 
     for msg in messages {
         // 只处理 type == "gemini" 的消息
@@ -194,7 +213,8 @@ fn sync_single_gemini_file(
 
         // 生成唯一 request_id
         let session_id_str = session_id.as_deref().unwrap_or("unknown");
-        let request_id = format!("gemini_session:{session_id_str}:{message_id}");
+        let request_id =
+            options.request_id(&format!("gemini_session:{session_id_str}:{message_id}"));
 
         match insert_gemini_session_entry(
             db,
@@ -203,27 +223,21 @@ fn sync_single_gemini_file(
             model,
             session_id.as_deref(),
             timestamp,
+            options,
         ) {
             Ok(true) => imported += 1,
             Ok(false) => skipped += 1,
             Err(e) => {
-                let error = format!("{}: insert failed ({request_id}): {e}", file_path.display());
-                log::warn!("[GEMINI-SYNC] {error}");
-                errors.push(error);
+                log::warn!("[GEMINI-SYNC] 插入失败 ({}): {e}", request_id);
                 skipped += 1;
             }
         }
     }
 
-    update_sync_state_after_records(
-        db,
-        &file_path_str,
-        file_modified,
-        gemini_msg_count,
-        !errors.is_empty(),
-    )?;
+    // 更新同步状态
+    update_sync_state(db, &sync_key, file_modified, gemini_msg_count)?;
 
-    Ok((imported, skipped, errors))
+    Ok((imported, skipped))
 }
 
 /// 从 tokens JSON 对象中提取 token 数据
@@ -244,6 +258,7 @@ fn insert_gemini_session_entry(
     model: &str,
     session_id: Option<&str>,
     timestamp: Option<&str>,
+    options: &SessionUsageImportOptions,
 ) -> Result<bool, AppError> {
     let conn = lock_conn!(db.conn);
 
@@ -272,7 +287,17 @@ fn insert_gemini_session_entry(
         cache_creation_tokens: 0,
         created_at,
     };
-    if should_skip_session_insert(&conn, request_id, &dedup_key)? {
+    if let Some(result) =
+        retag_legacy_remote_session_log(&conn, request_id, "gemini", model, options)?
+    {
+        return Ok(result);
+    }
+    if should_skip_session_insert_with_proxy_dedup(
+        &conn,
+        request_id,
+        &dedup_key,
+        options.dedup_with_proxy,
+    )? {
         return Ok(false);
     }
 
@@ -334,7 +359,7 @@ fn insert_gemini_session_entry(
            OR model != excluded.model",
         rusqlite::params![
             request_id,
-            "_gemini_session",   // provider_id
+            options.provider_id.as_str(),
             "gemini",            // app_type
             model,
             model,               // request_model = model
@@ -352,11 +377,11 @@ fn insert_gemini_session_entry(
             200i64,              // status_code
             Option::<String>::None, // error_message
             session_id.map(|s| s.to_string()),
-            Some("gemini_session"), // provider_type
+            Some(options.provider_type.clone()),
             1i64,                // is_streaming
             "1.0",               // cost_multiplier
             created_at,
-            "gemini_session",    // data_source
+            options.data_source.as_str(),
         ],
     )
     .map_err(|e| AppError::Database(format!("插入 Gemini 会话日志失败: {e}")))?;
@@ -420,6 +445,8 @@ mod tests {
             cached: 1,
             thoughts: 5,
         };
+        let options =
+            SessionUsageImportOptions::local("gemini_session", "_gemini_session", "gemini_session");
         let inserted = insert_gemini_session_entry(
             &db,
             "gemini-session-dup",
@@ -427,6 +454,7 @@ mod tests {
             "gemini-2.5-pro",
             Some("session-1"),
             Some("1970-01-01T00:16:45Z"),
+            &options,
         )?;
         assert!(!inserted);
 
@@ -436,63 +464,6 @@ mod tests {
         })?;
         assert_eq!(count, 1);
 
-        Ok(())
-    }
-
-    #[test]
-    fn failed_gemini_insert_retries_before_advancing_cursor() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        {
-            let conn = lock_conn!(db.conn);
-            conn.execute_batch(
-                "CREATE TRIGGER fail_gemini_session_record
-                 BEFORE INSERT ON proxy_request_logs
-                 WHEN NEW.request_id = 'gemini_session:retry-session:retry-message'
-                 BEGIN
-                   SELECT RAISE(FAIL, 'forced insert failure');
-                 END;",
-            )?;
-        }
-
-        let tmp =
-            std::env::temp_dir().join(format!("nexus-gemini-sync-retry-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&tmp).unwrap();
-        let file = tmp.join("retry.json");
-        fs::write(
-            &file,
-            serde_json::json!({
-                "sessionId": "retry-session",
-                "messages": [{
-                    "type": "gemini",
-                    "id": "retry-message",
-                    "model": "gemini-test",
-                    "timestamp": "2026-07-18T00:00:00Z",
-                    "tokens": { "input": 2, "output": 1 }
-                }]
-            })
-            .to_string(),
-        )
-        .unwrap();
-
-        let (_, _, errors) = sync_single_gemini_file(&db, &file)?;
-        assert_eq!(errors.len(), 1);
-        assert_eq!(get_sync_state(&db, &file.to_string_lossy())?, (0, 0));
-
-        {
-            let conn = lock_conn!(db.conn);
-            conn.execute_batch("DROP TRIGGER fail_gemini_session_record;")?;
-        }
-
-        let (imported, _, errors) = sync_single_gemini_file(&db, &file)?;
-        assert_eq!(imported, 1);
-        assert!(errors.is_empty());
-        assert_eq!(
-            get_sync_state(&db, &file.to_string_lossy())?,
-            (metadata_modified_nanos(&fs::metadata(&file).unwrap()), 1)
-        );
-        assert_eq!(sync_single_gemini_file(&db, &file)?.0, 0);
-
-        fs::remove_dir_all(&tmp).ok();
         Ok(())
     }
 

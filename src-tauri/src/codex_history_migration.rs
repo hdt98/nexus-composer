@@ -1,10 +1,10 @@
-//! Codex 第三方历史会话归桶迁移。
+//! Codex third-party history session bucket migration.
 //!
-//! 只迁移本机 `~/.codex` 历史数据；完成标记写入设备级 `settings.json`，
-//! 失败时不写标记，下一次启动自动重试。
+//! Only migrates local `~/.codex` history data; completion marker is written to device-level `settings.json`.
+//! On failure, no marker is written, and the next startup will automatically retry.
 
 use crate::codex_config::{
-    get_codex_config_dir, read_codex_config_text, CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+    get_codex_config_dir, read_codex_config_text, NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID,
 };
 use crate::codex_state_db::codex_state_db_paths;
 use crate::config::{atomic_write, copy_file, get_app_config_dir};
@@ -27,13 +27,16 @@ use toml_edit::DocumentMut;
 
 const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
-/// 还原操作自身的备份目录（与迁移备份分开，保持迁移账本目录纯净）。
+/// Backup directory for restore operations (separate from migration backups to keep the migration ledger directory clean).
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
-/// SQLite 变量上限保守值，IN 列表按此分块。
+const OFFICIAL_MODEL_REPAIR_BACKUP_NAME: &str = "codex-official-model-repair-v1";
+const OFFICIAL_ITEM_ID_REPAIR_BACKUP_NAME: &str = "codex-official-item-id-repair-v1";
+/// Conservative upper limit for SQLite variables; IN lists are chunked by this size.
 const STATE_DB_ID_CHUNK: usize = 500;
 
-/// 串行化官方历史的迁移与还原：开启迁移（启动重试 + 设置保存后台任务）和
-/// 关闭还原可能在毫秒级先后被触发，对同一批 jsonl / state DB 双向改写。
+/// Serializes official history migration and restore operations: migration start (startup retry +
+/// settings save background task) and restore disable can be triggered milliseconds apart,
+/// performing bidirectional rewrites on the same jsonl / state DB files.
 static CODEX_OFFICIAL_HISTORY_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
@@ -41,14 +44,14 @@ fn lock_codex_official_history_op() -> std::sync::MutexGuard<'static, ()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
-/// Codex 内建默认 provider id：config.toml 没有 `model_provider` 键时会话归入此桶。
-/// 官方订阅（ChatGPT OAuth / OpenAI API key）的历史会话都记录这个 id。
+/// Codex built-in default provider id: sessions are bucketed here when config.toml has no `model_provider` key.
+/// Official subscription (ChatGPT OAuth / OpenAI API key) history sessions are all recorded under this id.
 const OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID: &str = "openai";
-const LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "ccswitch";
+const LEGACY_CODEX_MODEL_PROVIDER_ID: &str = "ccswitch";
 // If a Codex preset ever used a temporary routing key, keep that old key here
 // so local history can be bucketed under the current custom provider id.
-const CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
-    LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID,
+const LEGACY_CODEX_MODEL_PROVIDER_IDS: &[&str] = &[
+    LEGACY_CODEX_MODEL_PROVIDER_ID,
     "aicodemirror",
     "aicoding",
     "aigocode",
@@ -127,7 +130,7 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
         crate::settings::mark_codex_third_party_history_provider_bucket_migrated(
             CodexThirdPartyHistoryProviderBucketMigration {
                 completed_at: Utc::now().to_rfc3339(),
-                target_provider_id: CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string(),
+                target_provider_id: NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string(),
                 source_provider_ids: Vec::new(),
                 migrated_jsonl_files: 0,
                 migrated_state_rows: 0,
@@ -151,7 +154,7 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
     crate::settings::mark_codex_third_party_history_provider_bucket_migrated(
         CodexThirdPartyHistoryProviderBucketMigration {
             completed_at: Utc::now().to_rfc3339(),
-            target_provider_id: CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string(),
+            target_provider_id: NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string(),
             source_provider_ids: source_provider_ids_vec.clone(),
             migrated_jsonl_files,
             migrated_state_rows,
@@ -164,6 +167,36 @@ pub fn maybe_migrate_codex_third_party_history_provider_bucket(
         migrated_jsonl_files,
         migrated_state_rows,
         skipped_reason: None,
+    })
+}
+
+/// Mark the legacy provider-bucket migration as intentionally skipped for a
+/// fresh Nexus Composer install. A new install may adopt an existing Codex
+/// home, but must not rewrite that user's pre-existing session history merely
+/// because Nexus Composer was launched for the first time.
+pub fn preserve_codex_history_for_fresh_install(
+) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
+    if crate::settings::is_codex_third_party_history_provider_bucket_migrated() {
+        return Ok(CodexHistoryProviderBucketMigrationOutcome {
+            skipped_reason: Some("already_migrated".to_string()),
+            ..Default::default()
+        });
+    }
+
+    crate::settings::mark_codex_third_party_history_provider_bucket_migrated(
+        CodexThirdPartyHistoryProviderBucketMigration {
+            completed_at: Utc::now().to_rfc3339(),
+            target_provider_id: NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string(),
+            source_provider_ids: Vec::new(),
+            migrated_jsonl_files: 0,
+            migrated_state_rows: 0,
+            scanned_history_files: false,
+        },
+    )?;
+
+    Ok(CodexHistoryProviderBucketMigrationOutcome {
+        skipped_reason: Some("fresh_install_preserves_existing_codex_history".to_string()),
+        ..Default::default()
     })
 }
 
@@ -187,14 +220,16 @@ pub fn maybe_migrate_codex_provider_template_bucket(
     Ok(outcome)
 }
 
-/// 统一会话开关的存量迁移：把官方会话（内建 "openai" 桶）迁入共享 "custom" 桶。
+/// Stock migration for the unified session toggle: moves official sessions (built-in "openai" bucket) into the shared "custom" bucket.
 ///
-/// 仅当用户在开启弹窗里勾选了"迁入既有官方会话"（`unify_codex_migrate_existing`）
-/// 且本轮未完成时执行；开关关闭时标记与勾选意愿都会被清除（见 `save_settings`），
-/// 重新开启并再次勾选即可补迁关闭期间产生的官方会话。
-/// custom 桶里官方与第三方会话无法区分，自动逻辑绝不反向搬回；
-/// 用户可在关闭开关时选择按备份账本精确还原（见 `restore_codex_official_history_from_backups`）。
-/// 迁移前 jsonl / state DB 均备份到 `~/.cc-switch/backups/codex-official-history-unify-v1/`。
+/// Only executes when the user checked "migrate existing official sessions" (`unify_codex_migrate_existing`)
+/// in the enable dialog and the current round has not completed; when the toggle is disabled, both the
+/// marker and the checkbox intent are cleared (see `save_settings`), and re-enabling with the checkbox
+/// checked again allows catching up on official sessions created during the off period.
+/// Official and third-party sessions in the custom bucket cannot be distinguished, so automatic logic
+/// never moves them back; the user can opt for precise restore from backup ledgers when disabling
+/// the toggle (see `restore_codex_official_history_from_backups`).
+/// Both jsonl and state DB are backed up to `~/.nexus-composer/backups/codex-official-history-unify-v1/` before migration.
 pub fn maybe_migrate_codex_official_history_to_unified_bucket(
 ) -> Result<CodexHistoryProviderBucketMigrationOutcome, AppError> {
     if !crate::settings::unify_codex_session_history() {
@@ -211,8 +246,8 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     }
     let _op_guard = lock_codex_official_history_op();
     let codex_dir = get_codex_config_dir();
-    // marker 绑定迁移时的 Codex 目录：切换 codex_config_dir 后旧 marker 不再
-    // 挡住新目录的迁移（迁移幂等，重跑无害）。
+    // The marker is bound to the Codex directory at migration time: after switching codex_config_dir,
+    // the old marker no longer blocks migration of the new directory (migration is idempotent, re-running is harmless).
     let codex_dir_key = canonical_dir_string(&codex_dir);
     if crate::settings::is_codex_official_history_unify_migrated_for_dir(&codex_dir_key) {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
@@ -220,12 +255,13 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
             ..Default::default()
         });
     }
-    // live 必须已实际路由到共享 custom 桶才允许迁移：官方配置的注入可能被拒
-    // （已有显式 model_provider / 形态冲突的 custom 表，见
-    // `inject_codex_unified_session_bucket`），代理接管期间的 live 也不带统一
-    // 路由（注入只进备份）。这些状态下新会话仍落 "openai" 桶，迁移只会把
-    // 历史搬进当前 live 看不见的桶里。开关与迁移意愿保持不动，待 live 真正
-    // 统一后（下次切换 / 接管释放后的启动重试）再迁。
+    // Live config must actually route to the shared custom bucket before migration is allowed: injection
+    // into official config may be rejected (explicit model_provider / conflicting custom table, see
+    // `inject_codex_unified_session_bucket`), and during proxy takeover the live config does not carry
+    // unified routing (injection only goes into the backup). In these states, new sessions still land in
+    // the "openai" bucket, and migration would only move history into a bucket invisible to the current
+    // live config. The toggle and migration intent are preserved, and migration will proceed once live
+    // is truly unified (next switch / startup retry after takeover release).
     if !codex_config_text_routes_custom(&read_codex_config_text().unwrap_or_default()) {
         return Ok(CodexHistoryProviderBucketMigrationOutcome {
             skipped_reason: Some("live_not_unified".to_string()),
@@ -240,7 +276,7 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)?;
     let migrated_state_rows =
         migrate_codex_state_dbs(&codex_dir, &source_provider_ids, &backup_root)?;
-    // 备份代际记录来源目录，restore 据此只取当前目录的账本。
+    // Record the source directory in the backup generation so restore only picks up ledgers for the current directory.
     write_backup_generation_meta(&backup_root, &codex_dir_key)?;
 
     let outcome = CodexHistoryProviderBucketMigrationOutcome {
@@ -250,13 +286,15 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
         skipped_reason: None,
     };
 
-    // 条件写入在 settings 写锁内原子完成："迁移期间开关被关掉"时不写完成标记，
-    // 避免下一次开启被标记挡住而漏迁"关闭期间"新产生的 openai 桶会话。
-    // 与关闭路径（update_settings + 清标记）共用同一把锁，无检查-写入窗口。
+    // Conditional write is atomic within the settings write lock: when the toggle is disabled during
+    // migration, the completion marker is not written, preventing the next enable from being blocked
+    // by the marker and missing sessions created during the "off" period.
+    // Shares the same lock with the disable path (update_settings + clear markers), eliminating
+    // check-then-write race windows.
     let marker_written = crate::settings::mark_codex_official_history_unify_migrated_if_enabled(
         CodexOfficialHistoryUnifyMigration {
             completed_at: Utc::now().to_rfc3339(),
-            target_provider_id: CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string(),
+            target_provider_id: NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string(),
             migrated_jsonl_files,
             migrated_state_rows,
             codex_config_dir: Some(codex_dir_key),
@@ -272,8 +310,8 @@ pub fn maybe_migrate_codex_official_history_to_unified_bucket(
     Ok(outcome)
 }
 
-/// live config.toml 是否路由到共享 custom 桶（会话分桶只看这个实态：
-/// base_url / 接管与否都不影响 session_meta 记录的 model_provider）。
+/// Whether the live config.toml routes to the shared custom bucket (session bucketing only checks
+/// this actual state: base_url / takeover status do not affect the model_provider recorded in session_meta).
 fn codex_config_text_routes_custom(config_text: &str) -> bool {
     config_text
         .parse::<DocumentMut>()
@@ -281,13 +319,13 @@ fn codex_config_text_routes_custom(config_text: &str) -> bool {
         .and_then(|doc| {
             doc.get("model_provider")
                 .and_then(|item| item.as_str())
-                .map(|id| id.trim() == CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+                .map(|id| id.trim() == NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID)
         })
         .unwrap_or(false)
 }
 
-/// 目录的规范化字符串形式，用作 marker / 备份代际的目录身份。
-/// canonicalize 失败（目录尚不存在等）时退回原始路径字符串。
+/// Canonical string representation of a directory, used as marker / backup generation identity.
+/// Falls back to the original path string if canonicalize fails (e.g., directory does not exist yet).
 fn canonical_dir_string(dir: &Path) -> String {
     fs::canonicalize(dir)
         .unwrap_or_else(|_| dir.to_path_buf())
@@ -295,8 +333,8 @@ fn canonical_dir_string(dir: &Path) -> String {
         .to_string()
 }
 
-/// 在备份代际根目录写入 meta.json，记录这批备份来自哪个 Codex 目录。
-/// 代际目录不存在（本轮没有任何文件被迁移）时跳过。
+/// Writes meta.json in the backup generation root, recording which Codex directory this batch of backups came from.
+/// Skipped when the generation directory does not exist (no files were migrated this round).
 fn write_backup_generation_meta(backup_root: &Path, codex_dir_key: &str) -> Result<(), AppError> {
     if !backup_root.exists() {
         return Ok(());
@@ -314,17 +352,17 @@ pub struct CodexOfficialHistoryRestoreOutcome {
     pub skipped_reason: Option<String>,
 }
 
-/// 统一会话开关迁移备份的父目录（其下每次迁移一个时间戳代际目录）。
+/// Parent directory for unified session toggle migration backups (each migration creates a timestamped generation directory underneath).
 fn official_history_unify_backup_parent() -> PathBuf {
     get_app_config_dir()
         .join("backups")
         .join(OFFICIAL_UNIFY_MIGRATION_NAME)
 }
 
-/// 是否存在可用于还原的迁移备份（给前端决定要不要显示"恢复备份"勾选）。
-/// 与 restore 的账本收集共用同一目录匹配口径：只认属于当前 Codex 目录的
-/// 代际，避免切换 codex_config_dir 后弹出注定空跑的勾选。
-/// 精确账本内容仍在真正还原时才解析。
+/// Whether there are migration backups available for restore (for the frontend to decide whether to show the "restore backups" checkbox).
+/// Shares the same directory matching criteria as restore's ledger collection: only recognizes generations
+/// belonging to the current Codex directory, avoiding showing a checkbox that would result in a no-op after switching codex_config_dir.
+/// Exact ledger contents are only parsed during actual restore.
 pub fn has_codex_official_history_unify_backup() -> bool {
     has_official_history_unify_backup_for_dir(
         &official_history_unify_backup_parent(),
@@ -342,21 +380,24 @@ fn has_official_history_unify_backup_for_dir(ledger_parent: &Path, codex_dir_key
     })
 }
 
-/// 关闭统一会话开关时的可选还原：按迁移备份账本，把当时迁入共享 custom 桶的
-/// 官方会话精确翻回 "openai" 桶。
+/// Optional restore when disabling the unified session toggle: precisely moves official sessions
+/// that were migrated into the shared custom bucket back to the "openai" bucket, based on migration backup ledgers.
 ///
-/// 备份是唯一可信的归属证据：备份里 model_provider=="openai" 的会话必定源自
-/// 官方桶。开启期间新产生的会话不在任何备份里，**永不触碰**——它们可能来自
-/// 第三方，方向无法判定（产品决策：宁可留在第三方历史）。
-/// 扫描全部备份代际取并集，多次开关循环后仍能还原早期迁入的会话；
-/// 还原前改动目标先备份到独立的 restore 目录（保持迁移账本目录纯净），
-/// 且只改写当前仍为 custom 的目标，重复执行无害。
+/// Backups are the only trustworthy attribution evidence: sessions with model_provider=="openai" in
+/// backups must have originated from the official bucket. Sessions created during the enabled period
+/// are not in any backup and are **never touched** — they may come from third parties, and
+/// direction cannot be determined (product decision: better to leave them in third-party history).
+/// All backup generations are scanned and unioned, so sessions migrated in earlier toggle cycles
+/// can still be restored after multiple on/off cycles;
+/// targets to be modified are backed up to a separate restore directory before restore (keeping the
+/// migration ledger directory clean), and only targets currently set to custom are rewritten —
+/// repeated execution is harmless.
 pub fn restore_codex_official_history_from_backups(
 ) -> Result<CodexOfficialHistoryRestoreOutcome, AppError> {
     let _op_guard = lock_codex_official_history_op();
-    // 开关已（重新）开启时拒绝还原：live 正路由 custom，把账本会话翻回
-    // openai 桶等于亲手制造分裂。覆盖"关闭保存成功后用户立刻重新开启，
-    // 还原排在重开迁移之后才拿到 op lock"的时序。
+    // Refuse restore when the toggle is (re-)enabled: live is routing to custom, so moving
+    // ledger sessions back to the openai bucket would create a split. Covers the race where
+    // "disable save succeeds, user immediately re-enables, restore gets op lock after re-enable migration".
     if crate::settings::unify_codex_session_history() {
         return Ok(CodexOfficialHistoryRestoreOutcome {
             skipped_reason: Some("unify_toggle_on".to_string()),
@@ -370,6 +411,69 @@ pub fn restore_codex_official_history_from_backups(
         &migration_backup_root(OFFICIAL_UNIFY_RESTORE_BACKUP_NAME),
         &config_text,
     )
+}
+
+pub fn repair_codex_official_restore_thread_models(
+    stale_model: Option<&str>,
+    official_model: &str,
+) -> Result<usize, AppError> {
+    if !crate::settings::unify_codex_session_history() {
+        return Ok(0);
+    }
+
+    let Some(stale_model) = stale_model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return Ok(0);
+    };
+    let official_model = official_model.trim();
+    if official_model.is_empty() || stale_model == official_model {
+        return Ok(0);
+    }
+
+    let _op_guard = lock_codex_official_history_op();
+    let codex_dir = get_codex_config_dir();
+    let config_text = read_codex_config_text().unwrap_or_default();
+    let backup_root = migration_backup_root(OFFICIAL_MODEL_REPAIR_BACKUP_NAME);
+    let mut repaired = 0;
+    for db_path in codex_state_db_paths(&codex_dir, &config_text) {
+        repaired += repair_codex_state_db_thread_model(
+            &db_path,
+            &codex_dir,
+            stale_model,
+            official_model,
+            &backup_root,
+        )?;
+    }
+    Ok(repaired)
+}
+
+pub fn repair_codex_official_restore_session_item_ids() -> Result<usize, AppError> {
+    if !crate::settings::unify_codex_session_history() {
+        return Ok(0);
+    }
+
+    let _op_guard = lock_codex_official_history_op();
+    let codex_dir = get_codex_config_dir();
+    let backup_root = migration_backup_root(OFFICIAL_ITEM_ID_REPAIR_BACKUP_NAME);
+    repair_codex_session_item_ids_inner(&codex_dir, &backup_root)
+}
+
+fn repair_codex_session_item_ids_inner(
+    codex_dir: &Path,
+    backup_root: &Path,
+) -> Result<usize, AppError> {
+    let mut files = Vec::new();
+    collect_jsonl_files(&codex_dir.join("sessions"), &mut files, 0, 8);
+    collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
+
+    let mut repaired_files = 0;
+    for file_path in files {
+        if rewrite_codex_session_file_lines(&file_path, codex_dir, backup_root, |line| {
+            rewrite_legacy_nexus_message_item_id_line(line)
+        })? {
+            repaired_files += 1;
+        }
+    }
+    Ok(repaired_files)
 }
 
 fn restore_codex_official_history_inner(
@@ -411,8 +515,8 @@ fn restore_codex_official_history_inner(
     }
 
     if restored_jsonl_files == 0 && restored_state_rows == 0 {
-        // 账本非空但没有任何"当前仍为 custom"的目标（如重复还原）：
-        // 以 reason 告知前端，避免误报"已还原 0 项"为成功。
+        // Ledger is non-empty but no targets are currently set to custom (e.g., repeated restore):
+        // report reason to the frontend to avoid misreporting "restored 0 items" as success.
         return Ok(CodexOfficialHistoryRestoreOutcome {
             skipped_reason: Some("nothing_to_restore".to_string()),
             ..Default::default()
@@ -426,12 +530,12 @@ fn restore_codex_official_history_inner(
     })
 }
 
-/// 从备份代际收集官方会话账本：jsonl 备份里 session_meta 为 "openai" 的
-/// 会话 id + state DB 备份里 model_provider 为 "openai" 的 thread id。
-/// 只采纳 meta.json 目录与当前 Codex 目录一致的代际，避免切换
-/// codex_config_dir 后拿旧目录的账本作用到新目录。
-/// 还原操作自身的备份（restore 目录）天然不会混入：那些副本里的 id 都是
-/// custom，解析后贡献为空。
+/// Collects the official session ledger from backup generations: session IDs from jsonl backups where
+/// session_meta has model_provider "openai" + thread IDs from state DB backups where model_provider is "openai".
+/// Only accepts generations whose meta.json directory matches the current Codex directory, preventing
+/// ledgers from an old directory being applied to a new one after switching codex_config_dir.
+/// Restore operation's own backups (restore directory) naturally won't mix in: those copies have
+/// custom IDs, contributing nothing after parsing.
 fn collect_official_ledger(
     ledger_parent: &Path,
     codex_dir_key: &str,
@@ -464,9 +568,10 @@ fn collect_official_ledger(
     Ok((session_ids, thread_ids))
 }
 
-/// 备份代际是否属于指定 Codex 目录。无 meta.json 或解析失败时宽容接受：
-/// 早期版本的备份没有 meta，而那个时期不存在切目录场景；误纳的代价也被
-/// "按会话 id 精确匹配 + 仅改写 custom"双重条件兜底。
+/// Whether the backup generation belongs to the specified Codex directory. Leniently accepts when
+/// meta.json is missing or fails to parse: early versions had no meta, and directory switching did not
+/// exist at that time; the cost of false acceptance is bounded by the "exact session ID match +
+/// only rewrite custom" dual conditions.
 fn backup_generation_matches_dir(generation: &Path, codex_dir_key: &str) -> bool {
     let Ok(text) = fs::read_to_string(generation.join("meta.json")) else {
         return true;
@@ -576,7 +681,7 @@ fn rewrite_codex_session_meta_line_for_restore(
         return None;
     }
     let payload = value.get_mut("payload")?.as_object_mut()?;
-    if payload.get("model_provider")?.as_str()? != CC_SWITCH_CODEX_MODEL_PROVIDER_ID {
+    if payload.get("model_provider")?.as_str()? != NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID {
         return None;
     }
     let session_id = payload.get("id")?.as_str()?;
@@ -601,9 +706,10 @@ fn restore_codex_state_db_official_threads(
     }
 
     let mut conn = Connection::open(db_path)
-        .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| AppError::Database(format!("设置 Codex state DB busy_timeout 失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to open Codex state DB: {e}")))?;
+    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| {
+        AppError::Database(format!("Failed to set Codex state DB busy_timeout: {e}"))
+    })?;
 
     if !Database::table_exists(&conn, "threads")?
         || !Database::has_column(&conn, "threads", "model_provider")?
@@ -619,13 +725,17 @@ fn restore_codex_state_db_official_threads(
             "SELECT COUNT(*) FROM threads WHERE model_provider = ? AND id IN ({placeholders})"
         );
         let mut values = Vec::with_capacity(chunk.len() + 1);
-        values.push(CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string());
+        values.push(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string());
         values.extend(chunk.iter().map(|id| (*id).clone()));
         let count: i64 = conn
             .query_row(&count_sql, params_from_iter(values.iter()), |row| {
                 row.get(0)
             })
-            .map_err(|e| AppError::Database(format!("统计 Codex state DB 待还原行失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "Failed to count Codex state DB rows to restore: {e}"
+                ))
+            })?;
         matching_rows += count;
     }
     if matching_rows == 0 {
@@ -634,9 +744,11 @@ fn restore_codex_state_db_official_threads(
 
     backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
 
-    let tx = conn
-        .transaction()
-        .map_err(|e| AppError::Database(format!("开启 Codex state DB 还原事务失败: {e}")))?;
+    let tx = conn.transaction().map_err(|e| {
+        AppError::Database(format!(
+            "Failed to start Codex state DB restore transaction: {e}"
+        ))
+    })?;
     let mut changed = 0;
     for chunk in ids.chunks(STATE_DB_ID_CHUNK) {
         let placeholders = placeholders(chunk.len());
@@ -645,14 +757,19 @@ fn restore_codex_state_db_official_threads(
         );
         let mut values = Vec::with_capacity(chunk.len() + 2);
         values.push(OFFICIAL_OPENAI_CODEX_MODEL_PROVIDER_ID.to_string());
-        values.push(CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string());
+        values.push(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string());
         values.extend(chunk.iter().map(|id| (*id).clone()));
         changed += tx
             .execute(&update_sql, params_from_iter(values.iter()))
-            .map_err(|e| AppError::Database(format!("还原 Codex state DB provider 失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!("Failed to restore Codex state DB provider: {e}"))
+            })?;
     }
-    tx.commit()
-        .map_err(|e| AppError::Database(format!("提交 Codex state DB 还原事务失败: {e}")))?;
+    tx.commit().map_err(|e| {
+        AppError::Database(format!(
+            "Failed to commit Codex state DB restore transaction: {e}"
+        ))
+    })?;
     Ok(changed)
 }
 
@@ -716,7 +833,7 @@ fn collect_source_model_provider_ids(db: &Database) -> Result<BTreeSet<String>, 
             continue;
         }
 
-        insert_known_cc_switch_legacy_source_id(&mut ids, &provider.id);
+        insert_known_legacy_source_id(&mut ids, &provider.id);
 
         let Some(config_text) = provider
             .settings_config
@@ -727,21 +844,21 @@ fn collect_source_model_provider_ids(db: &Database) -> Result<BTreeSet<String>, 
         };
 
         for provider_id in trusted_legacy_codex_model_provider_ids_from_config(config_text) {
-            insert_known_cc_switch_legacy_source_id(&mut ids, &provider_id);
+            insert_known_legacy_source_id(&mut ids, &provider_id);
         }
         if let Some(provider_id) =
             legacy_codex_model_provider_id_from_normalized_config(config_text)
         {
-            insert_known_cc_switch_legacy_source_id(&mut ids, &provider_id);
+            insert_known_legacy_source_id(&mut ids, &provider_id);
         }
     }
 
     Ok(ids)
 }
 
-fn insert_known_cc_switch_legacy_source_id(ids: &mut BTreeSet<String>, provider_id: &str) {
+fn insert_known_legacy_source_id(ids: &mut BTreeSet<String>, provider_id: &str) {
     let trimmed = provider_id.trim();
-    if is_known_cc_switch_legacy_codex_model_provider_id(trimmed) {
+    if is_known_legacy_codex_model_provider_id(trimmed) {
         ids.insert(trimmed.to_string());
     }
 }
@@ -753,8 +870,8 @@ fn migration_backup_root(migration_name: &str) -> PathBuf {
         .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
 }
 
-fn is_known_cc_switch_legacy_codex_model_provider_id(provider_id: &str) -> bool {
-    CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS
+fn is_known_legacy_codex_model_provider_id(provider_id: &str) -> bool {
+    LEGACY_CODEX_MODEL_PROVIDER_IDS
         .iter()
         .any(|known| known.eq_ignore_ascii_case(provider_id))
 }
@@ -765,8 +882,8 @@ fn legacy_codex_model_provider_id_from_normalized_config(config_text: &str) -> O
         .get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)?;
-    if provider_id != CC_SWITCH_CODEX_MODEL_PROVIDER_ID
-        && provider_id != LEGACY_CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+    if provider_id != NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID
+        && provider_id != LEGACY_CODEX_MODEL_PROVIDER_ID
     {
         return None;
     }
@@ -784,8 +901,8 @@ fn legacy_codex_model_provider_id_from_normalized_config(config_text: &str) -> O
 }
 
 fn normalized_legacy_codex_provider_name(name: &str) -> Option<&'static str> {
-    if is_known_cc_switch_legacy_codex_model_provider_id(name) {
-        return CC_SWITCH_LEGACY_CODEX_MODEL_PROVIDER_IDS
+    if is_known_legacy_codex_model_provider_id(name) {
+        return LEGACY_CODEX_MODEL_PROVIDER_IDS
             .iter()
             .copied()
             .find(|known| known.eq_ignore_ascii_case(name));
@@ -834,7 +951,7 @@ fn insert_trusted_legacy_config_model_provider_id(
         return;
     };
     if provider_id.is_empty()
-        || !is_known_cc_switch_legacy_codex_model_provider_id(provider_id)
+        || !is_known_legacy_codex_model_provider_id(provider_id)
         || !config_defines_model_provider(doc, provider_id)
     {
         return;
@@ -874,7 +991,7 @@ fn migrate_provider_config_template_to_custom(
         .map(str::to_string);
 
     let custom_table_exists =
-        config_defines_model_provider(&doc, CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+        config_defines_model_provider(&doc, NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID);
     let source_provider_id_to_move = active_provider_id
         .as_deref()
         .filter(|provider_id| source_provider_ids.contains(*provider_id))
@@ -900,7 +1017,7 @@ fn migrate_provider_config_template_to_custom(
         let Some(provider_table) = model_providers.remove(source_provider_id.as_str()) else {
             return Ok(None);
         };
-        model_providers[CC_SWITCH_CODEX_MODEL_PROVIDER_ID] = provider_table;
+        model_providers[NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID] = provider_table;
         changed = true;
     }
 
@@ -908,7 +1025,7 @@ fn migrate_provider_config_template_to_custom(
         .as_deref()
         .is_some_and(|provider_id| source_provider_ids.contains(provider_id))
     {
-        doc["model_provider"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+        doc["model_provider"] = toml_edit::value(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID);
         changed = true;
     }
 
@@ -950,7 +1067,7 @@ fn rewrite_legacy_provider_profile_refs(doc: &mut DocumentMut, source_provider_i
         if references_legacy {
             profile_table.insert(
                 "model_provider",
-                toml_edit::value(CC_SWITCH_CODEX_MODEL_PROVIDER_ID),
+                toml_edit::value(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID),
             );
             changed = true;
         }
@@ -1093,8 +1210,35 @@ fn rewrite_codex_session_meta_line(
 
     payload.insert(
         "model_provider".to_string(),
-        Value::String(CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string()),
+        Value::String(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string()),
     );
+    serde_json::to_string(&value).ok()
+}
+
+fn rewrite_legacy_nexus_message_item_id_line(line: &str) -> Option<String> {
+    if !line.contains("\"response_item\"") || !line.contains("resp_") {
+        return None;
+    }
+
+    let mut value: Value = serde_json::from_str(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("response_item") {
+        return None;
+    }
+
+    let payload = value.get_mut("payload")?.as_object_mut()?;
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("assistant")
+    {
+        return None;
+    }
+
+    let current_id = payload.get("id")?.as_str()?;
+    let suffix = current_id.strip_prefix("resp_")?.strip_suffix("_msg")?;
+    if suffix.is_empty() {
+        return None;
+    }
+
+    payload.insert("id".to_string(), Value::String(format!("msg_{suffix}")));
     serde_json::to_string(&value).ok()
 }
 
@@ -1127,9 +1271,10 @@ fn migrate_codex_state_db_provider_bucket(
     }
 
     let mut conn = Connection::open(db_path)
-        .map_err(|e| AppError::Database(format!("打开 Codex state DB 失败: {e}")))?;
-    conn.busy_timeout(Duration::from_secs(5))
-        .map_err(|e| AppError::Database(format!("设置 Codex state DB busy_timeout 失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to open Codex state DB: {e}")))?;
+    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| {
+        AppError::Database(format!("Failed to set Codex state DB busy_timeout: {e}"))
+    })?;
 
     if !Database::table_exists(&conn, "threads")?
         || !Database::has_column(&conn, "threads", "model_provider")?
@@ -1146,7 +1291,11 @@ fn migrate_codex_state_db_provider_bucket(
             params_from_iter(source_provider_ids.iter()),
             |row| row.get(0),
         )
-        .map_err(|e| AppError::Database(format!("统计 Codex state DB 待迁移行失败: {e}")))?;
+        .map_err(|e| {
+            AppError::Database(format!(
+                "Failed to count Codex state DB rows to migrate: {e}"
+            ))
+        })?;
     if matching_rows == 0 {
         return Ok(0);
     }
@@ -1156,16 +1305,80 @@ fn migrate_codex_state_db_provider_bucket(
     let update_sql =
         format!("UPDATE threads SET model_provider = ? WHERE model_provider IN ({placeholders})");
     let mut values = Vec::with_capacity(source_provider_ids.len() + 1);
-    values.push(CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string());
+    values.push(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID.to_string());
     values.extend(source_provider_ids.iter().cloned());
-    let tx = conn
-        .transaction()
-        .map_err(|e| AppError::Database(format!("开启 Codex state DB 迁移事务失败: {e}")))?;
+    let tx = conn.transaction().map_err(|e| {
+        AppError::Database(format!(
+            "Failed to start Codex state DB migration transaction: {e}"
+        ))
+    })?;
     let changed = tx
         .execute(&update_sql, params_from_iter(values.iter()))
-        .map_err(|e| AppError::Database(format!("迁移 Codex state DB provider 失败: {e}")))?;
+        .map_err(|e| {
+            AppError::Database(format!("Failed to migrate Codex state DB provider: {e}"))
+        })?;
+    tx.commit().map_err(|e| {
+        AppError::Database(format!(
+            "Failed to commit Codex state DB migration transaction: {e}"
+        ))
+    })?;
+    Ok(changed)
+}
+
+fn repair_codex_state_db_thread_model(
+    db_path: &Path,
+    codex_dir: &Path,
+    stale_model: &str,
+    official_model: &str,
+    backup_root: &Path,
+) -> Result<usize, AppError> {
+    if !db_path.exists() {
+        return Ok(0);
+    }
+
+    let mut conn = Connection::open(db_path)
+        .map_err(|e| AppError::Database(format!("Failed to open Codex state DB: {e}")))?;
+    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| {
+        AppError::Database(format!("Failed to set Codex state DB busy_timeout: {e}"))
+    })?;
+
+    if !Database::table_exists(&conn, "threads")?
+        || !Database::has_column(&conn, "threads", "model_provider")?
+        || !Database::has_column(&conn, "threads", "model")?
+    {
+        return Ok(0);
+    }
+
+    let matching_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM threads WHERE model_provider = ?1 AND model = ?2",
+            [NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID, stale_model],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            AppError::Database(format!("Failed to count stale Codex thread models: {e}"))
+        })?;
+    if matching_rows == 0 {
+        return Ok(0);
+    }
+
+    backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
+
+    let tx = conn
+        .transaction()
+        .map_err(|e| AppError::Database(format!("Failed to start Codex model repair: {e}")))?;
+    let changed = tx
+        .execute(
+            "UPDATE threads SET model = ?1 WHERE model_provider = ?2 AND model = ?3",
+            [
+                official_model,
+                NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID,
+                stale_model,
+            ],
+        )
+        .map_err(|e| AppError::Database(format!("Failed to repair Codex thread models: {e}")))?;
     tx.commit()
-        .map_err(|e| AppError::Database(format!("提交 Codex state DB 迁移事务失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to commit Codex model repair: {e}")))?;
     Ok(changed)
 }
 
@@ -1200,12 +1413,13 @@ fn backup_codex_state_db(
     }
 
     let mut backup_conn = Connection::open(&backup_path)
-        .map_err(|e| AppError::Database(format!("创建 Codex state DB 备份失败: {e}")))?;
-    let backup = Backup::new(source_conn, &mut backup_conn)
-        .map_err(|e| AppError::Database(format!("初始化 Codex state DB 备份失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to create Codex state DB backup: {e}")))?;
+    let backup = Backup::new(source_conn, &mut backup_conn).map_err(|e| {
+        AppError::Database(format!("Failed to initialize Codex state DB backup: {e}"))
+    })?;
     backup
         .run_to_completion(5, Duration::from_millis(25), None)
-        .map_err(|e| AppError::Database(format!("写入 Codex state DB 备份失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to write Codex state DB backup: {e}")))?;
     Ok(())
 }
 
@@ -1314,8 +1528,86 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn fresh_install_preserves_existing_codex_history_without_scanning() {
+        let home = tempdir().expect("temp home");
+        let _home_guard = EnvVarGuard::set("NEXUS_COMPOSER_TEST_HOME", home.path());
+        crate::settings::reload_settings().expect("reload settings");
+
+        let outcome = preserve_codex_history_for_fresh_install().expect("preserve history");
+        assert_eq!(
+            outcome.skipped_reason.as_deref(),
+            Some("fresh_install_preserves_existing_codex_history")
+        );
+
+        let migration = crate::settings::get_settings()
+            .local_migrations
+            .and_then(|migrations| migrations.codex_third_party_history_provider_bucket_v1)
+            .expect("fresh-install marker");
+        assert!(!migration.scanned_history_files);
+        assert_eq!(migration.migrated_jsonl_files, 0);
+        assert_eq!(migration.migrated_state_rows, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn official_restore_repairs_are_disabled_without_unified_history() {
+        let home = tempdir().expect("temp home");
+        let _home_guard = EnvVarGuard::set("NEXUS_COMPOSER_TEST_HOME", home.path());
+        crate::settings::reload_settings().expect("reload settings");
+
+        let codex_dir = get_codex_config_dir();
+        let session_dir = codex_dir.join("sessions/2026/07/24");
+        fs::create_dir_all(&session_dir).expect("create session directory");
+        let session_path = session_dir.join("rollout.jsonl");
+        let original = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"existing\",\"model_provider\":\"custom\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"resp_existing_msg\",\"content\":[]}}\n",
+        );
+        fs::write(&session_path, original).expect("write existing session");
+
+        let state_db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&state_db_path).expect("create state db");
+        conn.execute(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT)",
+            [],
+        )
+        .expect("create threads table");
+        conn.execute(
+            "INSERT INTO threads (id, model_provider, model) VALUES ('existing', 'custom', 'GLM-5.2-SGLang')",
+            [],
+        )
+        .expect("insert existing thread");
+        drop(conn);
+
+        assert_eq!(
+            repair_codex_official_restore_thread_models(Some("GLM-5.2-SGLang"), "gpt-5.5",)
+                .expect("skip model repair"),
+            0
+        );
+        assert_eq!(
+            repair_codex_official_restore_session_item_ids().expect("skip item id repair"),
+            0
+        );
+
+        assert_eq!(
+            fs::read_to_string(&session_path).expect("read preserved session"),
+            original
+        );
+        let conn = Connection::open(&state_db_path).expect("reopen state db");
+        let model: String = conn
+            .query_row(
+                "SELECT model FROM threads WHERE id = 'existing'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read preserved model");
+        assert_eq!(model, "GLM-5.2-SGLang");
+    }
+
+    #[test]
     fn detects_custom_routed_codex_config_for_unify_gate() {
-        // 注入产物（官方 + 统一开关）
+        // Injection result (official + unified toggle)
         assert!(codex_config_text_routes_custom(
             r#"model_provider = "custom"
 
@@ -1326,7 +1618,7 @@ supports_websockets = true
 wire_api = "responses"
 "#
         ));
-        // 第三方供应商的常规 custom 路由（带 base_url）同样算已统一
+        // Regular custom route for a third-party provider (with base_url) also counts as unified
         assert!(codex_config_text_routes_custom(
             r#"model_provider = "custom"
 
@@ -1335,7 +1627,7 @@ name = "AIHubMix"
 base_url = "https://aihubmix.example/v1"
 "#
         ));
-        // 注入被拒的形态：显式 openai 路由 / 无 model_provider（接管期间、空配置）
+        // Shapes where injection was rejected: explicit openai route / no model_provider (during takeover, empty config)
         assert!(!codex_config_text_routes_custom(
             "model_provider = \"openai\"\n"
         ));
@@ -1383,7 +1675,7 @@ base_url = "https://aihubmix.example/v1"
             ),
             Provider::with_id(
                 "legacy-ccswitch".to_string(),
-                "Legacy CC Switch".to_string(),
+                "Legacy Provider".to_string(),
                 serde_json::json!({
                     "auth": {},
                     "config": r#"model_provider = "ccswitch"
@@ -1576,15 +1868,15 @@ base_url = "https://proxy.example/v1"
             .and_then(|value| value.get("aihubmix"))
             .is_none());
 
-        let ccswitch_config: toml::Value =
+        let legacy_config: toml::Value =
             toml::from_str(&config_provider_id("legacy-ccswitch")).expect("parse ccswitch config");
         assert_eq!(
-            ccswitch_config
+            legacy_config
                 .get("model_provider")
                 .and_then(|value| value.as_str()),
             Some("custom")
         );
-        assert!(ccswitch_config
+        assert!(legacy_config
             .get("model_providers")
             .and_then(|value| value.get("ccswitch"))
             .is_none());
@@ -1661,7 +1953,7 @@ base_url = "https://proxy.example/v1"
             .join("jsonl/sessions/2026/06/12/official-sim.jsonl")
             .exists());
 
-        // 第二次执行应当无事可做（幂等）
+        // Second execution should be a no-op (idempotent)
         let rerun = migrate_codex_jsonl_files(&codex_dir, &source_provider_ids, &backup_root)
             .expect("rerun migrate jsonl");
         assert_eq!(rerun, 0);
@@ -1711,7 +2003,7 @@ base_url = "https://proxy.example/v1"
         let ledger_parent = dir.path().join("ledger");
         let restore_backup_root = dir.path().join("restore-backup");
 
-        // 备份账本：一个代际，jsonl 备份里 s1 是 openai；state 备份里 t1 是 openai
+        // Backup ledger: one generation, jsonl backup has s1 as openai; state backup has t1 as openai
         let generation = ledger_parent.join("20260612_010101");
         let backup_session_dir = generation.join("jsonl/sessions/2026/06/01");
         fs::create_dir_all(&backup_session_dir).expect("create backup session dir");
@@ -1732,8 +2024,8 @@ base_url = "https://proxy.example/v1"
             .expect("seed backup db");
         drop(backup_db);
 
-        // 当前数据：s1（账本内，custom）应还原；s2（开启期间新会话，不在账本）
-        // 与 s3（手工 relay）必须原样保留
+        // Current data: s1 (in ledger, custom) should be restored; s2 (new session during enabled period, not in ledger)
+        // and s3 (manual relay) must remain unchanged
         let session_dir = codex_dir.join("sessions/2026/06/01");
         fs::create_dir_all(&session_dir).expect("create session dir");
         let official_path = session_dir.join("official.jsonl");
@@ -1766,7 +2058,7 @@ base_url = "https://proxy.example/v1"
         .expect("seed state db");
         drop(conn);
 
-        // 代际 meta 指向当前 Codex 目录：精确匹配分支生效（而非无 meta 的宽容分支）
+        // Generation meta points to current Codex directory: exact match branch takes effect (rather than the lenient no-meta branch)
         fs::write(
             generation.join("meta.json"),
             serde_json::to_vec_pretty(&serde_json::json!({
@@ -1807,7 +2099,7 @@ base_url = "https://proxy.example/v1"
         assert_eq!(provider_of("t3"), "openai");
         drop(conn);
 
-        // 还原前的现场已备份到独立目录
+        // Pre-restore state has been backed up to a separate directory
         assert!(restore_backup_root
             .join("jsonl/sessions/2026/06/01/official.jsonl")
             .exists());
@@ -1816,7 +2108,7 @@ base_url = "https://proxy.example/v1"
             .join(CODEX_STATE_DB_FILENAME)
             .exists());
 
-        // 幂等：第二次还原无事可做
+        // Idempotent: second restore should be a no-op
         let rerun = restore_codex_official_history_inner(
             &codex_dir,
             &ledger_parent,
@@ -1835,7 +2127,7 @@ base_url = "https://proxy.example/v1"
         let codex_dir = dir.path().join(".codex");
         let ledger_parent = dir.path().join("ledger");
 
-        // 账本代际属于另一个 Codex 目录
+        // Backup generation belongs to another Codex directory
         let generation = ledger_parent.join("20260612_010101");
         let backup_session_dir = generation.join("jsonl/sessions/2026/06/01");
         fs::create_dir_all(&backup_session_dir).expect("create backup session dir");
@@ -1877,13 +2169,13 @@ base_url = "https://proxy.example/v1"
         let ledger_parent = dir.path().join("ledger");
         let codex_dir_key = "/current/codex-dir";
 
-        // 空父目录 / 父目录不存在：无备份
+        // Empty parent directory / parent does not exist: no backup
         assert!(!has_official_history_unify_backup_for_dir(
             &ledger_parent,
             codex_dir_key
         ));
 
-        // 只有其他目录的代际：不算有备份
+        // Only generations from other directories: does not count as having backup
         let other = ledger_parent.join("20260612_010101");
         fs::create_dir_all(&other).expect("create generation");
         fs::write(
@@ -1896,14 +2188,14 @@ base_url = "https://proxy.example/v1"
             codex_dir_key
         ));
 
-        // 无 meta 的早期代际：宽容接受（与 restore 的账本口径一致）
+        // Early generation without meta: leniently accepted (consistent with restore's ledger criteria)
         fs::create_dir_all(ledger_parent.join("20260612_020202")).expect("create legacy gen");
         assert!(has_official_history_unify_backup_for_dir(
             &ledger_parent,
             codex_dir_key
         ));
 
-        // 精确匹配当前目录的代际
+        // Exact match for current directory's generation
         fs::remove_dir_all(ledger_parent.join("20260612_020202")).expect("remove legacy gen");
         let matched = ledger_parent.join("20260612_030303");
         fs::create_dir_all(&matched).expect("create matched gen");
@@ -1943,6 +2235,58 @@ base_url = "https://proxy.example/v1"
 
         let text = fs::read_to_string(session_dir.join("session.jsonl")).expect("read session");
         assert!(text.contains("\"model_provider\":\"custom\""));
+    }
+
+    #[test]
+    fn repairs_only_legacy_nexus_assistant_message_item_ids() {
+        let legacy = r#"{"timestamp":"2026-07-14T03:17:00Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"resp_3c5cbb5a87494acbb209e40ad9562ed0_msg","content":[]}}"#;
+        let repaired = rewrite_legacy_nexus_message_item_id_line(legacy).expect("repair id");
+        let value: Value = serde_json::from_str(&repaired).expect("parse repaired line");
+        assert_eq!(
+            value["payload"]["id"],
+            "msg_3c5cbb5a87494acbb209e40ad9562ed0"
+        );
+
+        let native = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_native","content":[]}}"#;
+        assert!(rewrite_legacy_nexus_message_item_id_line(native).is_none());
+
+        let user = r#"{"type":"response_item","payload":{"type":"message","role":"user","id":"resp_client_msg","content":[]}}"#;
+        assert!(rewrite_legacy_nexus_message_item_id_line(user).is_none());
+
+        let tool = r#"{"type":"response_item","payload":{"type":"function_call","id":"resp_tool_msg","call_id":"call_1"}}"#;
+        assert!(rewrite_legacy_nexus_message_item_id_line(tool).is_none());
+    }
+
+    #[test]
+    fn repairs_legacy_item_ids_in_session_files_with_backup() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let session_dir = codex_dir.join("sessions/2026/07/14");
+        let backup_root = dir.path().join("backup");
+        fs::create_dir_all(&session_dir).expect("create session dir");
+        let session_path = session_dir.join("rollout.jsonl");
+        let original = concat!(
+            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"custom\"}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"resp_legacy_msg\",\"content\":[]}}\n",
+            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_native\",\"content\":[]}}\n",
+        );
+        fs::write(&session_path, original).expect("write session");
+
+        let repaired = repair_codex_session_item_ids_inner(&codex_dir, &backup_root)
+            .expect("repair session files");
+        assert_eq!(repaired, 1);
+
+        let text = fs::read_to_string(&session_path).expect("read repaired session");
+        assert!(text.contains("\"id\":\"msg_legacy\""));
+        assert!(text.contains("\"id\":\"msg_native\""));
+        assert!(!text.contains("resp_legacy_msg"));
+
+        let backup = backup_root.join("jsonl/sessions/2026/07/14/rollout.jsonl");
+        assert_eq!(fs::read_to_string(backup).expect("read backup"), original);
+
+        let rerun =
+            repair_codex_session_item_ids_inner(&codex_dir, &backup_root).expect("rerun repair");
+        assert_eq!(rerun, 0);
     }
 
     #[test]
@@ -2137,7 +2481,9 @@ base_url = "https://proxy.example/v1"
         let env_sqlite_home = dir.path().join("env-sqlite-home");
         let config_sqlite_home = dir.path().join("config-sqlite-home");
         let _guard = EnvVarGuard::set("CODEX_SQLITE_HOME", &env_sqlite_home);
-        let config_text = format!("sqlite_home = \"{}\"\n", config_sqlite_home.display());
+        // Use TOML literal string (single-quote) so Windows backslashes in the
+        // path are not interpreted as escape characters by the TOML parser.
+        let config_text = format!("sqlite_home = '{}'\n", config_sqlite_home.display());
 
         let paths = codex_state_db_paths(&codex_dir, &config_text);
 
@@ -2271,7 +2617,7 @@ model_provider = "my-private-relay"
     }
 
     #[test]
-    fn collects_legacy_ccswitch_provider_id_from_stored_config() {
+    fn collects_legacy_provider_id_from_stored_config() {
         let db = Database::memory().expect("memory db");
         let mut provider = Provider::with_id(
             "generated-uuid".to_string(),
@@ -2373,11 +2719,11 @@ model = "gpt-5.4"
     }
 
     #[test]
-    fn migrates_legacy_ccswitch_provider_template_to_custom() {
+    fn migrates_legacy_provider_template_to_custom() {
         let db = Database::memory().expect("memory db");
         let provider = Provider::with_id(
             "legacy-ccswitch".to_string(),
-            "Legacy CC Switch".to_string(),
+            "Legacy Provider".to_string(),
             serde_json::json!({
                 "auth": {},
                 "config": r#"model_provider = "ccswitch"
@@ -2586,7 +2932,7 @@ model_provider = "aihubmix"
     }
 
     #[test]
-    fn skips_custom_category_unknown_provider_when_created_by_cc_switch() {
+    fn skips_custom_category_unknown_provider_when_created_by_legacy_app() {
         let db = Database::memory().expect("memory db");
         let mut provider = Provider::with_id(
             "generated-uuid".to_string(),

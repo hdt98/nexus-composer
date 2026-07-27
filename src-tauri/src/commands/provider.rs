@@ -6,19 +6,23 @@ use crate::commands::copilot::CopilotAuthState;
 use crate::error::AppError;
 use crate::provider::{ClaudeDesktopMode, Provider};
 use crate::services::{
-    EndpointLatency, ProviderService, ProviderSortUpdate, SpeedtestService, SwitchResult,
+    EndpointLatency, ProviderService, ProviderSortUpdate, RemoteAgentDeployResult,
+    RemoteAgentService, RemoteAgentStatus, RemoteAgentSwitchResult, RemoteApplyResult,
+    RemoteImportResult, RemoteProviderService, RemoteProviderState, RemoteUsageSyncProgress,
+    RemoteUsageSyncResult, SpeedtestService, SshConnectionTarget, SshHostEntry, SwitchResult,
 };
 use crate::store::AppState;
 use std::str::FromStr;
 
-// 常量定义
+// Constants
 const TEMPLATE_TYPE_GITHUB_COPILOT: &str = "github_copilot";
 const TEMPLATE_TYPE_TOKEN_PLAN: &str = "token_plan";
 const TEMPLATE_TYPE_BALANCE: &str = "balance";
 const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
 const COPILOT_UNIT_PREMIUM: &str = "requests";
+const REMOTE_USAGE_SYNC_PROGRESS_EVENT: &str = "remote-usage-sync-progress";
 
-/// 获取所有供应商
+/// Get all providers
 #[tauri::command]
 pub fn get_providers(
     state: State<'_, AppState>,
@@ -107,6 +111,184 @@ pub fn switch_provider(
 ) -> Result<SwitchResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     switch_provider_internal(&state, app_type, &id).map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_ssh_config_hosts() -> Result<Vec<SshHostEntry>, String> {
+    tauri::async_runtime::spawn_blocking(RemoteProviderService::list_ssh_hosts)
+        .await
+        .map_err(|e| format!("Failed to read SSH hosts: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn apply_provider_to_remote(
+    state: State<'_, AppState>,
+    app: String,
+    id: String,
+    target: SshConnectionTarget,
+    force_overwrite: Option<bool>,
+) -> Result<RemoteApplyResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = AppState::new(db);
+        RemoteProviderService::apply_provider_to_remote(
+            &app_state,
+            app_type,
+            &id,
+            &target,
+            force_overwrite.unwrap_or(false),
+        )
+    })
+    .await
+    .map_err(|e| format!("Remote switch failed: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn inspect_remote_provider(
+    state: State<'_, AppState>,
+    app: String,
+    target: SshConnectionTarget,
+) -> Result<RemoteProviderState, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = AppState::new(db);
+        RemoteProviderService::inspect_remote_provider(&app_state, app_type, &target)
+    })
+    .await
+    .map_err(|e| format!("Failed to read remote config: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn import_remote_provider(
+    state: State<'_, AppState>,
+    app: String,
+    target: SshConnectionTarget,
+) -> Result<RemoteImportResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = AppState::new(db);
+        RemoteProviderService::import_remote_provider(&app_state, app_type, &target)
+    })
+    .await
+    .map_err(|e| format!("Failed to download remote config: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn sync_remote_session_usage(
+    state: State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+    app: String,
+    target: SshConnectionTarget,
+    sync_id: Option<String>,
+) -> Result<RemoteUsageSyncResult, String> {
+    let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = AppState::new(db);
+        let target_label = target
+            .alias
+            .as_deref()
+            .or(target.host.as_deref())
+            .unwrap_or("remote")
+            .to_string();
+        let sync_id = sync_id.as_deref().filter(|value| !value.trim().is_empty());
+        let progress_app_handle = app_handle.clone();
+        let progress = move |payload: RemoteUsageSyncProgress| {
+            let _ = progress_app_handle.emit(REMOTE_USAGE_SYNC_PROGRESS_EVENT, payload);
+        };
+        let result = RemoteProviderService::sync_remote_session_usage_with_progress(
+            &app_state,
+            app_type.clone(),
+            &target,
+            sync_id,
+            sync_id.map(|_| &progress as &dyn Fn(RemoteUsageSyncProgress)),
+        );
+
+        if let (Some(sync_id), Err(error)) = (sync_id, result.as_ref()) {
+            let _ = app_handle.emit(
+                REMOTE_USAGE_SYNC_PROGRESS_EVENT,
+                RemoteUsageSyncProgress::failed(
+                    sync_id,
+                    &target_label,
+                    &app_type,
+                    error.to_string(),
+                ),
+            );
+        }
+
+        result
+    })
+    .await
+    .map_err(|e| format!("Failed to sync remote usage: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_remote_agent_status(
+    target: SshConnectionTarget,
+) -> Result<RemoteAgentStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || RemoteAgentService::status(&target))
+        .await
+        .map_err(|e| format!("Failed to check remote agent: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn deploy_remote_agent(
+    state: State<'_, AppState>,
+    target: SshConnectionTarget,
+    provider_id: String,
+) -> Result<RemoteAgentDeployResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = AppState::new(db);
+        RemoteAgentService::deploy(&app_state, &target, &provider_id)
+    })
+    .await
+    .map_err(|e| format!("Failed to deploy remote agent: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn switch_remote_agent_provider(
+    state: State<'_, AppState>,
+    target: SshConnectionTarget,
+    provider_id: String,
+) -> Result<RemoteAgentSwitchResult, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let app_state = AppState::new(db);
+        RemoteAgentService::switch_provider(&app_state, &target, &provider_id)
+    })
+    .await
+    .map_err(|e| format!("Failed to switch remote agent provider: {e}"))?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn stop_remote_agent(target: SshConnectionTarget) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || RemoteAgentService::stop(&target))
+        .await
+        .map_err(|e| format!("Failed to stop remote agent: {e}"))?
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn get_remote_agent_logs(
+    target: SshConnectionTarget,
+    lines: Option<u16>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || RemoteAgentService::logs(&target, lines))
+        .await
+        .map_err(|e| format!("Failed to read remote agent logs: {e}"))?
+        .map_err(|e| e.to_string())
 }
 
 fn import_default_config_internal(state: &AppState, app_type: AppType) -> Result<bool, AppError> {
@@ -207,9 +389,9 @@ pub fn import_claude_desktop_providers_from_claude(
         imported += 1;
     }
 
-    // Safety net: 用户可能手动删除过 claude-desktop-official seed。
-    // 用户主动点 import 是"重新整理 ClaudeDesktop 表"的隐式信号，把官方入口补回来。
-    // 失败只 warn，不影响 imported 主流程；imported 计数语义保持纯净。
+    // Safety net: user may have manually deleted the claude-desktop-official seed.
+    // User clicking import is an implicit signal to re-organize the ClaudeDesktop table, restore official entry.
+    // Failure only warns, does not affect the main import flow; imported count semantics remain clean.
     if let Err(e) = state.db.ensure_official_seed_by_id(
         crate::database::CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID,
         AppType::ClaudeDesktop,
@@ -285,8 +467,8 @@ pub(crate) fn suggested_claude_desktop_routes(
             return;
         };
 
-        // Claude 端 env 值可能带 [1M] 后缀；Claude Desktop schema 不接受后缀，
-        // 改用 supports1m 字段表达 1M 能力。在 import 边界做单向翻译。
+        // Claude env values may have [1M] suffix; Claude Desktop schema does not accept the suffix,
+        // use supports1m field to express 1M capability. One-way translation at import boundary.
         let marker = crate::claude_desktop_config::ONE_M_CONTEXT_MARKER.as_bytes();
         let raw_bytes = raw_model.as_bytes();
         let has_1m_marker = raw_bytes.len() >= marker.len()
@@ -311,8 +493,8 @@ pub(crate) fn suggested_claude_desktop_routes(
                 .then(|| stripped_model.to_string())
         });
 
-        // 何时覆盖既有 label_override：原本为空 / 这次来的是 explicit _NAME /
-        // 既有值只是 stripped_model 派生的占位（被 explicit 或更具体的值挤掉）。
+        // When to override existing label_override: originally empty / this time it is an explicit _NAME /
+        // existing value is just a placeholder derived from stripped_model (displaced by explicit or more specific value).
         let should_overwrite = |existing: Option<&str>| {
             existing.is_none()
                 || explicit_label_override.is_some()
@@ -355,7 +537,7 @@ pub(crate) fn suggested_claude_desktop_routes(
         );
     }
 
-    // 三个 default env_key 全空时用 ANTHROPIC_MODEL 派生兜底路由。
+    // When all three default env_keys are empty, use ANTHROPIC_MODEL derived fallback routing.
     if routes.is_empty() {
         let primary_route = crate::claude_desktop_config::DEFAULT_PROXY_ROUTES[0].route_id;
         add_route(
@@ -376,37 +558,35 @@ pub async fn queryProviderUsage(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
     copilot_state: State<'_, CopilotAuthState>,
-    #[allow(non_snake_case)] providerId: String, // 使用 camelCase 匹配前端
+    #[allow(non_snake_case)] providerId: String, // camelCase to match frontend
     app: String,
 ) -> Result<crate::provider::UsageResult, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
-    // inner 可能以两种形式失败：
-    //   1) 返回 Ok(UsageResult { success: false, .. }) —— 业务失败（401、脚本报错等）
-    //   2) 返回 Err(String) —— RPC/DB/Copilot fetch_usage 等 transport 层失败
-    // 两种都要把"失败"写进 UsageCache 并刷新托盘，让 format_script_summary 的
-    // success 守卫生效、suffix 自然消失，避免旧 success 快照长期滞留。
-    // 同时保持原始 Err 返回给前端 React Query 的 onError 回调，不吞错误。
+    // inner may fail in two forms:
+    //   1) Returns Ok(UsageResult { success: false, .. }) — deterministic failure (401, script
+    //      error, unknown provider, etc.). Write to UsageCache and refresh tray, so
+    //      format_script_summary success guard takes effect, suffix naturally disappears.
+    //   2) Returns Err(String) — transient failure (network/timeout) and DB/Copilot fetch, etc.
+    //      Do not write failure snapshot, do not emit: keep previous tray snapshot, consistent with
+    //      frontend react-query reject keeping last data semantics; otherwise failure snapshot would
+    //      be blindly written back to query cache via useUsageCacheBridge, erasing the old value reject should keep.
     let inner =
         query_provider_usage_inner(&state, &copilot_state, app_type.clone(), &providerId).await;
-    let snapshot = match &inner {
-        Ok(r) => r.clone(),
-        Err(err_msg) => crate::provider::UsageResult {
-            success: false,
-            data: None,
-            error: Some(err_msg.clone()),
-        },
-    };
-    let payload = serde_json::json!({
-        "kind": "script",
-        "appType": app_type.as_str(),
-        "providerId": &providerId,
-        "data": &snapshot,
-    });
-    if let Err(e) = app_handle.emit("usage-cache-updated", payload) {
-        log::error!("emit usage-cache-updated (script) 失败: {e}");
+    if let Ok(snapshot) = &inner {
+        let payload = serde_json::json!({
+            "kind": "script",
+            "appType": app_type.as_str(),
+            "providerId": &providerId,
+            "data": snapshot,
+        });
+        if let Err(e) = app_handle.emit("usage-cache-updated", payload) {
+            log::error!("emit usage-cache-updated (script) failed: {e}");
+        }
+        state
+            .usage_cache
+            .put_script(app_type, providerId, snapshot.clone());
+        crate::tray::schedule_tray_refresh(&app_handle);
     }
-    state.usage_cache.put_script(app_type, providerId, snapshot);
-    crate::tray::schedule_tray_refresh(&app_handle);
     inner
 }
 
@@ -460,7 +640,7 @@ async fn query_provider_usage_inner(
     app_type: AppType,
     provider_id: &str,
 ) -> Result<crate::provider::UsageResult, String> {
-    // 从数据库读取供应商信息，检查特殊模板类型
+    // Read provider info from database, check special template types
     let providers = state
         .db
         .get_all_providers(app_type.as_str())
@@ -473,7 +653,7 @@ async fn query_provider_usage_inner(
         .and_then(|s| s.template_type.as_deref())
         .unwrap_or("");
 
-    // ── GitHub Copilot 专用路径 ──
+    // ── GitHub Copilot specific path ──
     if template_type == TEMPLATE_TYPE_GITHUB_COPILOT {
         let copilot_account_id = provider
             .and_then(|p| p.meta.as_ref())
@@ -509,13 +689,13 @@ async fn query_provider_usage_inner(
         });
     }
 
-    // ── Coding Plan 专用路径 ──
+    // ── Coding Plan specific path ──
     if template_type == TEMPLATE_TYPE_TOKEN_PLAN {
         let (base_url, api_key) =
             resolve_coding_plan_credentials(&app_type, provider, usage_script);
 
-        // 火山方舟用账号 AK/SK 签名查询用量（存于 usage_script，与推理 api_key 分离）；
-        // 其他供应商为 None，service 层沿用 api_key。
+        // Volcengine uses account AK/SK signature for usage query (stored in usage_script, separate from inference api_key);
+        // Other providers are None, service layer uses api_key.
         let access_key_id = usage_script.and_then(|s| s.access_key_id.clone());
         let secret_access_key = usage_script.and_then(|s| s.secret_access_key.clone());
 
@@ -528,7 +708,7 @@ async fn query_provider_usage_inner(
         .await
         .map_err(|e| format!("Failed to query coding plan: {e}"))?;
 
-        // 将 SubscriptionQuota 转换为 UsageResult
+        // Convert SubscriptionQuota to UsageResult
         if !quota.success {
             return Ok(crate::provider::UsageResult {
                 success: false,
@@ -537,7 +717,7 @@ async fn query_provider_usage_inner(
             });
         }
 
-        // ZenMux 的 tier 携带 USD 额度信息，需要编码为 JSON extra
+        // ZenMux tier carries USD quota info, needs to be encoded as JSON extra
         let has_usd = quota
             .tiers
             .first()
@@ -597,9 +777,9 @@ async fn query_provider_usage_inner(
         });
     }
 
-    // ── 官方余额查询路径 ──
+    // ── Official balance query path ──
     if template_type == TEMPLATE_TYPE_BALANCE {
-        // 按 app 区分的凭据存储格式提取 Base URL 与 API Key
+        // Extract Base URL and API Key from app-specific credential storage format
         let (base_url, api_key) = resolve_native_credentials(&app_type, provider);
 
         return crate::services::balance::get_balance(&base_url, &api_key)
@@ -607,7 +787,7 @@ async fn query_provider_usage_inner(
             .map_err(|e| format!("Failed to query balance: {e}"));
     }
 
-    // ── 官方订阅额度查询路径 ──
+    // ── Official subscription quota query path ──
     if template_type == TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION {
         if !usage_script.map(|s| s.enabled).unwrap_or(false) {
             return Ok(crate::provider::UsageResult {
@@ -651,7 +831,7 @@ async fn query_provider_usage_inner(
         });
     }
 
-    // ── 通用 JS 脚本路径 ──
+    // ── Generic JS script path ──
     ProviderService::query_usage(state, app_type, provider_id)
         .await
         .map_err(|e| e.to_string())
@@ -854,7 +1034,7 @@ pub fn get_opencode_live_provider_ids() -> Result<Vec<String>, String> {
 }
 
 // ============================================================================
-// OpenClaw 专属命令 → 已迁移至 commands/openclaw.rs
+// OpenClaw specific commands → migrated to commands/openclaw.rs
 // ============================================================================
 
 #[cfg(test)]
@@ -910,7 +1090,7 @@ mod import_claude_desktop_tests {
         let r = routes.get("claude-sonnet-5").expect("sonnet route present");
         assert_eq!(r.model, "kimi-k2");
         assert_eq!(r.label_override.as_deref(), Some("kimi-k2"));
-        // 默认 provider_type 缺省 → supports_1m_default = true
+        // Default provider_type absent → supports_1m_default = true
         assert_eq!(r.supports_1m, Some(true));
     }
 
@@ -931,7 +1111,7 @@ mod import_claude_desktop_tests {
 
     #[test]
     fn route_1m_suffix_overrides_provider_type_default() {
-        // github_copilot 默认 supports_1m_default = false，但 [1M] 后缀应强制 true
+        // github_copilot default supports_1m_default = false, but [1M] suffix should force true
         let p = make_provider(
             json!({
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "gpt-5-codex[1M]",
@@ -979,7 +1159,7 @@ mod import_claude_desktop_tests {
 
     #[test]
     fn same_upstream_with_partial_1m_marker_takes_or_aggregation() {
-        // sonnet 带 [1M]，opus/haiku 不带 → 合并后 supports_1m == Some(true)
+        // sonnet with [1M], opus/haiku without → after merge supports_1m == Some(true)
         let p = make_provider(
             json!({
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": "MiniMax-M2[1M]",
@@ -1021,7 +1201,7 @@ mod import_claude_desktop_tests {
 
     #[test]
     fn anthropic_model_fallback_only_triggers_when_empty() {
-        // 三个 default env_key 都不填，仅 ANTHROPIC_MODEL
+        // All three default env_keys empty, only ANTHROPIC_MODEL
         let p = make_provider(
             json!({
                 "ANTHROPIC_MODEL": "kimi-k2",

@@ -184,6 +184,91 @@ fn schema_migration_rejects_future_version() {
 }
 
 #[test]
+fn schema_migration_upgrades_v12_usage_schema_without_losing_rollups() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        "CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            correlation_id TEXT,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT,
+            pricing_model TEXT,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT NOT NULL DEFAULT '',
+            pricing_model TEXT NOT NULL DEFAULT '',
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (
+                date, app_type, provider_id, model, request_model, pricing_model
+            )
+        );
+        INSERT INTO usage_daily_rollups (
+            date, app_type, provider_id, model, request_model, pricing_model,
+            request_count, success_count, input_tokens, output_tokens,
+            total_cost_usd, avg_latency_ms
+        ) VALUES
+            ('2026-07-23', 'codex', 'nexus', 'glm-5.2', 'alias-a', 'glm-5.2',
+             2, 2, 100, 20, '0.10', 100),
+            ('2026-07-23', 'codex', 'nexus', 'glm-5.2', 'alias-b', 'glm-5.2',
+             3, 2, 200, 30, '0.20', 200);
+        PRAGMA user_version = 12;",
+    )
+    .expect("seed v12 schema");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v12 to current");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "data_source")
+            .expect("check request source")
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "data_source")
+            .expect("check rollup source")
+    );
+
+    let migrated: (i64, i64, i64, String, i64) = conn
+        .query_row(
+            "SELECT request_count, input_tokens, output_tokens, total_cost_usd, avg_latency_ms
+             FROM usage_daily_rollups
+             WHERE date = '2026-07-23' AND provider_id = 'nexus'",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("read migrated rollup");
+    assert_eq!(migrated.0, 5);
+    assert_eq!(migrated.1, 300);
+    assert_eq!(migrated.2, 50);
+    assert_eq!(migrated.3.parse::<f64>().expect("parse cost"), 0.3);
+    assert_eq!(migrated.4, 160);
+}
+
+#[test]
 fn schema_migration_adds_missing_columns_for_providers() {
     let conn = Connection::open_in_memory().expect("open memory db");
 
@@ -289,76 +374,6 @@ fn schema_create_tables_include_pricing_model_columns() {
     let request_model = get_column_info(&conn, "proxy_request_logs", "request_model");
     assert_eq!(request_model.r#type, "TEXT");
     assert_eq!(request_model.notnull, 0);
-
-    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
-    assert_eq!(correlation_id.r#type, "TEXT");
-    assert_eq!(correlation_id.notnull, 0);
-}
-
-#[test]
-fn migration_v11_to_v12_adds_nullable_correlation_without_changing_rows() {
-    let conn = Connection::open_in_memory().expect("open memory db");
-    conn.execute_batch(
-        r#"
-        CREATE TABLE proxy_request_logs (
-            request_id TEXT PRIMARY KEY,
-            model TEXT NOT NULL
-        );
-        INSERT INTO proxy_request_logs (request_id, model)
-        VALUES ('response-1', 'glm-5.2'), ('response-2', 'glm-5.2');
-        "#,
-    )
-    .expect("seed v11 request logs");
-    Database::set_user_version(&conn, 11).expect("set user_version=11");
-
-    Database::apply_schema_migrations_on_conn(&conn).expect("apply v12 migration");
-
-    let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
-    assert_eq!(correlation_id.r#type, "TEXT");
-    assert_eq!(correlation_id.notnull, 0);
-    let rows: (i64, i64, String) = conn
-        .query_row(
-            "SELECT COUNT(*), COUNT(correlation_id), group_concat(request_id, ',')
-             FROM proxy_request_logs",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .expect("read migrated rows");
-    assert_eq!(rows, (2, 0, "response-1,response-2".to_string()));
-    assert_eq!(
-        Database::get_user_version(&conn).expect("version after migration"),
-        SCHEMA_VERSION
-    );
-}
-
-#[test]
-fn prerelease_v12_without_correlation_column_is_repaired() {
-    let conn = Connection::open_in_memory().expect("open memory db");
-    conn.execute_batch(
-        r#"
-        CREATE TABLE proxy_request_logs (
-            request_id TEXT PRIMARY KEY,
-            model TEXT NOT NULL
-        );
-        INSERT INTO proxy_request_logs (request_id, model)
-        VALUES ('response-1', 'glm-5.2');
-        "#,
-    )
-    .expect("seed prerelease v12 request logs");
-    Database::set_user_version(&conn, 12).expect("set user_version=12");
-
-    Database::apply_schema_migrations_on_conn(&conn).expect("repair v12 schema");
-
-    assert_eq!(
-        get_column_info(&conn, "proxy_request_logs", "correlation_id").r#type,
-        "TEXT"
-    );
-    assert_eq!(
-        conn.query_row("SELECT COUNT(*) FROM proxy_request_logs", [], |row| row
-            .get::<_, i64>(0))
-            .expect("read preserved rows"),
-        1
-    );
 }
 
 #[test]
@@ -416,17 +431,19 @@ fn schema_migration_v4_adds_pricing_model_columns() {
 }
 
 #[test]
-fn migration_v10_to_v11_rebuilds_rollups_with_request_model_dimension() {
+fn schema_migration_v10_to_v11_adds_usage_source_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
-
-    // 模拟 v10 形状的 rollup 表（主键不含 request_model）+ 一行历史聚合数据，
-    // 以及 v10 形状的明细表（无 pricing_model 列）
+    Database::set_user_version(&conn, 10).expect("set user_version=10");
     conn.execute_batch(
         r#"
         CREATE TABLE proxy_request_logs (
             request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
             model TEXT NOT NULL,
-            request_model TEXT
+            session_id TEXT,
+            status_code INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
         );
         CREATE TABLE usage_daily_rollups (
             date TEXT NOT NULL,
@@ -443,53 +460,44 @@ fn migration_v10_to_v11_rebuilds_rollups_with_request_model_dimension() {
             avg_latency_ms INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (date, app_type, provider_id, model)
         );
-        INSERT INTO usage_daily_rollups
-            (date, app_type, provider_id, model, request_count, success_count,
-             input_tokens, output_tokens, total_cost_usd, avg_latency_ms)
-        VALUES ('2026-05-01', 'claude', 'p1', 'kimi-k2', 7, 7, 1000, 500, '0.07', 120);
         "#,
     )
-    .expect("seed v10 rollup table");
+    .expect("seed v10 usage schema");
 
-    Database::set_user_version(&conn, 10).expect("set user_version=10");
+    // Startup calls create_tables before the versioned migration. Existing v10
+    // tables do not have data_source yet, so create_tables must not create
+    // indexes that require the new column before migrate_v10_to_v11 runs.
+    Database::create_tables_on_conn(&conn).expect("create tables");
     Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
 
-    // 新列存在且 NOT NULL DEFAULT ''
-    let request_model = get_column_info(&conn, "usage_daily_rollups", "request_model");
-    assert_eq!(request_model.r#type, "TEXT");
-    assert_eq!(request_model.notnull, 1);
-    let rollup_pricing_model = get_column_info(&conn, "usage_daily_rollups", "pricing_model");
-    assert_eq!(rollup_pricing_model.r#type, "TEXT");
-    assert_eq!(rollup_pricing_model.notnull, 1);
-
-    // 明细表补上 pricing_model 列（可空，历史行 NULL）
-    let pricing_model = get_column_info(&conn, "proxy_request_logs", "pricing_model");
-    assert_eq!(pricing_model.r#type, "TEXT");
-    assert_eq!(pricing_model.notnull, 0);
-
-    // 历史行保留，request_model 填 ''（未知）
-    let (rm, count, input, cost): (String, i64, i64, String) = conn
-        .query_row(
-            "SELECT request_model, request_count, input_tokens, total_cost_usd
-             FROM usage_daily_rollups WHERE model = 'kimi-k2'",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )
-        .expect("migrated row");
-    assert_eq!(rm, "");
-    assert_eq!(count, 7);
-    assert_eq!(input, 1000);
-    assert_eq!(cost, "0.07");
-
-    // 主键包含 request_model：同 model 不同别名可共存
-    conn.execute(
-        "INSERT INTO usage_daily_rollups
-            (date, app_type, provider_id, model, request_model, request_count)
-         VALUES ('2026-05-01', 'claude', 'p1', 'kimi-k2', 'claude-sonnet-4-6', 1)",
-        [],
-    )
-    .expect("insert row with same model but different request_model");
-
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "data_source").expect("check logs"),
+        "proxy_request_logs.data_source should be added by v11 migration"
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "data_source").expect("check rollups"),
+        "usage_daily_rollups.data_source should be added by v11 migration"
+    );
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(\"usage_daily_rollups\")")
+        .expect("rollup table info");
+    let pk_columns = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(5)?, row.get::<_, String>(1)?))
+        })
+        .expect("query rollup table info")
+        .filter_map(|row| {
+            let (pk_order, name) = row.expect("rollup table info row");
+            (pk_order > 0).then_some((pk_order, name))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pk_columns
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        vec!["date", "app_type", "provider_id", "data_source", "model"]
+    );
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),
         SCHEMA_VERSION

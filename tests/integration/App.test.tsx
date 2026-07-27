@@ -220,6 +220,27 @@ describe("App integration with MSW", () => {
     expect(toastSuccessMock).toHaveBeenCalled();
   });
 
+  it("keeps develop tool surfaces available alongside SSH Remote", async () => {
+    localStorage.setItem("nexus-composer-last-app", "claude");
+    localStorage.setItem("nexus-composer-last-view", "providers");
+
+    const { default: App } = await import("@/App");
+    renderApp(App);
+
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "claude-1",
+      ),
+    );
+
+    expect(screen.getByTitle("skills.manage")).toBeInTheDocument();
+    expect(screen.getByTitle("prompts.manage")).toBeInTheDocument();
+    expect(screen.getByTitle("sessionManager.title")).toBeInTheDocument();
+    expect(screen.getByTitle("mcp.title")).toBeInTheDocument();
+    expect(screen.getByTitle("Remote")).toBeInTheDocument();
+    expect(screen.getByText("update-badge")).toBeInTheDocument();
+  });
+
   it("shows toast when auto sync fails in background", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);
