@@ -8,6 +8,9 @@ import {
   NEXUS_CLAUDE_MANAGED_PRESET_VERSION,
   NEXUS_CLAUDE_MODEL,
   NEXUS_ENDPOINT,
+  NEXUS_KIMI_MODEL,
+  NEXUS_KIMI_ORIGIN,
+  NEXUS_KIMI_TEXT_MODEL_CATALOG,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
 } from "./nexus";
@@ -72,6 +75,7 @@ export interface ProviderPreset {
   providerType?: "github_copilot" | "codex_oauth" | "nexus";
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
   managedNexusPresetVersion?: number;
+  apiKeyOptional?: boolean;
 
   // 是否需要 OAuth 认证（而非 API Key）
   requiresOAuth?: boolean;
@@ -113,6 +117,28 @@ export const providerPresets: ProviderPreset[] = [
     localProxyRequestOverrides: NEXUS_REQUEST_OVERRIDES,
     category: "third_party",
     icon: "nexus",
+    iconColor: "#6366F1",
+  },
+  {
+    name: "Nexus Kimi-K3",
+    websiteUrl: NEXUS_KIMI_ORIGIN,
+    settingsConfig: {
+      modelCatalog: NEXUS_KIMI_TEXT_MODEL_CATALOG,
+      env: {
+        ANTHROPIC_BASE_URL: NEXUS_KIMI_ORIGIN,
+        ANTHROPIC_AUTH_TOKEN: "",
+        ANTHROPIC_MODEL: NEXUS_KIMI_MODEL,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: NEXUS_KIMI_MODEL,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: NEXUS_KIMI_MODEL,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: NEXUS_KIMI_MODEL,
+        ANTHROPIC_DEFAULT_FABLE_MODEL: NEXUS_KIMI_MODEL,
+      },
+    },
+    endpointCandidates: [NEXUS_KIMI_ORIGIN],
+    apiFormat: "openai_chat",
+    apiKeyOptional: true,
+    category: "third_party",
+    icon: "kimi",
     iconColor: "#6366F1",
   },
   {

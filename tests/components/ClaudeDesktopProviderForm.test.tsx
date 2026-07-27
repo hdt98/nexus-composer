@@ -103,6 +103,28 @@ function expectManagedNexusEndpointDetached(submitted: {
 }
 
 describe("ClaudeDesktopProviderForm", () => {
+  it("saves the Nexus Kimi-K3 preset without an API key", async () => {
+    const onSubmit = vi.fn();
+    renderForm(undefined, onSubmit);
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Nexus Kimi-K3/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const submitted = onSubmit.mock.calls[0][0];
+    expect(submitted.name).toBe("Nexus Kimi-K3");
+    expect(submitted.meta).toMatchObject({
+      apiFormat: "openai_chat",
+      claudeDesktopMode: "proxy",
+    });
+    expect(submitted.meta.providerType).toBeUndefined();
+    expect(submitted.meta.localProxyRequestOverrides).toBeUndefined();
+  });
+
   it("persists the managed Nexus preset metadata and request defaults", async () => {
     const onSubmit = vi.fn();
     renderForm(undefined, onSubmit);

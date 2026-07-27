@@ -27,3 +27,10 @@ export const NEXUS_REQUEST_OVERRIDES = {
     chat_template_kwargs: { enable_thinking: true, clear_thinking: false },
   },
 } satisfies LocalProxyRequestOverrides;
+
+export const NEXUS_KIMI_ORIGIN = "https://k3.ric1.onenexus-do.cloud";
+export const NEXUS_KIMI_ENDPOINT = `${NEXUS_KIMI_ORIGIN}/v1`;
+export const NEXUS_KIMI_MODEL = "kimi-k3";
+export const NEXUS_KIMI_TEXT_MODEL_CATALOG = {
+  models: [{ model: NEXUS_KIMI_MODEL, inputModalities: ["text"] }],
+};

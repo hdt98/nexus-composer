@@ -2,8 +2,9 @@
  * Nexus Composer E2E feature tests.
  *
  * These tests verify the actual Nexus Composer customizations:
- * - Claude Code and Codex contain only Nexus GLM-5.2 + Official
- * - Claude Desktop preserves its existing catalog and adds Nexus GLM-5.2
+ * - Claude Code contains Nexus GLM-5.2 + Nexus Kimi-K3 + Official
+ * - Codex contains Nexus GLM-5.2 + Nexus Kimi-K3
+ * - Claude Desktop preserves its existing catalog and adds both Nexus presets
  * - Nexus GLM-5.2 preset config is correct (endpoint, model, format)
  * - Claude Official has empty env (resets to native API)
  */
@@ -23,28 +24,35 @@ import {
   NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
+  NEXUS_KIMI_ENDPOINT,
+  NEXUS_KIMI_MODEL,
+  NEXUS_KIMI_ORIGIN,
+  NEXUS_KIMI_TEXT_MODEL_CATALOG,
   NEXUS_TEXT_MODEL_CATALOG,
 } from "@/config/nexus";
 
 describe("Nexus Composer preset arrays", () => {
-  it("Claude presets contain exactly Nexus GLM-5.2 and Claude Official", () => {
+  it("Claude presets contain both Nexus routes and Claude Official", () => {
     const names = providerPresets.map((p) => p.name);
-    expect(names).toHaveLength(2);
+    expect(names).toHaveLength(3);
     expect(names).toContain("Nexus GLM-5.2");
+    expect(names).toContain("Nexus Kimi-K3");
     expect(names).toContain("Claude Official");
   });
 
-  it("Codex presets contain exactly Nexus GLM-5.2 and OpenAI Official", () => {
+  it("Codex presets contain Nexus GLM-5.2, Nexus Kimi-K3, and OpenAI Official", () => {
     const names = codexProviderPresets.map((p) => p.name);
-    expect(names).toHaveLength(2);
+    expect(names).toHaveLength(3);
     expect(names).toContain("Nexus GLM-5.2");
+    expect(names).toContain("Nexus Kimi-K3");
     expect(names).toContain("OpenAI Official");
   });
 
   it("adds Nexus without replacing the Claude Desktop preset catalog", () => {
     const names = claudeDesktopProviderPresets.map((preset) => preset.name);
-    expect(names).toHaveLength(68);
+    expect(names).toHaveLength(69);
     expect(names).toContain("Nexus GLM-5.2");
+    expect(names).toContain("Nexus Kimi-K3");
     expect(names).toContain("Claude Desktop Official");
     expect(names).toContain("Shengsuanyun");
     expect(new Set(names).size).toBe(names.length);
@@ -180,6 +188,71 @@ describe("Nexus GLM-5.2 Codex preset config", () => {
   });
 });
 
+describe("Nexus Kimi-K3 Codex preset config", () => {
+  const nexusKimi = codexProviderPresets.find(
+    (preset) => preset.name === "Nexus Kimi-K3",
+  )!;
+
+  it("uses the hosted Chat endpoint without requiring a credential", () => {
+    expect(nexusKimi).toBeDefined();
+    expect(nexusKimi.websiteUrl).toBe(NEXUS_KIMI_ENDPOINT);
+    expect(nexusKimi.endpointCandidates).toEqual([NEXUS_KIMI_ENDPOINT]);
+    expect(nexusKimi.auth).toEqual({ OPENAI_API_KEY: "" });
+    expect(nexusKimi.apiKeyOptional).toBe(true);
+    expect(nexusKimi.config).toContain(`model = "${NEXUS_KIMI_MODEL}"`);
+    expect(nexusKimi.config).toContain(`base_url = "${NEXUS_KIMI_ENDPOINT}"`);
+    expect(nexusKimi.config).toContain("requires_openai_auth = false");
+  });
+
+  it("uses Kimi reasoning defaults without GLM-specific overrides", () => {
+    expect(nexusKimi.apiFormat).toBe("openai_chat");
+    expect(nexusKimi.codexChatReasoning).toEqual({
+      supportsThinking: true,
+      supportsEffort: false,
+      thinkingParam: "thinking",
+      effortParam: "none",
+      outputFormat: "reasoning_content",
+    });
+    expect(nexusKimi.localProxyRequestOverrides).toBeUndefined();
+    expect(nexusKimi.providerType).toBeUndefined();
+    expect(nexusKimi.managedNexusPresetVersion).toBeUndefined();
+    expect(nexusKimi.modelCatalog).toEqual([
+      expect.objectContaining({
+        model: NEXUS_KIMI_MODEL,
+        displayName: "Kimi K3",
+        inputModalities: ["text"],
+      }),
+    ]);
+  });
+});
+
+describe("Nexus Kimi-K3 Claude preset config", () => {
+  const nexusKimi = providerPresets.find(
+    (preset) => preset.name === "Nexus Kimi-K3",
+  )!;
+
+  it("routes the no-key model through the local Chat adapter", () => {
+    expect(nexusKimi).toBeDefined();
+    expect(nexusKimi.apiFormat).toBe("openai_chat");
+    expect(nexusKimi.apiKeyOptional).toBe(true);
+    expect(nexusKimi.endpointCandidates).toEqual([NEXUS_KIMI_ORIGIN]);
+    expect((nexusKimi.settingsConfig as any).modelCatalog).toEqual(
+      NEXUS_KIMI_TEXT_MODEL_CATALOG,
+    );
+    expect((nexusKimi.settingsConfig as any).env).toMatchObject({
+      ANTHROPIC_BASE_URL: NEXUS_KIMI_ORIGIN,
+      ANTHROPIC_AUTH_TOKEN: "",
+      ANTHROPIC_MODEL: NEXUS_KIMI_MODEL,
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: NEXUS_KIMI_MODEL,
+      ANTHROPIC_DEFAULT_SONNET_MODEL: NEXUS_KIMI_MODEL,
+      ANTHROPIC_DEFAULT_OPUS_MODEL: NEXUS_KIMI_MODEL,
+      ANTHROPIC_DEFAULT_FABLE_MODEL: NEXUS_KIMI_MODEL,
+    });
+    expect(nexusKimi.localProxyRequestOverrides).toBeUndefined();
+    expect(nexusKimi.providerType).toBeUndefined();
+  });
+});
+
 describe("Nexus GLM-5.2 Claude Desktop preset config", () => {
   const nexus = claudeDesktopProviderPresets.find(
     (preset) => preset.name === "Nexus GLM-5.2",
@@ -205,6 +278,29 @@ describe("Nexus GLM-5.2 Claude Desktop preset config", () => {
     expect(nexus.managedNexusPresetVersion).toBe(
       NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
     );
+  });
+});
+
+describe("Nexus Kimi-K3 Claude Desktop preset config", () => {
+  const nexusKimi = claudeDesktopProviderPresets.find(
+    (preset) => preset.name === "Nexus Kimi-K3",
+  )!;
+
+  it("routes the no-key model through the local Chat adapter", () => {
+    expect(nexusKimi).toBeDefined();
+    expect(nexusKimi.baseUrl).toBe(NEXUS_KIMI_ENDPOINT);
+    expect(nexusKimi.mode).toBe("proxy");
+    expect(nexusKimi.apiFormat).toBe("openai_chat");
+    expect(nexusKimi.apiKeyOptional).toBe(true);
+    expect(nexusKimi.modelCatalog).toEqual(NEXUS_KIMI_TEXT_MODEL_CATALOG);
+    expect(nexusKimi.modelRoutes).toEqual([
+      expect.objectContaining({
+        upstreamModel: NEXUS_KIMI_MODEL,
+        supports1m: false,
+      }),
+    ]);
+    expect(nexusKimi.localProxyRequestOverrides).toBeUndefined();
+    expect(nexusKimi.providerType).toBeUndefined();
   });
 });
 

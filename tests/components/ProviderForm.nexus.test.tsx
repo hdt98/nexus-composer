@@ -45,6 +45,49 @@ function renderForm(
 }
 
 describe("ProviderForm Nexus presets", () => {
+  it("saves the Nexus Kimi-K3 Codex preset without an API key prompt", async () => {
+    const onSubmit = renderForm("codex");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Nexus Kimi-K3/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      name: "Nexus Kimi-K3",
+      meta: {
+        apiFormat: "openai_chat",
+        codexChatReasoning: {
+          supportsThinking: true,
+          thinkingParam: "thinking",
+          outputFormat: "reasoning_content",
+        },
+      },
+    });
+  });
+
+  it("saves the Nexus Kimi-K3 Claude preset without an API key prompt", async () => {
+    const onSubmit = renderForm("claude");
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: /Nexus Kimi-K3/,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      name: "Nexus Kimi-K3",
+      meta: {
+        apiFormat: "openai_chat",
+      },
+    });
+  });
+
   it.each(["codex", "claude"] as const)(
     "persists managed metadata and request defaults for %s",
     async (appId) => {

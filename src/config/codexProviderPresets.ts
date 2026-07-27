@@ -16,6 +16,8 @@ import {
   NEXUS_MANAGED_PRESET_VERSION,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
+  NEXUS_KIMI_ENDPOINT,
+  NEXUS_KIMI_MODEL,
 } from "./nexus";
 
 export interface CodexProviderPreset {
@@ -48,6 +50,7 @@ export interface CodexProviderPreset {
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
   providerType?: "nexus";
   managedNexusPresetVersion?: number;
+  apiKeyOptional?: boolean;
 }
 
 /**
@@ -71,6 +74,7 @@ export function generateThirdPartyConfig(
     autoCompactTokenLimit: number;
     streamIdleTimeoutMs: number;
   },
+  requiresOpenAiAuth = true,
 ): string {
   const tomlString = (value: string) => JSON.stringify(value);
   const modelSettings = managed
@@ -88,7 +92,7 @@ ${modelSettings}disable_response_storage = true
 name = ${tomlString(providerName)}
 base_url = ${tomlString(baseUrl)}
 wire_api = "responses"
-requires_openai_auth = true${streamTimeout}`;
+requires_openai_auth = ${requiresOpenAiAuth}${streamTimeout}`;
 }
 
 function modelCatalog(
@@ -155,6 +159,38 @@ export const codexProviderPresets: CodexProviderPreset[] = [
     ]),
     category: "third_party",
     icon: "nexus",
+    iconColor: "#6366F1",
+  },
+  {
+    name: "Nexus Kimi-K3",
+    websiteUrl: NEXUS_KIMI_ENDPOINT,
+    auth: generateThirdPartyAuth(""),
+    config: generateThirdPartyConfig(
+      "Nexus Kimi-K3",
+      NEXUS_KIMI_ENDPOINT,
+      NEXUS_KIMI_MODEL,
+      undefined,
+      false,
+    ),
+    endpointCandidates: [NEXUS_KIMI_ENDPOINT],
+    apiFormat: "openai_chat",
+    apiKeyOptional: true,
+    modelCatalog: modelCatalog([
+      {
+        model: NEXUS_KIMI_MODEL,
+        displayName: "Kimi K3",
+        inputModalities: ["text"],
+      },
+    ]),
+    codexChatReasoning: {
+      supportsThinking: true,
+      supportsEffort: false,
+      thinkingParam: "thinking",
+      effortParam: "none",
+      outputFormat: "reasoning_content",
+    },
+    category: "third_party",
+    icon: "kimi",
     iconColor: "#6366F1",
   },
   {
