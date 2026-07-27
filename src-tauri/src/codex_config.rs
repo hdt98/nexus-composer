@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    atomic_write, delete_file, get_home_dir, read_json_file, sanitize_provider_name,
-    write_json_file, write_text_file,
+    atomic_write, delete_file, get_app_config_dir, get_home_dir, read_json_file,
+    sanitize_provider_name, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use serde_json::{json, Value};
@@ -14,6 +15,7 @@ use toml_edit::DocumentMut;
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const NEXUS_CODEX_MODEL_CATALOG_FILENAME: &str = "nexus-model-catalog.json";
 const LEGACY_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+const CODEX_OFFICIAL_AUTH_SNAPSHOT_FILENAME: &str = "codex_official_auth_snapshot.json";
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
 const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
@@ -156,6 +158,115 @@ pub fn get_codex_config_path() -> PathBuf {
 
 pub fn get_codex_model_catalog_path() -> PathBuf {
     get_codex_config_dir().join(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
+}
+
+fn get_codex_official_auth_snapshot_path() -> PathBuf {
+    get_app_config_dir().join(CODEX_OFFICIAL_AUTH_SNAPSHOT_FILENAME)
+}
+
+fn write_codex_official_auth_snapshot(auth: &Value) -> Result<(), AppError> {
+    let path = get_codex_official_auth_snapshot_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("Invalid Codex OAuth snapshot path".to_string()))?;
+    fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::Config("Invalid Codex OAuth snapshot filename".to_string()))?
+        .to_string_lossy();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = parent.join(format!("{file_name}.tmp.{nonce}"));
+    let serialized = serde_json::to_vec_pretty(auth)
+        .map_err(|err| AppError::Message(format!("Failed to serialize Codex OAuth: {err}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.write_all(&serialized)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.flush().map_err(|err| AppError::io(&tmp_path, err))?;
+        fs::rename(&tmp_path, &path).map_err(|err| AppError::io(&path, err))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| AppError::io(&path, err))?;
+    }
+
+    #[cfg(windows)]
+    {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.write_all(&serialized)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.flush().map_err(|err| AppError::io(&tmp_path, err))?;
+        if path.exists() {
+            fs::remove_file(&path).map_err(|err| AppError::io(&path, err))?;
+        }
+        fs::rename(&tmp_path, &path).map_err(|err| AppError::io(&path, err))?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn capture_live_codex_official_auth_snapshot() -> Result<bool, AppError> {
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return Ok(false);
+    }
+
+    let auth: Value = read_json_file(&auth_path)?;
+    if !codex_auth_has_oauth_login_material(&auth) {
+        return Ok(false);
+    }
+
+    write_codex_official_auth_snapshot(&auth)?;
+    Ok(true)
+}
+
+pub(crate) fn read_codex_official_auth_snapshot() -> Result<Option<Value>, AppError> {
+    let snapshot_path = get_codex_official_auth_snapshot_path();
+    if !snapshot_path.exists() {
+        return Ok(None);
+    }
+
+    let auth: Value = read_json_file(&snapshot_path)?;
+    if !codex_auth_has_oauth_login_material(&auth) {
+        return Err(AppError::Message(
+            "Saved Codex OAuth snapshot does not contain login material".to_string(),
+        ));
+    }
+
+    Ok(Some(auth))
+}
+
+pub(crate) fn restore_codex_official_auth_snapshot() -> Result<bool, AppError> {
+    let Some(auth) = read_codex_official_auth_snapshot()? else {
+        return Ok(false);
+    };
+
+    let live_auth_path = get_codex_auth_path();
+    if live_auth_path.exists() {
+        let live_auth: Value = read_json_file(&live_auth_path)?;
+        if codex_auth_has_oauth_login_material(&live_auth) {
+            write_codex_official_auth_snapshot(&live_auth)?;
+            return Ok(false);
+        }
+    }
+
+    write_json_file(&get_codex_auth_path(), &auth)?;
+    Ok(true)
 }
 
 /// 获取 Codex 供应商配置文件路径
@@ -423,6 +534,25 @@ pub(crate) fn codex_stored_auth_regresses_live_on_disk(stored: &Value) -> bool {
         return false;
     };
     codex_stored_auth_regresses_live(stored, &live)
+}
+
+/// Whether restoring `stored` should leave a live ChatGPT OAuth cache intact.
+///
+/// Older or externally rebuilt third-party backups can still carry API-key or
+/// empty auth objects. When login preservation is enabled, those backup shapes
+/// own provider routing but not `auth.json`; only another OAuth snapshot may
+/// replace the live OAuth cache.
+pub(crate) fn should_preserve_live_codex_oauth_for_restore(stored: &Value) -> bool {
+    if !crate::settings::preserve_codex_official_auth_on_switch()
+        || codex_auth_has_oauth_login_material(stored)
+    {
+        return false;
+    }
+
+    let auth_path = get_codex_auth_path();
+    read_json_file::<Value>(&auth_path)
+        .ok()
+        .is_some_and(|live| codex_auth_has_oauth_login_material(&live))
 }
 
 pub fn codex_auth_has_login_material(auth: &Value) -> bool {
@@ -1336,6 +1466,19 @@ pub fn write_codex_provider_live_with_catalog(
     write_codex_live_for_provider(category, auth, prepared_config.as_deref())
 }
 
+pub(crate) fn write_codex_official_account_live_with_catalog(
+    settings: &Value,
+    auth: &Value,
+    config_text: Option<&str>,
+    profile: CodexCatalogToolProfile,
+) -> Result<(), AppError> {
+    let prepared_config = config_text
+        .map(|text| prepare_codex_config_text_with_model_catalog(settings, text, profile))
+        .transpose()?;
+
+    write_codex_live_for_provider_inner(Some("official"), auth, prepared_config.as_deref(), true)
+}
+
 /// Extract a provider-scoped `experimental_bearer_token` from Codex `config.toml`.
 ///
 /// Mobile compat: third-party providers may store the API key inside
@@ -1561,6 +1704,98 @@ pub fn inject_codex_unified_session_bucket(config_text: &str) -> Result<String, 
     Ok(doc.to_string())
 }
 
+fn route_third_party_codex_config_to_unified_session_bucket(
+    config_text: &str,
+) -> Result<String, AppError> {
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let Some(active_provider_id) = active_codex_model_provider_id(&doc) else {
+        return Ok(config_text.to_string());
+    };
+    if active_provider_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        || !is_custom_codex_model_provider_id(&active_provider_id)
+    {
+        return Ok(config_text.to_string());
+    }
+
+    let custom_table_exists = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .is_some_and(|providers| providers.contains_key(CC_SWITCH_CODEX_MODEL_PROVIDER_ID));
+    if custom_table_exists {
+        log::warn!(
+            "Codex third-party config already defines [model_providers.custom]; skipping unified session routing to avoid replacing an unrelated provider"
+        );
+        return Ok(config_text.to_string());
+    }
+
+    let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    else {
+        log::warn!(
+            "Codex third-party config does not define its active model provider; skipping unified session routing"
+        );
+        return Ok(config_text.to_string());
+    };
+    let Some(active_provider) = model_providers.remove(&active_provider_id) else {
+        log::warn!(
+            "Codex third-party config does not define its active model provider; skipping unified session routing"
+        );
+        return Ok(config_text.to_string());
+    };
+    model_providers.insert(CC_SWITCH_CODEX_MODEL_PROVIDER_ID, active_provider);
+    doc["model_provider"] = toml_edit::value(CC_SWITCH_CODEX_MODEL_PROVIDER_ID);
+
+    if let Some(profiles) = doc
+        .get_mut("profiles")
+        .and_then(|item| item.as_table_like_mut())
+    {
+        let profile_keys: Vec<String> = profiles.iter().map(|(key, _)| key.to_string()).collect();
+        for profile_key in profile_keys {
+            let Some(profile) = profiles
+                .get_mut(&profile_key)
+                .and_then(|item| item.as_table_like_mut())
+            else {
+                continue;
+            };
+            if profile.get("model_provider").and_then(|item| item.as_str())
+                == Some(active_provider_id.as_str())
+            {
+                profile.insert(
+                    "model_provider",
+                    toml_edit::value(CC_SWITCH_CODEX_MODEL_PROVIDER_ID),
+                );
+            }
+        }
+    }
+
+    Ok(doc.to_string())
+}
+
+/// Route a provider's live Codex config through the shared `custom` session
+/// bucket when unified history is enabled.
+///
+/// Official providers receive the synthetic OpenAI-compatible `custom` table.
+/// Third-party providers keep their complete provider table, but the active
+/// table and any matching profile references are renamed to `custom`. Stored
+/// provider templates remain unchanged; only live and takeover-backup config is
+/// normalized.
+pub fn apply_codex_unified_session_bucket_to_config(
+    category: Option<&str>,
+    config_text: &str,
+) -> Result<String, AppError> {
+    if !crate::settings::unify_codex_session_history() {
+        return Ok(config_text.to_string());
+    }
+    if category == Some("official") {
+        inject_codex_unified_session_bucket(config_text)
+    } else {
+        route_third_party_codex_config_to_unified_session_bucket(config_text)
+    }
+}
+
 /// `inject_codex_unified_session_bucket` 的反向操作：从配置文本里剥掉注入的
 /// 统一会话路由，保证切换回填不会把它带进数据库的存储配置（关闭开关后
 /// 切换即可完全还原）。仅当形态与注入产物完全一致时才剥离；第三方模板和
@@ -1602,28 +1837,24 @@ pub fn strip_codex_unified_session_bucket(config_text: &str) -> Result<String, A
     Ok(doc.to_string())
 }
 
-/// 统一会话开关开启时，把官方供应商 `{ auth, config }` 设置对象中的
-/// config 文本注入共享 custom 路由；开关关闭或非官方供应商时不做改动。
+/// When unified history is enabled, normalize a provider settings object's
+/// config text to the shared `custom` route.
 ///
-/// 普通 live 写入（`write_codex_live_for_provider`）与代理接管备份
-/// （`update_live_backup_from_provider`）两条落盘路径共用：接管期间
-/// live 归代理所有，注入必须进备份，接管释放恢复的 live 才带统一路由。
+/// Normal live writes and provider-derived takeover backups share this path so
+/// releasing proxy takeover restores the same session bucket.
 pub fn apply_codex_unified_session_bucket_to_settings(
     category: Option<&str>,
     settings: &mut Value,
 ) -> Result<(), AppError> {
-    if category != Some("official") || !crate::settings::unify_codex_session_history() {
-        return Ok(());
-    }
     let config_text = settings
         .get("config")
         .and_then(|value| value.as_str())
         .unwrap_or("")
         .to_string();
-    let injected = inject_codex_unified_session_bucket(&config_text)?;
-    if injected != config_text {
+    let normalized = apply_codex_unified_session_bucket_to_config(category, &config_text)?;
+    if normalized != config_text {
         if let Some(obj) = settings.as_object_mut() {
-            obj.insert("config".to_string(), Value::String(injected));
+            obj.insert("config".to_string(), Value::String(normalized));
         }
     }
     Ok(())
@@ -1650,39 +1881,135 @@ pub fn strip_codex_unified_session_bucket_from_settings(
     Ok(())
 }
 
+/// Restore a third-party provider's native route after reading a live config
+/// that was temporarily normalized to the shared `custom` history bucket.
+///
+/// The stored provider template supplies the original provider id. This keeps
+/// live-only unified routing from being persisted during provider backfill.
+pub fn restore_codex_third_party_unified_session_bucket_from_settings(
+    settings: &mut Value,
+    template_settings: &Value,
+) -> Result<(), AppError> {
+    let Some(live_config) = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return Ok(());
+    };
+    let template_config = template_settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    let mut live_doc = live_config
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+    let template_doc = template_config
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex provider template: {e}")))?;
+
+    let Some(template_provider_id) = active_codex_model_provider_id(&template_doc) else {
+        return Ok(());
+    };
+    if template_provider_id == CC_SWITCH_CODEX_MODEL_PROVIDER_ID
+        || !is_custom_codex_model_provider_id(&template_provider_id)
+        || active_codex_model_provider_id(&live_doc).as_deref()
+            != Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+    {
+        return Ok(());
+    }
+
+    let template_defines_provider = template_doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .is_some_and(|providers| providers.contains_key(&template_provider_id));
+    if !template_defines_provider {
+        return Ok(());
+    }
+
+    let Some(model_providers) = live_doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Ok(());
+    };
+    if model_providers.contains_key(&template_provider_id) {
+        return Ok(());
+    }
+    let Some(provider_table) = model_providers.remove(CC_SWITCH_CODEX_MODEL_PROVIDER_ID) else {
+        return Ok(());
+    };
+    model_providers.insert(&template_provider_id, provider_table);
+    live_doc["model_provider"] = toml_edit::value(&template_provider_id);
+
+    if let Some(profiles) = live_doc
+        .get_mut("profiles")
+        .and_then(|item| item.as_table_like_mut())
+    {
+        let profile_keys: Vec<String> = profiles.iter().map(|(key, _)| key.to_string()).collect();
+        for profile_key in profile_keys {
+            let Some(profile) = profiles
+                .get_mut(&profile_key)
+                .and_then(|item| item.as_table_like_mut())
+            else {
+                continue;
+            };
+            if profile.get("model_provider").and_then(|item| item.as_str())
+                == Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+            {
+                profile.insert("model_provider", toml_edit::value(&template_provider_id));
+            }
+        }
+    }
+
+    if let Some(settings) = settings.as_object_mut() {
+        settings.insert("config".to_string(), Value::String(live_doc.to_string()));
+    }
+    Ok(())
+}
+
 /// Route a Codex live write between full auth+config or config-only.
 ///
 /// Official providers with usable login material own `auth.json`. Third-party
 /// providers only touch `config.toml` when the compatibility setting is enabled
 /// so the user's ChatGPT login cache survives provider switches.
 ///
-/// 统一会话开关开启时，官方配置在落盘前注入共享的 `custom` 路由
-/// （见 `inject_codex_unified_session_bucket`）。
+/// When unified history is enabled, every provider's live config is normalized
+/// to the shared `custom` session route before it is written.
 pub fn write_codex_live_for_provider(
     category: Option<&str>,
     auth: &Value,
     config_text: Option<&str>,
 ) -> Result<(), AppError> {
-    let unified_official_config =
-        if category == Some("official") && crate::settings::unify_codex_session_history() {
-            Some(inject_codex_unified_session_bucket(
-                config_text.unwrap_or(""),
-            )?)
-        } else {
-            None
-        };
-    let config_text = unified_official_config.as_deref().or(config_text);
+    write_codex_live_for_provider_inner(category, auth, config_text, false)
+}
+
+fn write_codex_live_for_provider_inner(
+    category: Option<&str>,
+    auth: &Value,
+    config_text: Option<&str>,
+    force_selected_official_auth: bool,
+) -> Result<(), AppError> {
+    let unified_config =
+        apply_codex_unified_session_bucket_to_config(category, config_text.unwrap_or(""))?;
+    let preserve_live_oauth =
+        category == Some("official") && should_preserve_live_codex_oauth_for_restore(auth);
+
+    if preserve_live_oauth {
+        return write_codex_live_config_atomic(Some(&unified_config));
+    }
 
     let should_write_auth = (category == Some("official")
         && codex_auth_has_login_material(auth)
-        && !codex_stored_auth_regresses_live_on_disk(auth))
+        && (force_selected_official_auth || !codex_stored_auth_regresses_live_on_disk(auth)))
         || (category != Some("official")
             && !crate::settings::preserve_codex_official_auth_on_switch());
 
     if should_write_auth {
-        write_codex_live_atomic(auth, config_text)
+        write_codex_live_atomic(auth, Some(&unified_config))
     } else {
-        let live_config = prepare_codex_provider_live_config(auth, config_text.unwrap_or(""))?;
+        let live_config = prepare_codex_provider_live_config(auth, &unified_config)?;
         write_codex_live_config_atomic(Some(&live_config))
     }
 }
@@ -2022,6 +2349,85 @@ base_url = "https://relay.example/v1"
         let injected_once = inject_codex_unified_session_bucket("").expect("inject");
         let reinjected = inject_codex_unified_session_bucket(&injected_once).expect("re-inject");
         assert_eq!(reinjected, injected_once);
+    }
+
+    #[test]
+    fn unified_session_bucket_routes_third_party_provider_and_profiles_to_custom() {
+        let third_party = r#"model_provider = "nexus"
+model = "glm52-logged"
+profile = "work"
+
+[model_providers.nexus]
+name = "Nexus"
+base_url = "https://nexus.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "provider-key"
+
+[profiles.work]
+model_provider = "nexus"
+model = "glm52-logged"
+"#;
+        let routed = route_third_party_codex_config_to_unified_session_bucket(third_party)
+            .expect("route third-party config");
+        let doc: toml::Value = toml::from_str(&routed).expect("parse routed config");
+
+        assert_eq!(
+            doc.get("model_provider").and_then(|value| value.as_str()),
+            Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID)
+        );
+        assert!(
+            doc["model_providers"].get("nexus").is_none(),
+            "the obsolete provider table should not remain active"
+        );
+        assert_eq!(
+            doc["model_providers"][CC_SWITCH_CODEX_MODEL_PROVIDER_ID]
+                .get("experimental_bearer_token")
+                .and_then(|value| value.as_str()),
+            Some("provider-key"),
+            "routing must preserve provider credentials and endpoint fields"
+        );
+        assert_eq!(
+            doc["profiles"]["work"]
+                .get("model_provider")
+                .and_then(|value| value.as_str()),
+            Some(CC_SWITCH_CODEX_MODEL_PROVIDER_ID),
+            "an active profile must not override the shared history route"
+        );
+    }
+
+    #[test]
+    fn unified_session_bucket_keeps_existing_custom_and_conflicting_routes_safe() {
+        let already_custom = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "Nexus"
+base_url = "https://nexus.example/v1"
+wire_api = "responses"
+"#;
+        assert_eq!(
+            route_third_party_codex_config_to_unified_session_bucket(already_custom)
+                .expect("route existing custom config"),
+            already_custom
+        );
+
+        let conflicting = r#"model_provider = "nexus"
+
+[model_providers.nexus]
+name = "Nexus"
+base_url = "https://nexus.example/v1"
+wire_api = "responses"
+
+[model_providers.custom]
+name = "User Relay"
+base_url = "https://user-relay.example/v1"
+wire_api = "responses"
+"#;
+        assert_eq!(
+            route_third_party_codex_config_to_unified_session_bucket(conflicting)
+                .expect("route conflicting config"),
+            conflicting,
+            "an unrelated custom route must never be overwritten"
+        );
     }
 
     #[test]

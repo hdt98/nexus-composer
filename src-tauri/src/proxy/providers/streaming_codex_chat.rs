@@ -6,7 +6,7 @@ use super::{
     },
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
-        response_id_from_chat_id, response_status_from_finish_reason,
+        response_id_from_chat_id, response_message_item_id, response_status_from_finish_reason,
         response_tool_call_item_from_chat_name, response_tool_call_item_id_from_chat_name,
         CodexToolContext,
     },
@@ -29,11 +29,7 @@ struct TextItemState {
 
 #[derive(Debug, Default)]
 struct ReasoningItemState {
-    output_index: Option<u32>,
-    item_id: String,
     text: String,
-    added: bool,
-    done: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -297,57 +293,8 @@ impl ChatToResponsesState {
     }
 
     fn push_reasoning_delta(&mut self, delta: &str) -> Vec<Bytes> {
-        let mut events = Vec::new();
-
-        if !self.reasoning.added {
-            let output_index = self.next_output_index();
-            let item_id = format!("rs_{}", self.response_id);
-            self.reasoning.output_index = Some(output_index);
-            self.reasoning.item_id = item_id.clone();
-            self.reasoning.added = true;
-
-            events.push(sse_event(
-                "response.output_item.added",
-                json!({
-                    "type": "response.output_item.added",
-                    "output_index": output_index,
-                    "item": {
-                        "id": item_id,
-                        "type": "reasoning",
-                        "status": "in_progress",
-                        "summary": []
-                    }
-                }),
-            ));
-            events.push(sse_event(
-                "response.reasoning_summary_part.added",
-                json!({
-                    "type": "response.reasoning_summary_part.added",
-                    "item_id": self.reasoning.item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "part": {
-                        "type": "summary_text",
-                        "text": ""
-                    }
-                }),
-            ));
-        }
-
         self.reasoning.text.push_str(delta);
-        let output_index = self.reasoning.output_index.unwrap_or(0);
-        events.push(sse_event(
-            "response.reasoning_summary_text.delta",
-            json!({
-                "type": "response.reasoning_summary_text.delta",
-                "item_id": self.reasoning.item_id,
-                "output_index": output_index,
-                "summary_index": 0,
-                "delta": delta
-            }),
-        ));
-
-        events
+        Vec::new()
     }
 
     fn push_text_delta(&mut self, delta: &str) -> Vec<Bytes> {
@@ -355,7 +302,7 @@ impl ChatToResponsesState {
 
         if !self.text.added {
             let output_index = self.next_output_index();
-            let item_id = format!("{}_msg", self.response_id);
+            let item_id = response_message_item_id(&self.response_id);
             self.text.output_index = Some(output_index);
             self.text.item_id = item_id.clone();
             self.text.added = true;
@@ -574,57 +521,10 @@ impl ChatToResponsesState {
     }
 
     fn finalize_reasoning(&mut self) -> Vec<Bytes> {
-        if !self.reasoning.added || self.reasoning.done {
-            return Vec::new();
-        }
-
-        let output_index = self.reasoning.output_index.unwrap_or(0);
-        let item_id = self.reasoning.item_id.clone();
-        let text = self.reasoning.text.clone();
-        let item = json!({
-            "id": item_id,
-            "type": "reasoning",
-            "summary": [{
-                "type": "summary_text",
-                "text": text
-            }]
-        });
-        self.output_items.push((output_index, item.clone()));
-        self.reasoning.done = true;
-
-        vec![
-            sse_event(
-                "response.reasoning_summary_text.done",
-                json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "item_id": self.reasoning.item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "text": self.reasoning.text
-                }),
-            ),
-            sse_event(
-                "response.reasoning_summary_part.done",
-                json!({
-                    "type": "response.reasoning_summary_part.done",
-                    "item_id": self.reasoning.item_id,
-                    "output_index": output_index,
-                    "summary_index": 0,
-                    "part": {
-                        "type": "summary_text",
-                        "text": self.reasoning.text
-                    }
-                }),
-            ),
-            sse_event(
-                "response.output_item.done",
-                json!({
-                    "type": "response.output_item.done",
-                    "output_index": output_index,
-                    "item": item
-                }),
-            ),
-        ]
+        // Chat Completions reasoning is plaintext. Emitting it as a Responses reasoning
+        // item would make Codex replay a synthetic item ID that OpenAI cannot resolve
+        // when `store` is false. Keep the text only for provider-specific tool calls.
+        Vec::new()
     }
 
     fn finalize_text(&mut self) -> Vec<Bytes> {
@@ -1111,8 +1011,10 @@ mod tests {
     #[tokio::test]
     async fn strict_path_splits_reasoning() {
         let output = collect_strict("data: {\"choices\":[{\"delta\":{\"content\":\"plan</think>answer\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n").await;
-        assert!(output.contains("response.reasoning_summary_text.delta"));
+        assert!(!output.contains("response.reasoning"));
+        assert!(!output.contains("\"type\":\"reasoning\""));
         assert!(output.contains("\"delta\":\"answer\""));
+        assert!(!output.contains("plan"));
         assert!(!output.contains("</think>"));
 
         for error in ["{}", "false", r#"{"message":"","code":"0"}"#] {
@@ -1165,12 +1067,15 @@ mod tests {
         assert!(output.contains("event: response.created"));
         assert!(output.contains("event: response.output_text.delta"));
         assert!(output.contains("\"text\":\"Hello\""));
+        assert!(output.contains("\"id\":\"msg_chatcmpl_1\""));
+        assert!(output.contains("\"item_id\":\"msg_chatcmpl_1\""));
+        assert!(!output.contains("resp_chatcmpl_1_msg"));
         assert!(output.contains("event: response.completed"));
         assert!(output.contains("\"input_tokens\":4"));
     }
 
     #[tokio::test]
-    async fn converts_reasoning_content_chat_sse_to_responses_reasoning_events() {
+    async fn omits_unreplayable_reasoning_content_from_responses_sse() {
         let output = collect(vec![
             "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"reasoning_content\":\"Need context. \"}}]}\n\n",
             "data: {\"id\":\"chatcmpl_reason\",\"created\":123,\"model\":\"deepseek-reasoner\",\"choices\":[{\"delta\":{\"reasoning\":\"Now answer. \"}}]}\n\n",
@@ -1179,21 +1084,16 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.reasoning_summary_part.added"));
-        assert!(output.contains("event: response.reasoning_summary_text.delta"));
-        assert!(output.contains("event: response.reasoning_summary_text.done"));
-        assert!(output.contains("Need context. Now answer. "));
-        assert!(output.contains("\"type\":\"reasoning\""));
+        assert!(!output.contains("event: response.reasoning"));
+        assert!(!output.contains("\"type\":\"reasoning\""));
+        assert!(!output.contains("rs_resp_"));
+        assert!(!output.contains("Need context. Now answer. "));
         assert!(output.contains("\"text\":\"Done\""));
         assert!(output.contains("\"reasoning_tokens\":3"));
-
-        let reasoning_pos = output.find("\"type\":\"reasoning\"").unwrap();
-        let message_pos = output.find("\"type\":\"message\"").unwrap();
-        assert!(reasoning_pos < message_pos);
     }
 
     #[tokio::test]
-    async fn converts_inline_think_chat_sse_to_reasoning_without_leaking_tags() {
+    async fn omits_inline_think_reasoning_without_leaking_tags() {
         let output = collect(vec![
             "data: {\"id\":\"chatcmpl_minimax\",\"created\":123,\"model\":\"MiniMax-M2.7\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"<think>\\nNeed\"}}]}\n\n",
             "data: {\"id\":\"chatcmpl_minimax\",\"created\":123,\"model\":\"MiniMax-M2.7\",\"choices\":[{\"delta\":{\"content\":\" context.</think>\\n\\npong\"},\"finish_reason\":\"stop\"}]}\n\n",
@@ -1201,8 +1101,9 @@ mod tests {
         ])
         .await;
 
-        assert!(output.contains("event: response.reasoning_summary_text.delta"));
-        assert!(output.contains("Need context."));
+        assert!(!output.contains("event: response.reasoning"));
+        assert!(!output.contains("\"type\":\"reasoning\""));
+        assert!(!output.contains("Need context."));
         assert!(output.contains("\"text\":\"pong\""));
         assert!(output.contains("\"reasoning_tokens\":3"));
         assert!(!output.contains("<think>"));

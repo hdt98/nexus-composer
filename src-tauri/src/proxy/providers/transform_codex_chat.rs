@@ -1333,11 +1333,6 @@ pub(crate) fn chat_completion_to_response_with_context(
 
     let reasoning = chat_reasoning_text(message);
     let mut output = Vec::new();
-    if let Some(reasoning_item) =
-        chat_reasoning_to_response_output_item(reasoning.as_deref(), &response_id)
-    {
-        output.push(reasoning_item);
-    }
     if let Some(message_item) = chat_message_to_response_output_item(message, &response_id) {
         output.push(message_item);
     }
@@ -1362,25 +1357,6 @@ pub(crate) fn chat_completion_to_response_with_context(
     }
 
     Ok(response)
-}
-
-fn chat_reasoning_to_response_output_item(
-    reasoning: Option<&str>,
-    response_id: &str,
-) -> Option<Value> {
-    let reasoning = reasoning?;
-    if reasoning.is_empty() {
-        return None;
-    }
-
-    Some(json!({
-        "id": format!("rs_{response_id}"),
-        "type": "reasoning",
-        "summary": [{
-            "type": "summary_text",
-            "text": reasoning
-        }]
-    }))
 }
 
 fn chat_reasoning_text(message: &Value) -> Option<String> {
@@ -1457,7 +1433,7 @@ fn chat_message_to_response_output_item(message: &Value, response_id: &str) -> O
     }
 
     Some(json!({
-        "id": format!("{response_id}_msg"),
+        "id": response_message_item_id(response_id),
         "type": "message",
         "status": "completed",
         "role": "assistant",
@@ -1739,6 +1715,11 @@ pub(crate) fn response_id_from_chat_id(id: Option<&str>) -> String {
     } else {
         format!("resp_{id}")
     }
+}
+
+pub(crate) fn response_message_item_id(response_id: &str) -> String {
+    let suffix = response_id.strip_prefix("resp_").unwrap_or(response_id);
+    format!("msg_{suffix}")
 }
 
 pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) -> &'static str {
@@ -2368,7 +2349,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_response_to_responses_extracts_reasoning_details() {
+    fn chat_response_to_responses_omits_unreplayable_reasoning_details() {
         let input = json!({
             "id": "chatcmpl_minimax",
             "object": "chat.completion",
@@ -2388,12 +2369,10 @@ mod tests {
 
         let result = chat_completion_to_response(input).unwrap();
 
-        assert_eq!(result["output"][0]["type"], "reasoning");
-        assert_eq!(
-            result["output"][0]["summary"][0]["text"],
-            "Need to inspect the code."
-        );
-        assert_eq!(result["output"][1]["content"][0]["text"], "Done");
+        assert_eq!(result["output"].as_array().unwrap().len(), 1);
+        assert_eq!(result["output"][0]["type"], "message");
+        assert_eq!(result["output"][0]["id"], "msg_chatcmpl_minimax");
+        assert_eq!(result["output"][0]["content"][0]["text"], "Done");
     }
 
     #[test]
@@ -2893,19 +2872,16 @@ mod tests {
 
         assert_eq!(result["id"], "resp_chatcmpl_1");
         assert_eq!(result["status"], "completed");
-        assert_eq!(result["output"][0]["type"], "reasoning");
+        assert_eq!(result["output"][0]["type"], "message");
+        assert_eq!(result["output"][0]["id"], "msg_chatcmpl_1");
+        assert_eq!(result["output"][0]["content"][0]["text"], "Let me check.");
+        assert_eq!(result["output"][1]["type"], "function_call");
+        assert_eq!(result["output"][1]["call_id"], "call_1");
         assert_eq!(
-            result["output"][0]["summary"][0]["text"],
+            result["output"][1]["reasoning_content"],
             "I should check the weather before answering."
         );
-        assert_eq!(result["output"][1]["type"], "message");
-        assert_eq!(result["output"][1]["content"][0]["text"], "Let me check.");
-        assert_eq!(result["output"][2]["type"], "function_call");
-        assert_eq!(result["output"][2]["call_id"], "call_1");
-        assert_eq!(
-            result["output"][2]["reasoning_content"],
-            "I should check the weather before answering."
-        );
+        assert_eq!(result["output"].as_array().unwrap().len(), 2);
         assert_eq!(result["usage"]["input_tokens"], 10);
         assert_eq!(result["usage"]["output_tokens"], 5);
         assert_eq!(result["usage"]["input_tokens_details"]["cached_tokens"], 3);
@@ -3110,13 +3086,9 @@ mod tests {
 
         let result = chat_completion_to_response(input).unwrap();
 
-        assert_eq!(result["output"][0]["type"], "reasoning");
-        assert_eq!(
-            result["output"][0]["summary"][0]["text"],
-            "I should answer with pong."
-        );
-        assert_eq!(result["output"][1]["type"], "message");
-        assert_eq!(result["output"][1]["content"][0]["text"], "pong");
+        assert_eq!(result["output"].as_array().unwrap().len(), 1);
+        assert_eq!(result["output"][0]["type"], "message");
+        assert_eq!(result["output"][0]["content"][0]["text"], "pong");
         assert_eq!(
             result["usage"]["output_tokens_details"]["reasoning_tokens"],
             18

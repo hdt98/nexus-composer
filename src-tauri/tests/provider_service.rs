@@ -887,6 +887,265 @@ requires_openai_auth = true
 }
 
 #[test]
+fn provider_service_switch_codex_official_ignores_stale_api_key_when_live_oauth_exists() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    enable_codex_official_auth_preservation();
+    let _home = ensure_test_home();
+
+    let live_auth = json!({
+        "auth_mode": "chatgpt",
+        "OPENAI_API_KEY": null,
+        "tokens": {
+            "access_token": "official-oauth-token",
+            "account_id": "acct-official"
+        }
+    });
+    let third_party_config = r#"model_provider = "nexus"
+
+[model_providers.nexus]
+name = "Nexus"
+base_url = "https://nexus.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#;
+    write_codex_live_atomic(&live_auth, Some(third_party_config))
+        .expect("seed preserved OAuth with third-party routing");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "third-party".to_string();
+        manager.providers.insert(
+            "third-party".to_string(),
+            Provider::with_id(
+                "third-party".to_string(),
+                "Nexus".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "nexus-key"},
+                    "config": third_party_config
+                }),
+                None,
+            ),
+        );
+
+        let mut official_provider = Provider::with_id(
+            "official-provider".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {"OPENAI_API_KEY": "stale-third-party-key"},
+                "config": ""
+            }),
+            None,
+        );
+        official_provider.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-provider".to_string(), official_provider);
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "official-provider")
+        .expect("switch to official provider");
+
+    let auth_value: serde_json::Value =
+        read_json_file(&nexus_composer_lib::get_codex_auth_path()).expect("read auth.json");
+    assert_eq!(
+        auth_value, live_auth,
+        "a stale API key in the official provider must not replace the live ChatGPT login"
+    );
+
+    let live_config = std::fs::read_to_string(nexus_composer_lib::get_codex_config_path())
+        .expect("read config.toml");
+    assert!(
+        !live_config.contains("stale-third-party-key"),
+        "the stale provider key must not be injected into official routing"
+    );
+}
+
+#[test]
+fn provider_service_codex_official_backfill_rejects_non_oauth_live_auth() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    enable_codex_official_auth_preservation();
+    let _home = ensure_test_home();
+
+    write_codex_live_atomic(
+        &json!({"OPENAI_API_KEY": "third-party-key"}),
+        Some("model_provider = \"openai\"\n"),
+    )
+    .expect("seed unexpected API-key live auth while official is selected");
+
+    let third_party_config = r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+"#;
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "official-provider".to_string();
+
+        let mut official_provider = Provider::with_id(
+            "official-provider".to_string(),
+            "OpenAI Official".to_string(),
+            json!({"auth": {}, "config": ""}),
+            None,
+        );
+        official_provider.category = Some("official".to_string());
+        manager
+            .providers
+            .insert("official-provider".to_string(), official_provider);
+
+        manager.providers.insert(
+            "third-party".to_string(),
+            Provider::with_id(
+                "third-party".to_string(),
+                "Relay".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "relay-key"},
+                    "config": third_party_config
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "third-party")
+        .expect("switch away from official provider");
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers");
+    let stored_auth = providers
+        .get("official-provider")
+        .and_then(|provider| provider.settings_config.get("auth"))
+        .expect("stored official auth");
+    assert_eq!(
+        stored_auth,
+        &json!({}),
+        "official backfill must not capture a third-party API key from live auth"
+    );
+}
+
+#[test]
+fn provider_service_codex_unified_backfill_restores_third_party_provider_id() {
+    let _guard = test_mutex().lock().expect("acquire test mutex");
+    reset_test_fs();
+    nexus_composer_lib::update_settings(nexus_composer_lib::AppSettings {
+        preserve_codex_official_auth_on_switch: true,
+        unify_codex_session_history: true,
+        ..Default::default()
+    })
+    .expect("enable Codex compatibility settings");
+    let _home = ensure_test_home();
+
+    let oauth_auth = json!({
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "access_token": "official-oauth-token",
+            "account_id": "acct-official"
+        }
+    });
+    let nexus_config = r#"model_provider = "nexus"
+
+[model_providers.nexus]
+name = "Nexus"
+base_url = "https://nexus.example/v1"
+wire_api = "responses"
+"#;
+    let unified_live_config = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "Nexus"
+base_url = "https://nexus.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "nexus-key"
+"#;
+    write_codex_live_atomic(&oauth_auth, Some(unified_live_config))
+        .expect("seed unified third-party live config");
+
+    let mut initial_config = MultiAppConfig::default();
+    {
+        let manager = initial_config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "nexus-provider".to_string();
+        manager.providers.insert(
+            "nexus-provider".to_string(),
+            Provider::with_id(
+                "nexus-provider".to_string(),
+                "Nexus".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "nexus-key"},
+                    "config": nexus_config
+                }),
+                None,
+            ),
+        );
+        manager.providers.insert(
+            "relay-provider".to_string(),
+            Provider::with_id(
+                "relay-provider".to_string(),
+                "Relay".to_string(),
+                json!({
+                    "auth": {"OPENAI_API_KEY": "relay-key"},
+                    "config": r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+"#
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = create_test_state_with_config(&initial_config).expect("create test state");
+
+    ProviderService::switch(&state, AppType::Codex, "relay-provider")
+        .expect("switch away from unified Nexus provider");
+
+    let providers = state
+        .db
+        .get_all_providers(AppType::Codex.as_str())
+        .expect("read providers");
+    let stored_config = providers
+        .get("nexus-provider")
+        .and_then(|provider| provider.settings_config.get("config"))
+        .and_then(|value| value.as_str())
+        .expect("stored Nexus config");
+    let stored_config: toml::Value = toml::from_str(stored_config).expect("parse stored config");
+    assert_eq!(
+        stored_config
+            .get("model_provider")
+            .and_then(|value| value.as_str()),
+        Some("nexus"),
+        "backfill must restore the provider's native history bucket"
+    );
+    assert!(
+        stored_config["model_providers"].get("nexus").is_some(),
+        "the provider table must be restored to its native id"
+    );
+    assert!(
+        stored_config["model_providers"].get("custom").is_none(),
+        "the live-only shared bucket must not pollute provider storage"
+    );
+}
+
+#[test]
 fn provider_service_switch_codex_official_accounts_write_auth_json() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();

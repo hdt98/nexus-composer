@@ -67,29 +67,34 @@ pub async fn save_settings(
     let merged = merge_settings_for_save(settings, &existing);
     let unify_codex_changed =
         merged.unify_codex_session_history != existing.unify_codex_session_history;
+    let preserve_codex_auth_changed = merged.preserve_codex_official_auth_on_switch
+        != existing.preserve_codex_official_auth_on_switch;
+    let codex_live_policy_changed = unify_codex_changed || preserve_codex_auth_changed;
     let unify_codex_enabled = merged.unify_codex_session_history;
+
+    if preserve_codex_auth_changed
+        && existing.preserve_codex_official_auth_on_switch
+        && !merged.preserve_codex_official_auth_on_switch
+    {
+        crate::codex_config::capture_live_codex_official_auth_snapshot()
+            .map_err(|err| err.to_string())?;
+    }
+
     crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
 
-    // 统一会话开关变更时立即重写当前官方 Codex 供应商的 live 配置，
-    // 不必等下一次切换才生效。
-    if unify_codex_changed {
-        // live 重写失败时回滚设置并把保存整体报失败：若设置保持已切换状态，
-        // live 仍跑旧桶，后续的历史迁移/还原会让会话再次分裂（开启=历史
-        // 迁走而新会话仍写 openai 桶；关闭=会话还原而 live 仍写 custom）。
-        // 报错让前端 saved=false 短路还原；回滚是整次保存的事务语义
-        // （本开关的保存只携带开关相关字段）。
-        if let Err(err) =
-            crate::services::provider::reapply_current_codex_official_live(state.inner())
-        {
-            log::warn!("统一 Codex 会话历史开关变更后重写 live 配置失败，回滚设置: {err}");
+    // These settings change the live Codex route and auth ownership policy.
+    // Apply them immediately so a Codex restart cannot reopen stale state.
+    if codex_live_policy_changed {
+        if let Err(err) = crate::services::provider::reapply_current_codex_live(state.inner()) {
+            log::warn!("Failed to reapply Codex live policy; rolling settings back: {err}");
             if let Err(rollback_err) = crate::settings::update_settings(existing) {
-                log::error!("回滚统一会话开关设置失败: {rollback_err}");
+                log::error!("Failed to roll back Codex live policy settings: {rollback_err}");
             }
-            return Err(format!(
-                "统一 Codex 会话历史开关未生效（live 配置重写失败）: {err}"
-            ));
+            return Err(format!("Codex live policy change was not applied: {err}"));
         }
+    }
 
+    if unify_codex_changed {
         if unify_codex_enabled {
             // 后台执行存量迁移（openai 桶 → custom 桶；仅当用户勾选了迁入既有
             // 会话，函数内部自门控）。大会话目录可能要读数秒，不能阻塞设置保存；

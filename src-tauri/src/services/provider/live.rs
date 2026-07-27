@@ -552,6 +552,22 @@ pub(crate) fn write_live_with_common_config(
     app_type: &AppType,
     provider: &Provider,
 ) -> Result<(), AppError> {
+    write_live_with_common_config_inner(db, app_type, provider, false)
+}
+
+pub(crate) fn write_live_with_selected_official_codex_account(
+    db: &Database,
+    provider: &Provider,
+) -> Result<(), AppError> {
+    write_live_with_common_config_inner(db, &AppType::Codex, provider, true)
+}
+
+fn write_live_with_common_config_inner(
+    db: &Database,
+    app_type: &AppType,
+    provider: &Provider,
+    force_selected_official_auth: bool,
+) -> Result<(), AppError> {
     let mut effective_provider = provider.clone();
     effective_provider.settings_config =
         build_effective_settings_with_common_config(db, app_type, provider)?;
@@ -573,7 +589,18 @@ pub(crate) fn write_live_with_common_config(
         return Ok(());
     }
 
-    write_live_snapshot(app_type, &effective_provider)
+    if matches!(app_type, AppType::Codex)
+        && provider.category.as_deref() != Some("official")
+        && !crate::settings::preserve_codex_official_auth_on_switch()
+    {
+        crate::codex_config::capture_live_codex_official_auth_snapshot()?;
+    }
+
+    if force_selected_official_auth {
+        write_live_snapshot_inner(app_type, &effective_provider, true)
+    } else {
+        write_live_snapshot(app_type, &effective_provider)
+    }
 }
 
 pub(crate) fn strip_common_config_from_live_settings(
@@ -644,9 +671,21 @@ fn restore_live_settings_for_provider_backfill(
         );
     }
 
-    // 统一会话开关注入的共享 `custom` 路由只属于 live 配置；切换回填时
-    // 必须剥掉，否则官方供应商的存储配置被污染，关闭开关后无法还原。
     if provider.category.as_deref() == Some("official") {
+        let live_has_oauth = settings
+            .get("auth")
+            .is_some_and(crate::codex_config::codex_auth_has_oauth_login_material);
+        if !live_has_oauth {
+            if let (Some(settings), Some(stored_auth)) = (
+                settings.as_object_mut(),
+                provider.settings_config.get("auth"),
+            ) {
+                settings.insert("auth".to_string(), stored_auth.clone());
+            }
+        }
+
+        // The shared `custom` route belongs only to live config. Strip it before
+        // backfill so disabling unified history can restore the official template.
         if let Err(err) =
             crate::codex_config::strip_codex_unified_session_bucket_from_settings(&mut settings)
         {
@@ -655,6 +694,16 @@ fn restore_live_settings_for_provider_backfill(
                 provider.id
             );
         }
+    } else if let Err(err) =
+        crate::codex_config::restore_codex_third_party_unified_session_bucket_from_settings(
+            &mut settings,
+            &provider.settings_config,
+        )
+    {
+        log::warn!(
+            "Failed to restore the native Codex provider route while backfilling '{}': {err}",
+            provider.id
+        );
     }
 
     // `modelCatalog` is a Nexus Composer–private field whose SSOT is the DB. Live's
@@ -792,6 +841,14 @@ impl LiveSnapshot {
 
 /// Write live configuration snapshot for a provider
 pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Result<(), AppError> {
+    write_live_snapshot_inner(app_type, provider, false)
+}
+
+fn write_live_snapshot_inner(
+    app_type: &AppType,
+    provider: &Provider,
+    force_selected_official_auth: bool,
+) -> Result<(), AppError> {
     match app_type {
         AppType::Claude => {
             let path = get_claude_settings_path();
@@ -822,13 +879,22 @@ pub(crate) fn write_live_snapshot(app_type: &AppType, provider: &Provider) -> Re
                 provider.meta.as_ref().and_then(|m| m.api_format.as_deref()),
             );
 
-            crate::codex_config::write_codex_provider_live_with_catalog(
-                &provider.settings_config,
-                provider.category.as_deref(),
-                auth,
-                config_str,
-                profile,
-            )?;
+            if force_selected_official_auth {
+                crate::codex_config::write_codex_official_account_live_with_catalog(
+                    &provider.settings_config,
+                    auth,
+                    config_str,
+                    profile,
+                )?;
+            } else {
+                crate::codex_config::write_codex_provider_live_with_catalog(
+                    &provider.settings_config,
+                    provider.category.as_deref(),
+                    auth,
+                    config_str,
+                    profile,
+                )?;
+            }
         }
         AppType::Gemini => {
             // Delegate to write_gemini_live which handles env file writing correctly
