@@ -1216,7 +1216,12 @@ function ProviderFormFull({
             }),
           );
         }
-        if (!isCopilotProvider && !isCodexOauthProvider && !apiKey.trim()) {
+        if (
+          !isCopilotProvider &&
+          !isCodexOauthProvider &&
+          !templatePreset?.apiKeyOptional &&
+          !apiKey.trim()
+        ) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",
@@ -1224,6 +1229,9 @@ function ProviderFormFull({
           );
         }
       } else if (appId === "codex") {
+        const selectedPreset = presetEntries.find(
+          (entry) => entry.id === selectedPresetId,
+        )?.preset as CodexProviderPreset | undefined;
         if (!codexBaseUrl.trim()) {
           issues.push(
             t("providerForm.endpointRequired", {
@@ -1231,7 +1239,7 @@ function ProviderFormFull({
             }),
           );
         }
-        if (!codexApiKey.trim()) {
+        if (!selectedPreset?.apiKeyOptional && !codexApiKey.trim()) {
           issues.push(
             t("providerForm.apiKeyRequired", {
               defaultValue: "非官方供应商请填写 API Key",

@@ -13,6 +13,9 @@ import type { PresetTheme } from "./claudeProviderPresets";
 import {
   NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
   NEXUS_ENDPOINT,
+  NEXUS_KIMI_ENDPOINT,
+  NEXUS_KIMI_MODEL,
+  NEXUS_KIMI_TEXT_MODEL_CATALOG,
   NEXUS_MODEL,
   NEXUS_REQUEST_OVERRIDES,
   NEXUS_TEXT_MODEL_CATALOG,
@@ -68,6 +71,7 @@ export interface ClaudeDesktopProviderPreset {
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
   managedNexusPresetVersion?: number;
   requiresOAuth?: boolean;
+  apiKeyOptional?: boolean;
 
   endpointCandidates?: string[];
   theme?: PresetTheme;
@@ -185,6 +189,27 @@ export const claudeDesktopProviderPresets: ClaudeDesktopProviderPreset[] = [
     managedNexusPresetVersion: NEXUS_CLAUDE_DESKTOP_MANAGED_PRESET_VERSION,
     endpointCandidates: [NEXUS_ENDPOINT],
     icon: "nexus",
+    iconColor: "#6366F1",
+  },
+  {
+    name: "Nexus Kimi-K3",
+    websiteUrl: NEXUS_KIMI_ENDPOINT,
+    category: "third_party",
+    baseUrl: NEXUS_KIMI_ENDPOINT,
+    mode: "proxy",
+    apiFormat: "openai_chat",
+    apiKeyOptional: true,
+    modelRoutes: [
+      {
+        routeId: CLAUDE_DESKTOP_ROLE_ROUTE_IDS.sonnet,
+        upstreamModel: NEXUS_KIMI_MODEL,
+        labelOverride: NEXUS_KIMI_MODEL,
+        supports1m: false,
+      },
+    ],
+    modelCatalog: NEXUS_KIMI_TEXT_MODEL_CATALOG,
+    endpointCandidates: [NEXUS_KIMI_ENDPOINT],
+    icon: "kimi",
     iconColor: "#6366F1",
   },
   {
