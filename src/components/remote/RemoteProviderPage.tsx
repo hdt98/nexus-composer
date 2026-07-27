@@ -2041,6 +2041,10 @@ export function RemoteProviderPage({
           confirmText={t("remote.confirmOverwrite", {
             defaultValue: "确认切换",
           })}
+          isLoading={applyMutation.isPending}
+          loadingText={t("remote.switching", {
+            defaultValue: "Switching remote provider...",
+          })}
           cancelText={t("common.cancel")}
           onConfirm={() =>
             applyMutation.mutate({

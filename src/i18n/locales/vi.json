@@ -1501,7 +1501,8 @@
     "confirmOverwriteTitle": "Ghi đè cấu hình từ xa?",
     "confirmOverwriteMessage": "Tiếp tục sẽ ghi provider được chọn vào máy chủ từ xa. Các tệp hiện tại sẽ được sao lưu trước, nhưng cấu hình đang hoạt động sẽ bị thay thế.",
     "confirmStopAgentMessage": "Remote Agent sẽ giữ các thread Codex cũ có thể tiếp tục, sau đó dừng và khôi phục profile trước khi áp dụng OpenAI Official. Metadata lịch sử thay đổi và các tệp cấu hình hiện tại đều được sao lưu.",
-    "confirmOverwrite": "Xác nhận chuyển"
+    "confirmOverwrite": "Xác nhận chuyển",
+    "switching": "Đang chuyển provider từ xa..."
   },
   "usage": {
     "title": "Thống kê sử dụng",

@@ -1501,7 +1501,8 @@
     "confirmOverwriteTitle": "Overwrite remote config?",
     "confirmOverwriteMessage": "Continuing will write the selected local provider to the remote server. Existing remote files will be backed up first, but the active remote config will be replaced.",
     "confirmStopAgentMessage": "The Remote Agent will preserve existing Codex threads, stop, and restore the previous Codex profile before OpenAI Official is applied. Changed history metadata and existing config files will be backed up.",
-    "confirmOverwrite": "Confirm switch"
+    "confirmOverwrite": "Confirm switch",
+    "switching": "Switching remote provider..."
   },
   "usage": {
     "title": "Usage Statistics",
