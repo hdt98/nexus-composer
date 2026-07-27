@@ -2190,10 +2190,13 @@ impl ProxyService {
 
             let existing_live = self.read_codex_live().ok();
             if let Some(existing_live) = existing_live.as_ref() {
+                crate::codex_config::capture_live_codex_official_auth_snapshot()
+                    .map_err(|e| format!("Failed to preserve Codex OAuth snapshot: {e}"))?;
                 Self::preserve_codex_user_config_from_existing_config(
                     &mut effective_settings,
                     existing_live,
                 )?;
+                Self::preserve_codex_oauth_auth_in_backup(&mut effective_settings, existing_live)?;
             }
             if let Some(existing_value) = existing_backup_value.as_ref() {
                 Self::preserve_codex_user_config_from_existing_config(
@@ -2201,6 +2204,14 @@ impl ProxyService {
                     existing_value,
                 )?;
                 Self::preserve_codex_oauth_auth_in_backup(&mut effective_settings, existing_value)?;
+            }
+            if let Some(saved_auth) = crate::codex_config::read_codex_official_auth_snapshot()
+                .map_err(|e| format!("Failed to read preserved Codex OAuth: {e}"))?
+            {
+                Self::preserve_codex_oauth_auth_in_backup(
+                    &mut effective_settings,
+                    &json!({ "auth": saved_auth }),
+                )?;
             }
 
             if let Some(authoritative_settings) =

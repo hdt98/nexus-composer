@@ -60,6 +60,9 @@ pub fn reapply_current_codex_live(state: &AppState) -> Result<bool, AppError> {
         return Ok(false);
     };
 
+    let restore_official_auth = provider.category.as_deref() != Some("official")
+        && crate::settings::preserve_codex_official_auth_on_switch();
+
     let has_live_backup =
         futures::executor::block_on(state.db.get_live_backup(AppType::Codex.as_str()))
             .ok()
@@ -85,10 +88,14 @@ pub fn reapply_current_codex_live(state: &AppState) -> Result<bool, AppError> {
                 AppError::Message(format!("Failed to reapply the active Codex provider: {e}"))
             })?;
         }
-        return Ok(true);
+    } else {
+        live::write_live_with_common_config(&state.db, &AppType::Codex, provider)?;
     }
 
-    live::write_live_with_common_config(&state.db, &AppType::Codex, provider)?;
+    if restore_official_auth {
+        crate::codex_config::restore_codex_official_auth_snapshot()?;
+    }
+
     Ok(true)
 }
 
@@ -537,6 +544,11 @@ wire_api = "chat"
                 .expect("read preserved OAuth"),
             oauth_auth
         );
+        assert!(
+            crate::codex_config::capture_live_codex_official_auth_snapshot()
+                .expect("capture the durable OAuth snapshot"),
+            "the live subscription login should be captured before disabling preservation"
+        );
 
         crate::settings::update_settings(crate::settings::AppSettings {
             preserve_codex_official_auth_on_switch: false,
@@ -577,6 +589,43 @@ wire_api = "chat"
                 .get("auth")
                 .is_some_and(crate::codex_config::codex_auth_has_oauth_login_material),
             "disabling login preservation should remove OAuth from the restore backup"
+        );
+
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            unify_codex_session_history: false,
+            ..Default::default()
+        })
+        .expect("re-enable login preservation without unified history");
+
+        assert!(
+            reapply_current_codex_live(&state).expect("restore preserved Codex OAuth"),
+            "the active third-party provider must be reapplied"
+        );
+
+        let restored_config = fs::read_to_string(crate::codex_config::get_codex_config_path())
+            .expect("read restored native route");
+        assert!(
+            restored_config.contains("model_provider = \"nexus\""),
+            "unified history remains disabled, so the Nexus history partition must remain native"
+        );
+        assert_eq!(
+            crate::config::read_json_file::<Value>(&crate::codex_config::get_codex_auth_path())
+                .expect("read restored OAuth"),
+            oauth_auth,
+            "re-enabling login preservation must restore the subscription account"
+        );
+
+        let restored_backup = tauri::async_runtime::block_on(db.get_live_backup("codex"))
+            .expect("read restored Codex backup")
+            .expect("Codex backup exists");
+        let restored_backup: Value =
+            serde_json::from_str(&restored_backup.original_config).expect("parse restored backup");
+        assert!(
+            restored_backup
+                .get("auth")
+                .is_some_and(crate::codex_config::codex_auth_has_oauth_login_material),
+            "the restore backup must retain OAuth for a later takeover disable"
         );
 
         tauri::async_runtime::block_on(

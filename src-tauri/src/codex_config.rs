@@ -1,9 +1,10 @@
 use std::collections::HashSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    atomic_write, delete_file, get_home_dir, read_json_file, sanitize_provider_name,
-    write_json_file, write_text_file,
+    atomic_write, delete_file, get_app_config_dir, get_home_dir, read_json_file,
+    sanitize_provider_name, write_json_file, write_text_file,
 };
 use crate::error::AppError;
 use serde_json::{json, Value};
@@ -14,6 +15,7 @@ use toml_edit::DocumentMut;
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const NEXUS_CODEX_MODEL_CATALOG_FILENAME: &str = "nexus-model-catalog.json";
 const LEGACY_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
+const CODEX_OFFICIAL_AUTH_SNAPSHOT_FILENAME: &str = "codex_official_auth_snapshot.json";
 
 /// Top-level `config.toml` key that controls Codex's built-in web-search tool.
 const CODEX_WEB_SEARCH_FIELD: &str = "web_search";
@@ -156,6 +158,115 @@ pub fn get_codex_config_path() -> PathBuf {
 
 pub fn get_codex_model_catalog_path() -> PathBuf {
     get_codex_config_dir().join(NEXUS_CODEX_MODEL_CATALOG_FILENAME)
+}
+
+fn get_codex_official_auth_snapshot_path() -> PathBuf {
+    get_app_config_dir().join(CODEX_OFFICIAL_AUTH_SNAPSHOT_FILENAME)
+}
+
+fn write_codex_official_auth_snapshot(auth: &Value) -> Result<(), AppError> {
+    let path = get_codex_official_auth_snapshot_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| AppError::Config("Invalid Codex OAuth snapshot path".to_string()))?;
+    fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| AppError::Config("Invalid Codex OAuth snapshot filename".to_string()))?
+        .to_string_lossy();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let tmp_path = parent.join(format!("{file_name}.tmp.{nonce}"));
+    let serialized = serde_json::to_vec_pretty(auth)
+        .map_err(|err| AppError::Message(format!("Failed to serialize Codex OAuth: {err}")))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&tmp_path)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.write_all(&serialized)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.flush().map_err(|err| AppError::io(&tmp_path, err))?;
+        fs::rename(&tmp_path, &path).map_err(|err| AppError::io(&path, err))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| AppError::io(&path, err))?;
+    }
+
+    #[cfg(windows)]
+    {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&tmp_path)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.write_all(&serialized)
+            .map_err(|err| AppError::io(&tmp_path, err))?;
+        file.flush().map_err(|err| AppError::io(&tmp_path, err))?;
+        if path.exists() {
+            fs::remove_file(&path).map_err(|err| AppError::io(&path, err))?;
+        }
+        fs::rename(&tmp_path, &path).map_err(|err| AppError::io(&path, err))?;
+    }
+
+    Ok(())
+}
+
+pub(crate) fn capture_live_codex_official_auth_snapshot() -> Result<bool, AppError> {
+    let auth_path = get_codex_auth_path();
+    if !auth_path.exists() {
+        return Ok(false);
+    }
+
+    let auth: Value = read_json_file(&auth_path)?;
+    if !codex_auth_has_oauth_login_material(&auth) {
+        return Ok(false);
+    }
+
+    write_codex_official_auth_snapshot(&auth)?;
+    Ok(true)
+}
+
+pub(crate) fn read_codex_official_auth_snapshot() -> Result<Option<Value>, AppError> {
+    let snapshot_path = get_codex_official_auth_snapshot_path();
+    if !snapshot_path.exists() {
+        return Ok(None);
+    }
+
+    let auth: Value = read_json_file(&snapshot_path)?;
+    if !codex_auth_has_oauth_login_material(&auth) {
+        return Err(AppError::Message(
+            "Saved Codex OAuth snapshot does not contain login material".to_string(),
+        ));
+    }
+
+    Ok(Some(auth))
+}
+
+pub(crate) fn restore_codex_official_auth_snapshot() -> Result<bool, AppError> {
+    let Some(auth) = read_codex_official_auth_snapshot()? else {
+        return Ok(false);
+    };
+
+    let live_auth_path = get_codex_auth_path();
+    if live_auth_path.exists() {
+        let live_auth: Value = read_json_file(&live_auth_path)?;
+        if codex_auth_has_oauth_login_material(&live_auth) {
+            write_codex_official_auth_snapshot(&live_auth)?;
+            return Ok(false);
+        }
+    }
+
+    write_json_file(&get_codex_auth_path(), &auth)?;
+    Ok(true)
 }
 
 /// 获取 Codex 供应商配置文件路径

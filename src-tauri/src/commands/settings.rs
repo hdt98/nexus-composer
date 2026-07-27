@@ -71,6 +71,15 @@ pub async fn save_settings(
         != existing.preserve_codex_official_auth_on_switch;
     let codex_live_policy_changed = unify_codex_changed || preserve_codex_auth_changed;
     let unify_codex_enabled = merged.unify_codex_session_history;
+
+    if preserve_codex_auth_changed
+        && existing.preserve_codex_official_auth_on_switch
+        && !merged.preserve_codex_official_auth_on_switch
+    {
+        crate::codex_config::capture_live_codex_official_auth_snapshot()
+            .map_err(|err| err.to_string())?;
+    }
+
     crate::settings::update_settings(merged).map_err(|e| e.to_string())?;
 
     // These settings change the live Codex route and auth ownership policy.

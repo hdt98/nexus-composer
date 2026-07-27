@@ -589,6 +589,13 @@ fn write_live_with_common_config_inner(
         return Ok(());
     }
 
+    if matches!(app_type, AppType::Codex)
+        && provider.category.as_deref() != Some("official")
+        && !crate::settings::preserve_codex_official_auth_on_switch()
+    {
+        crate::codex_config::capture_live_codex_official_auth_snapshot()?;
+    }
+
     if force_selected_official_auth {
         write_live_snapshot_inner(app_type, &effective_provider, true)
     } else {
