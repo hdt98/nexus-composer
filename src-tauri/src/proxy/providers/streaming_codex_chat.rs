@@ -1114,7 +1114,7 @@ mod tests {
     #[tokio::test]
     async fn converts_tool_call_chat_sse_to_responses_sse() {
         let output = collect(vec![
-            "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}]}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"wait:6\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_2\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"city\\\":\\\"Tokyo\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
             "data: [DONE]\n\n",
         ])
@@ -1123,7 +1123,8 @@ mod tests {
         assert!(output.contains("event: response.function_call_arguments.delta"));
         assert!(output.contains("event: response.function_call_arguments.done"));
         assert!(output.contains("\"type\":\"function_call\""));
-        assert!(output.contains("\"call_id\":\"call_1\""));
+        assert!(output.contains("\"id\":\"fc_wait_3a6\""));
+        assert!(output.contains("\"call_id\":\"wait:6\""));
     }
 
     #[tokio::test]
@@ -1136,7 +1137,7 @@ mod tests {
             super::super::transform_codex_chat::build_codex_tool_context_from_request(&request);
         let output = collect_with_context(
             vec![
-                "data: {\"id\":\"chatcmpl_custom\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_custom\",\"type\":\"function\",\"function\":{\"name\":\"exec\"}}]}}]}\n\n",
+                "data: {\"id\":\"chatcmpl_custom\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"exec:0\",\"type\":\"function\",\"function\":{\"name\":\"exec\"}}]}}]}\n\n",
                 "data: {\"id\":\"chatcmpl_custom\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"input\\\":\"}}]}}]}\n\n",
                 "data: {\"id\":\"chatcmpl_custom\",\"model\":\"gpt-5.4\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"ls -la\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
                 "data: [DONE]\n\n",
@@ -1149,7 +1150,8 @@ mod tests {
         assert!(output.contains("event: response.custom_tool_call_input.done"));
         assert!(!output.contains("event: response.function_call_arguments.delta"));
         assert!(!output.contains("event: response.function_call_arguments.done"));
-        assert!(output.contains("\"id\":\"ctc_call_custom\""));
+        assert!(output.contains("\"id\":\"ctc_exec_3a0\""));
+        assert!(output.contains("\"call_id\":\"exec:0\""));
         assert!(output.contains("\"type\":\"custom_tool_call\""));
         assert!(output.contains("\"name\":\"exec\""));
         assert!(output.contains("\"input\":\"ls -la\""));

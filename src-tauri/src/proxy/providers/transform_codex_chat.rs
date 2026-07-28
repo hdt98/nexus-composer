@@ -1545,11 +1545,26 @@ pub(crate) fn response_tool_call_item_id_from_chat_name(
     chat_name: &str,
     tool_context: &CodexToolContext,
 ) -> String {
+    let suffix = responses_item_id_suffix(call_id);
     if tool_context.is_custom_tool_chat_name(chat_name) {
-        format!("ctc_{call_id}")
+        format!("ctc_{suffix}")
     } else {
-        format!("fc_{call_id}")
+        format!("fc_{suffix}")
     }
+}
+
+fn responses_item_id_suffix(value: &str) -> String {
+    let mut suffix = String::with_capacity(value.len());
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+            suffix.push(character);
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut suffix, "_{:x}", character as u32)
+                .expect("writing to a String cannot fail");
+        }
+    }
+    suffix
 }
 
 pub(crate) fn response_tool_call_item_from_chat_name(
@@ -3009,7 +3024,7 @@ mod tests {
                 "message": {
                     "role": "assistant",
                     "tool_calls": [{
-                        "id": "call_patch",
+                        "id": "exec:0",
                         "type": "function",
                         "function": {
                             "name": "apply_patch",
@@ -3024,8 +3039,8 @@ mod tests {
         let result = chat_completion_to_response_with_context(chat, &context).unwrap();
 
         assert_eq!(result["output"][0]["type"], "custom_tool_call");
-        assert_eq!(result["output"][0]["id"], "ctc_call_patch");
-        assert_eq!(result["output"][0]["call_id"], "call_patch");
+        assert_eq!(result["output"][0]["id"], "ctc_exec_3a0");
+        assert_eq!(result["output"][0]["call_id"], "exec:0");
         assert_eq!(result["output"][0]["name"], "apply_patch");
         assert_eq!(
             result["output"][0]["input"],
