@@ -5185,6 +5185,10 @@ experimental_bearer_token = "PROXY_MANAGED"
         });
         crate::codex_config::write_codex_live_atomic(&newer_live_auth, Some("model = \"stale\"\n"))
             .expect("seed newer OAuth login with legacy placeholder");
+        let snapshot_path =
+            crate::config::get_app_config_dir().join("codex_official_auth_snapshot.json");
+        crate::config::write_json_file(&snapshot_path, &newer_live_auth)
+            .expect("seed preserved OAuth snapshot with legacy placeholder");
 
         assert!(
             service
@@ -5206,6 +5210,19 @@ experimental_bearer_token = "PROXY_MANAGED"
         assert!(
             repaired_auth.get("OPENAI_API_KEY").is_none(),
             "the legacy proxy placeholder must not survive official-login restoration"
+        );
+        let repaired_snapshot: Value =
+            crate::config::read_json_file(&snapshot_path).expect("read repaired OAuth snapshot");
+        assert_eq!(
+            repaired_snapshot
+                .pointer("/tokens/access_token")
+                .and_then(Value::as_str),
+            Some("newer-access"),
+            "snapshot repair must preserve newer OAuth tokens"
+        );
+        assert!(
+            repaired_snapshot.get("OPENAI_API_KEY").is_none(),
+            "the legacy proxy placeholder must not survive in the durable OAuth snapshot"
         );
 
         crate::settings::update_settings(crate::settings::AppSettings::default())
