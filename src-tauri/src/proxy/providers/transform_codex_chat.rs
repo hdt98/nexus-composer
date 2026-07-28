@@ -42,6 +42,7 @@ const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
 const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
+const AGENT_LOOP_COMPATIBILITY_INSTRUCTION: &str = "Chat Completions compatibility: A text-only progress update ends the agent turn. When work remains, include the next tool call in the same response as any progress update. Return a text-only response only when the task is complete or you need user input.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodexToolKind {
@@ -274,7 +275,11 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
 
     let mut messages = Vec::new();
     if let Some(instructions) = body.get("instructions") {
-        let instructions = instruction_text(instructions);
+        let mut instructions = instruction_text(instructions);
+        if !instructions.is_empty() && !tool_context.chat_tools().is_empty() {
+            instructions.push_str("\n\n");
+            instructions.push_str(AGENT_LOOP_COMPATIBILITY_INSTRUCTION);
+        }
         if !instructions.is_empty() {
             messages.push(json!({
                 "role": "system",
@@ -1821,6 +1826,40 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_tool_requests_warn_chat_models_that_text_only_progress_ends_the_turn() {
+        let result = responses_to_chat_completions(json!({
+            "model": "kimi-k3",
+            "instructions": "Keep working until the task is complete.",
+            "input": [{
+                "type": "custom_tool_call",
+                "call_id": "exec:0",
+                "name": "exec",
+                "input": "inspect"
+            }, {
+                "type": "custom_tool_call_output",
+                "call_id": "exec:0",
+                "output": "result"
+            }],
+            "tools": [{
+                "type": "custom",
+                "name": "exec",
+                "description": "Run a command"
+            }]
+        }))
+        .unwrap();
+
+        let instructions = result["messages"][0]["content"].as_str().unwrap();
+        assert!(
+            instructions.contains("A text-only progress update ends the agent turn"),
+            "{instructions}"
+        );
+        assert!(
+            instructions.contains("include the next tool call in the same response"),
+            "{instructions}"
+        );
+    }
 
     #[test]
     fn nexus_history_is_exact_while_baseline_history_still_backfills() {
