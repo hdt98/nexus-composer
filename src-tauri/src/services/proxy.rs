@@ -2305,11 +2305,24 @@ impl ProxyService {
         let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type_enum);
         let should_sync_backup = has_backup || live_taken_over;
 
-        self.db
-            .set_current_provider(app_type_enum.as_str(), provider_id)
-            .map_err(|e| format!("更新当前供应商失败: {e}"))?;
+        let previous_local_provider = crate::settings::get_current_provider(&app_type_enum);
         crate::settings::set_current_provider(&app_type_enum, Some(provider_id))
             .map_err(|e| format!("更新本地当前供应商失败: {e}"))?;
+        if let Err(error) = self
+            .db
+            .set_current_provider(app_type_enum.as_str(), provider_id)
+        {
+            let rollback = crate::settings::set_current_provider(
+                &app_type_enum,
+                previous_local_provider.as_deref(),
+            );
+            return Err(match rollback {
+                Ok(()) => format!("更新当前供应商失败: {error}"),
+                Err(rollback_error) => {
+                    format!("更新当前供应商失败: {error}; 恢复本地当前供应商失败: {rollback_error}")
+                }
+            });
+        }
 
         if should_sync_backup {
             self.update_live_backup_from_provider_inner(app_type, &provider)
