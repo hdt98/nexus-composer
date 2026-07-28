@@ -29,8 +29,6 @@ const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
 /// Backup directory for restore operations (separate from migration backups to keep the migration ledger directory clean).
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
-const OFFICIAL_MODEL_REPAIR_BACKUP_NAME: &str = "codex-official-model-repair-v1";
-const OFFICIAL_ITEM_ID_REPAIR_BACKUP_NAME: &str = "codex-official-item-id-repair-v1";
 /// Conservative upper limit for SQLite variables; IN lists are chunked by this size.
 const STATE_DB_ID_CHUNK: usize = 500;
 
@@ -411,69 +409,6 @@ pub fn restore_codex_official_history_from_backups(
         &migration_backup_root(OFFICIAL_UNIFY_RESTORE_BACKUP_NAME),
         &config_text,
     )
-}
-
-pub fn repair_codex_official_restore_thread_models(
-    stale_model: Option<&str>,
-    official_model: &str,
-) -> Result<usize, AppError> {
-    if !crate::settings::unify_codex_session_history() {
-        return Ok(0);
-    }
-
-    let Some(stale_model) = stale_model.map(str::trim).filter(|model| !model.is_empty()) else {
-        return Ok(0);
-    };
-    let official_model = official_model.trim();
-    if official_model.is_empty() || stale_model == official_model {
-        return Ok(0);
-    }
-
-    let _op_guard = lock_codex_official_history_op();
-    let codex_dir = get_codex_config_dir();
-    let config_text = read_codex_config_text().unwrap_or_default();
-    let backup_root = migration_backup_root(OFFICIAL_MODEL_REPAIR_BACKUP_NAME);
-    let mut repaired = 0;
-    for db_path in codex_state_db_paths(&codex_dir, &config_text) {
-        repaired += repair_codex_state_db_thread_model(
-            &db_path,
-            &codex_dir,
-            stale_model,
-            official_model,
-            &backup_root,
-        )?;
-    }
-    Ok(repaired)
-}
-
-pub fn repair_codex_official_restore_session_item_ids() -> Result<usize, AppError> {
-    if !crate::settings::unify_codex_session_history() {
-        return Ok(0);
-    }
-
-    let _op_guard = lock_codex_official_history_op();
-    let codex_dir = get_codex_config_dir();
-    let backup_root = migration_backup_root(OFFICIAL_ITEM_ID_REPAIR_BACKUP_NAME);
-    repair_codex_session_item_ids_inner(&codex_dir, &backup_root)
-}
-
-fn repair_codex_session_item_ids_inner(
-    codex_dir: &Path,
-    backup_root: &Path,
-) -> Result<usize, AppError> {
-    let mut files = Vec::new();
-    collect_jsonl_files(&codex_dir.join("sessions"), &mut files, 0, 8);
-    collect_jsonl_files(&codex_dir.join("archived_sessions"), &mut files, 0, 4);
-
-    let mut repaired_files = 0;
-    for file_path in files {
-        if rewrite_codex_session_file_lines(&file_path, codex_dir, backup_root, |line| {
-            rewrite_legacy_nexus_message_item_id_line(line)
-        })? {
-            repaired_files += 1;
-        }
-    }
-    Ok(repaired_files)
 }
 
 fn restore_codex_official_history_inner(
@@ -1215,33 +1150,6 @@ fn rewrite_codex_session_meta_line(
     serde_json::to_string(&value).ok()
 }
 
-fn rewrite_legacy_nexus_message_item_id_line(line: &str) -> Option<String> {
-    if !line.contains("\"response_item\"") || !line.contains("resp_") {
-        return None;
-    }
-
-    let mut value: Value = serde_json::from_str(line).ok()?;
-    if value.get("type").and_then(Value::as_str) != Some("response_item") {
-        return None;
-    }
-
-    let payload = value.get_mut("payload")?.as_object_mut()?;
-    if payload.get("type").and_then(Value::as_str) != Some("message")
-        || payload.get("role").and_then(Value::as_str) != Some("assistant")
-    {
-        return None;
-    }
-
-    let current_id = payload.get("id")?.as_str()?;
-    let suffix = current_id.strip_prefix("resp_")?.strip_suffix("_msg")?;
-    if suffix.is_empty() {
-        return None;
-    }
-
-    payload.insert("id".to_string(), Value::String(format!("msg_{suffix}")));
-    serde_json::to_string(&value).ok()
-}
-
 fn migrate_codex_state_dbs(
     codex_dir: &Path,
     source_provider_ids: &BTreeSet<String>,
@@ -1322,63 +1230,6 @@ fn migrate_codex_state_db_provider_bucket(
             "Failed to commit Codex state DB migration transaction: {e}"
         ))
     })?;
-    Ok(changed)
-}
-
-fn repair_codex_state_db_thread_model(
-    db_path: &Path,
-    codex_dir: &Path,
-    stale_model: &str,
-    official_model: &str,
-    backup_root: &Path,
-) -> Result<usize, AppError> {
-    if !db_path.exists() {
-        return Ok(0);
-    }
-
-    let mut conn = Connection::open(db_path)
-        .map_err(|e| AppError::Database(format!("Failed to open Codex state DB: {e}")))?;
-    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| {
-        AppError::Database(format!("Failed to set Codex state DB busy_timeout: {e}"))
-    })?;
-
-    if !Database::table_exists(&conn, "threads")?
-        || !Database::has_column(&conn, "threads", "model_provider")?
-        || !Database::has_column(&conn, "threads", "model")?
-    {
-        return Ok(0);
-    }
-
-    let matching_rows: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM threads WHERE model_provider = ?1 AND model = ?2",
-            [NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID, stale_model],
-            |row| row.get(0),
-        )
-        .map_err(|e| {
-            AppError::Database(format!("Failed to count stale Codex thread models: {e}"))
-        })?;
-    if matching_rows == 0 {
-        return Ok(0);
-    }
-
-    backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
-
-    let tx = conn
-        .transaction()
-        .map_err(|e| AppError::Database(format!("Failed to start Codex model repair: {e}")))?;
-    let changed = tx
-        .execute(
-            "UPDATE threads SET model = ?1 WHERE model_provider = ?2 AND model = ?3",
-            [
-                official_model,
-                NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID,
-                stale_model,
-            ],
-        )
-        .map_err(|e| AppError::Database(format!("Failed to repair Codex thread models: {e}")))?;
-    tx.commit()
-        .map_err(|e| AppError::Database(format!("Failed to commit Codex model repair: {e}")))?;
     Ok(changed)
 }
 
@@ -1531,7 +1382,7 @@ mod tests {
     #[serial]
     fn fresh_install_preserves_existing_codex_history_without_scanning() {
         let home = tempdir().expect("temp home");
-        let _home_guard = EnvVarGuard::set("NEXUS_COMPOSER_TEST_HOME", home.path());
+        let _home_guard = EnvVarGuard::set("CC_SWITCH_TEST_HOME", home.path());
         crate::settings::reload_settings().expect("reload settings");
 
         let outcome = preserve_codex_history_for_fresh_install().expect("preserve history");
@@ -1547,62 +1398,6 @@ mod tests {
         assert!(!migration.scanned_history_files);
         assert_eq!(migration.migrated_jsonl_files, 0);
         assert_eq!(migration.migrated_state_rows, 0);
-    }
-
-    #[test]
-    #[serial]
-    fn official_restore_repairs_are_disabled_without_unified_history() {
-        let home = tempdir().expect("temp home");
-        let _home_guard = EnvVarGuard::set("NEXUS_COMPOSER_TEST_HOME", home.path());
-        crate::settings::reload_settings().expect("reload settings");
-
-        let codex_dir = get_codex_config_dir();
-        let session_dir = codex_dir.join("sessions/2026/07/24");
-        fs::create_dir_all(&session_dir).expect("create session directory");
-        let session_path = session_dir.join("rollout.jsonl");
-        let original = concat!(
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"existing\",\"model_provider\":\"custom\"}}\n",
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"resp_existing_msg\",\"content\":[]}}\n",
-        );
-        fs::write(&session_path, original).expect("write existing session");
-
-        let state_db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
-        let conn = Connection::open(&state_db_path).expect("create state db");
-        conn.execute(
-            "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT, model TEXT)",
-            [],
-        )
-        .expect("create threads table");
-        conn.execute(
-            "INSERT INTO threads (id, model_provider, model) VALUES ('existing', 'custom', 'GLM-5.2-SGLang')",
-            [],
-        )
-        .expect("insert existing thread");
-        drop(conn);
-
-        assert_eq!(
-            repair_codex_official_restore_thread_models(Some("GLM-5.2-SGLang"), "gpt-5.5",)
-                .expect("skip model repair"),
-            0
-        );
-        assert_eq!(
-            repair_codex_official_restore_session_item_ids().expect("skip item id repair"),
-            0
-        );
-
-        assert_eq!(
-            fs::read_to_string(&session_path).expect("read preserved session"),
-            original
-        );
-        let conn = Connection::open(&state_db_path).expect("reopen state db");
-        let model: String = conn
-            .query_row(
-                "SELECT model FROM threads WHERE id = 'existing'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read preserved model");
-        assert_eq!(model, "GLM-5.2-SGLang");
     }
 
     #[test]
@@ -2235,58 +2030,6 @@ base_url = "https://proxy.example/v1"
 
         let text = fs::read_to_string(session_dir.join("session.jsonl")).expect("read session");
         assert!(text.contains("\"model_provider\":\"custom\""));
-    }
-
-    #[test]
-    fn repairs_only_legacy_nexus_assistant_message_item_ids() {
-        let legacy = r#"{"timestamp":"2026-07-14T03:17:00Z","type":"response_item","payload":{"type":"message","role":"assistant","id":"resp_3c5cbb5a87494acbb209e40ad9562ed0_msg","content":[]}}"#;
-        let repaired = rewrite_legacy_nexus_message_item_id_line(legacy).expect("repair id");
-        let value: Value = serde_json::from_str(&repaired).expect("parse repaired line");
-        assert_eq!(
-            value["payload"]["id"],
-            "msg_3c5cbb5a87494acbb209e40ad9562ed0"
-        );
-
-        let native = r#"{"type":"response_item","payload":{"type":"message","role":"assistant","id":"msg_native","content":[]}}"#;
-        assert!(rewrite_legacy_nexus_message_item_id_line(native).is_none());
-
-        let user = r#"{"type":"response_item","payload":{"type":"message","role":"user","id":"resp_client_msg","content":[]}}"#;
-        assert!(rewrite_legacy_nexus_message_item_id_line(user).is_none());
-
-        let tool = r#"{"type":"response_item","payload":{"type":"function_call","id":"resp_tool_msg","call_id":"call_1"}}"#;
-        assert!(rewrite_legacy_nexus_message_item_id_line(tool).is_none());
-    }
-
-    #[test]
-    fn repairs_legacy_item_ids_in_session_files_with_backup() {
-        let dir = tempdir().expect("tempdir");
-        let codex_dir = dir.path().join(".codex");
-        let session_dir = codex_dir.join("sessions/2026/07/14");
-        let backup_root = dir.path().join("backup");
-        fs::create_dir_all(&session_dir).expect("create session dir");
-        let session_path = session_dir.join("rollout.jsonl");
-        let original = concat!(
-            "{\"type\":\"session_meta\",\"payload\":{\"id\":\"s1\",\"model_provider\":\"custom\"}}\n",
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"resp_legacy_msg\",\"content\":[]}}\n",
-            "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"msg_native\",\"content\":[]}}\n",
-        );
-        fs::write(&session_path, original).expect("write session");
-
-        let repaired = repair_codex_session_item_ids_inner(&codex_dir, &backup_root)
-            .expect("repair session files");
-        assert_eq!(repaired, 1);
-
-        let text = fs::read_to_string(&session_path).expect("read repaired session");
-        assert!(text.contains("\"id\":\"msg_legacy\""));
-        assert!(text.contains("\"id\":\"msg_native\""));
-        assert!(!text.contains("resp_legacy_msg"));
-
-        let backup = backup_root.join("jsonl/sessions/2026/07/14/rollout.jsonl");
-        assert_eq!(fs::read_to_string(backup).expect("read backup"), original);
-
-        let rerun =
-            repair_codex_session_item_ids_inner(&codex_dir, &backup_root).expect("rerun repair");
-        assert_eq!(rerun, 0);
     }
 
     #[test]

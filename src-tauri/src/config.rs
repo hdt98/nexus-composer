@@ -6,27 +6,6 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
-pub const APP_CONFIG_DIR_NAME: &str = ".nexus-composer";
-pub const APP_DATABASE_FILENAME: &str = "nexus-composer.db";
-const LEGACY_APP_CONFIG_DIR_NAME: &str = ".cc-switch";
-const LEGACY_APP_DATABASE_FILENAME: &str = "cc-switch.db";
-
-fn test_home_dir_from_value(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    let value = value?;
-    match value.to_str() {
-        Some(value) => {
-            let value = value.trim();
-            (!value.is_empty()).then(|| PathBuf::from(value))
-        }
-        None => Some(PathBuf::from(value)),
-    }
-}
-
-/// Returns the validated test-home override used to isolate all live config paths.
-pub fn get_test_home_dir() -> Option<PathBuf> {
-    test_home_dir_from_value(std::env::var_os("NEXUS_COMPOSER_TEST_HOME"))
-}
-
 /// 获取用户主目录，带回退和日志
 ///
 /// ## Windows 注意事项
@@ -34,19 +13,22 @@ pub fn get_test_home_dir() -> Option<PathBuf> {
 /// - `dirs::home_dir()` 在 Windows 上使用 `SHGetKnownFolderPath(FOLDERID_Profile)`，
 ///   返回的是真实用户目录（类似 `C:\\Users\\Alice`），与 v3.10.2 行为一致。
 /// - 不要直接使用 `HOME` 环境变量：它可能由 Git/Cygwin/MSYS 等第三方工具注入，
-///   且不一定等于用户目录，可能导致应用数据路径变化，从而“看起来像数据丢失”。
+///   且不一定等于用户目录，可能导致 `.cc-switch/cc-switch.db` 路径变化，从而“看起来像数据丢失”。
 ///
 /// ## 测试隔离
 ///
-/// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `NEXUS_COMPOSER_TEST_HOME`
+/// 为了让 Windows CI/本地测试能稳定隔离真实用户数据，可通过 `CC_SWITCH_TEST_HOME`
 /// 显式覆盖 home dir（仅用于测试/调试场景）。
 pub fn get_home_dir() -> PathBuf {
-    if let Some(home) = get_test_home_dir() {
-        return home;
+    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
+        let trimmed = home.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
     }
 
     dirs::home_dir().unwrap_or_else(|| {
-        log::warn!("Unable to get user home directory, falling back to current directory");
+        log::warn!("无法获取用户主目录，回退到当前目录");
         PathBuf::from(".")
     })
 }
@@ -197,63 +179,33 @@ pub fn get_claude_settings_path() -> PathBuf {
     settings
 }
 
-fn migrate_legacy_app_config_dir(legacy_dir: &Path, target_dir: &Path) -> Option<PathBuf> {
-    if target_dir.exists() || !legacy_dir.exists() {
-        return None;
-    }
-
-    match fs::rename(legacy_dir, target_dir) {
-        Ok(()) => {
-            log::info!(
-                "Migrated legacy app data from {} to {}",
-                legacy_dir.display(),
-                target_dir.display()
-            );
-            Some(target_dir.to_path_buf())
-        }
-        Err(error) => {
-            log::warn!(
-                "Could not migrate legacy app data from {} to {}: {error}; continuing to use the legacy directory",
-                legacy_dir.display(),
-                target_dir.display()
-            );
-            Some(legacy_dir.to_path_buf())
-        }
-    }
-}
-
-/// 获取应用配置目录路径 (~/.nexus-composer)
+/// 获取应用配置目录路径 (~/.cc-switch)
 pub fn get_app_config_dir() -> PathBuf {
     if let Some(custom) = crate::app_store::get_app_config_dir_override() {
         return custom;
     }
 
-    let home_dir = get_home_dir();
-    let default_dir = home_dir.join(APP_CONFIG_DIR_NAME);
-    let legacy_default_dir = home_dir.join(LEGACY_APP_CONFIG_DIR_NAME);
-
-    if let Some(migrated_dir) = migrate_legacy_app_config_dir(&legacy_default_dir, &default_dir) {
-        return migrated_dir;
-    }
+    let default_dir = get_home_dir().join(".cc-switch");
 
     // 兼容 v3.10.3：当用户环境存在 `HOME` 且与真实用户目录不同，
-    // v3.10.3 可能在旧的 `HOME` 配置目录下创建/使用了数据库。
+    // v3.10.3 可能在 `HOME/.cc-switch/` 下创建/使用了数据库。
     // 这里仅在“默认位置没有数据库”时回退到旧位置，避免再次出现“供应商消失”问题，
     // 同时也避免新安装因为 `HOME` 被设置而写入非预期路径。
     #[cfg(windows)]
     {
-        let default_db = default_dir.join(APP_DATABASE_FILENAME);
+        let default_db = default_dir.join("cc-switch.db");
         if !default_db.exists() {
             if let Ok(home_env) = std::env::var("HOME") {
                 let trimmed = home_env.trim();
                 if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(LEGACY_APP_CONFIG_DIR_NAME);
-                    if legacy_dir.join(LEGACY_APP_DATABASE_FILENAME).exists() {
-                        if let Some(migrated_dir) =
-                            migrate_legacy_app_config_dir(&legacy_dir, &default_dir)
-                        {
-                            return migrated_dir;
-                        }
+                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
+                    if legacy_dir.join("cc-switch.db").exists() {
+                        log::info!(
+                            "Detected v3.10.3 legacy database at {}, using it instead of {}",
+                            legacy_dir.display(),
+                            default_dir.display()
+                        );
+                        return legacy_dir;
                     }
                 }
             }
@@ -261,42 +213,6 @@ pub fn get_app_config_dir() -> PathBuf {
     }
 
     default_dir
-}
-
-fn migrate_legacy_database_filename(app_config_dir: &Path) -> PathBuf {
-    let database_path = app_config_dir.join(APP_DATABASE_FILENAME);
-    if database_path.exists() {
-        return database_path;
-    }
-
-    let legacy_database_path = app_config_dir.join(LEGACY_APP_DATABASE_FILENAME);
-    if !legacy_database_path.exists() {
-        return database_path;
-    }
-
-    match fs::rename(&legacy_database_path, &database_path) {
-        Ok(()) => {
-            log::info!(
-                "Migrated legacy database filename from {} to {}",
-                legacy_database_path.display(),
-                database_path.display()
-            );
-            database_path
-        }
-        Err(error) => {
-            log::warn!(
-                "Could not migrate legacy database filename from {} to {}: {error}; continuing to use the legacy filename",
-                legacy_database_path.display(),
-                database_path.display()
-            );
-            legacy_database_path
-        }
-    }
-}
-
-/// Return the active database path, adopting the legacy filename on first use.
-pub fn get_app_database_path() -> PathBuf {
-    migrate_legacy_database_filename(&get_app_config_dir())
 }
 
 /// 获取应用配置文件路径
@@ -329,10 +245,7 @@ pub fn get_provider_config_path(provider_id: &str, provider_name: Option<&str>) 
 /// 读取 JSON 配置文件
 pub fn read_json_file<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T, AppError> {
     if !path.exists() {
-        return Err(AppError::Config(format!(
-            "File does not exist: {}",
-            path.display()
-        )));
+        return Err(AppError::Config(format!("文件不存在: {}", path.display())));
     }
 
     let content = fs::read_to_string(path).map_err(|e| AppError::io(path, e))?;
@@ -388,11 +301,11 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 
     let parent = path
         .parent()
-        .ok_or_else(|| AppError::Config("Invalid path".to_string()))?;
+        .ok_or_else(|| AppError::Config("无效的路径".to_string()))?;
     let mut tmp = parent.to_path_buf();
     let file_name = path
         .file_name()
-        .ok_or_else(|| AppError::Config("Invalid file name".to_string()))?
+        .ok_or_else(|| AppError::Config("无效的文件名".to_string()))?
         .to_string_lossy()
         .to_string();
     let ts = std::time::SystemTime::now()
@@ -423,11 +336,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
             let _ = fs::remove_file(path);
         }
         fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!(
-                "Atomic replace failed: {} -> {}",
-                tmp.display(),
-                path.display()
-            ),
+            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
             source: e,
         })?;
     }
@@ -435,11 +344,7 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
     #[cfg(not(windows))]
     {
         fs::rename(&tmp, path).map_err(|e| AppError::IoContext {
-            context: format!(
-                "Atomic replace failed: {} -> {}",
-                tmp.display(),
-                path.display()
-            ),
+            context: format!("原子替换失败: {} -> {}", tmp.display(), path.display()),
             source: e,
         })?;
     }
@@ -449,70 +354,6 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_home_override_rejects_blank_values_and_normalizes_text_paths() {
-        assert_eq!(test_home_dir_from_value(None), None);
-        assert_eq!(
-            test_home_dir_from_value(Some(std::ffi::OsString::from(""))),
-            None
-        );
-        assert_eq!(
-            test_home_dir_from_value(Some(std::ffi::OsString::from("   \t"))),
-            None
-        );
-        assert_eq!(
-            test_home_dir_from_value(Some(std::ffi::OsString::from("  isolated-home  "))),
-            Some(PathBuf::from("isolated-home"))
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn test_home_override_accepts_non_unicode_paths_consistently() {
-        use std::os::unix::ffi::OsStringExt;
-
-        let value = std::ffi::OsString::from_vec(b"isolated-\xff-home".to_vec());
-        assert_eq!(
-            test_home_dir_from_value(Some(value.clone())),
-            Some(PathBuf::from(value))
-        );
-    }
-
-    #[test]
-    fn migrates_legacy_app_config_directory_without_losing_files() {
-        let temp = tempfile::tempdir().expect("temp directory");
-        let legacy_dir = temp.path().join(LEGACY_APP_CONFIG_DIR_NAME);
-        let target_dir = temp.path().join(APP_CONFIG_DIR_NAME);
-        fs::create_dir(&legacy_dir).expect("legacy directory");
-        fs::write(legacy_dir.join("settings.json"), b"legacy settings").expect("legacy settings");
-
-        let active_dir = migrate_legacy_app_config_dir(&legacy_dir, &target_dir)
-            .expect("legacy directory should be adopted");
-
-        assert_eq!(active_dir, target_dir);
-        assert!(!legacy_dir.exists());
-        assert_eq!(
-            fs::read(target_dir.join("settings.json")).expect("migrated settings"),
-            b"legacy settings"
-        );
-    }
-
-    #[test]
-    fn migrates_legacy_database_filename_without_losing_contents() {
-        let temp = tempfile::tempdir().expect("temp directory");
-        let legacy_database = temp.path().join(LEGACY_APP_DATABASE_FILENAME);
-        fs::write(&legacy_database, b"legacy database").expect("legacy database");
-
-        let active_database = migrate_legacy_database_filename(temp.path());
-
-        assert_eq!(active_database, temp.path().join(APP_DATABASE_FILENAME));
-        assert!(!legacy_database.exists());
-        assert_eq!(
-            fs::read(active_database).expect("migrated database"),
-            b"legacy database"
-        );
-    }
 
     #[test]
     fn derive_mcp_path_from_override_uses_config_dir_for_custom_path() {

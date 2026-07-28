@@ -50,8 +50,6 @@ static SESSION_USAGE_SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::con
 /// Options for importing session usage data from a remote host.
 #[derive(Debug, Clone)]
 pub struct SessionUsageImportOptions {
-    /// Label for the remote host (used in logs and UI).
-    pub host_alias: String,
     /// Provider ID stored in proxy_request_logs.provider_id.
     pub provider_id: String,
     /// Provider type stored in proxy_request_logs.provider_type.
@@ -71,7 +69,6 @@ impl SessionUsageImportOptions {
         provider_type: impl Into<String>,
     ) -> Self {
         Self {
-            host_alias: "local".to_string(),
             provider_id: provider_id.into(),
             provider_type: provider_type.into(),
             data_source: data_source.into(),
@@ -81,13 +78,12 @@ impl SessionUsageImportOptions {
     }
 
     /// Create options for a remote usage sync operation.
-    pub fn remote(host_alias: &str, app: &str, data_source: &str) -> Self {
+    pub fn remote(host_alias: &str, app: &str) -> Self {
         Self {
-            host_alias: host_alias.to_string(),
-            provider_id: format!("remote-{app}-{host_alias}"),
+            provider_id: format!("_remote:{app}:{host_alias}"),
             provider_type: "remote_session".to_string(),
-            data_source: data_source.to_string(),
-            sync_key_prefix: Some(format!("remote_{app}_session/{host_alias}")),
+            data_source: format!("remote:{host_alias}"),
+            sync_key_prefix: Some(format!("remote://{host_alias}/{app}")),
             dedup_with_proxy: true,
         }
     }

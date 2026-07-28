@@ -458,7 +458,6 @@ impl RemoteProviderService {
         let sync_options = crate::services::session_usage::SessionUsageImportOptions::remote(
             host_alias,
             app_type.as_str(),
-            &format!("remote_{}_session", app_type.as_str()),
         );
 
         let (sync_result, file_count, payload_bytes, unchanged_files) =
@@ -2550,7 +2549,7 @@ Host "quoted"
     #[test]
     fn import_remote_usage_records_inserts_records_and_sync_state() -> Result<(), AppError> {
         let db = Database::memory()?;
-        let options = SessionUsageImportOptions::remote("pjlab", "claude", "remote_claude_session");
+        let options = SessionUsageImportOptions::remote("pjlab", "claude");
         let output = r#"{"kind":"meta","filesScanned":1}
 {"kind":"record","requestId":"session:msg_1","sessionId":"session-1","model":"claude-sonnet-4-5","inputTokens":10,"outputTokens":5,"cacheReadTokens":2,"cacheCreationTokens":3,"createdAt":1000}
 {"kind":"state","path":"project/session.jsonl","lastModified":123456,"lastOffset":42}
@@ -2594,7 +2593,7 @@ Host "quoted"
     #[test]
     fn import_remote_usage_records_normalizes_codex_model() -> Result<(), AppError> {
         let db = Database::memory()?;
-        let options = SessionUsageImportOptions::remote("pjlab", "codex", "remote_codex_session");
+        let options = SessionUsageImportOptions::remote("pjlab", "codex");
         let output = r#"{"kind":"meta","filesScanned":1}
 {"kind":"record","requestId":"codex_session:s1:1","sessionId":"s1","model":"openai/GPT-5.4-2026-03-05","inputTokens":10,"outputTokens":5,"cacheReadTokens":2,"cacheCreationTokens":0,"createdAt":1000}
 "#;
