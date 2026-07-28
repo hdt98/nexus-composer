@@ -829,7 +829,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           <div className="flex items-center gap-8">
             <div className="flex flex-col items-center gap-2">
               <div className="flex items-center gap-2">
-                <div className="h-20 w-20 rounded-2xl overflow-hidden border border-gray-300 dark:border-gray-600 shadow-sm"><img src={appIcon} alt="Nexus Composer" className="w-full h-full object-contain" /></div>
+                <div className="h-20 w-20 rounded-2xl overflow-hidden border border-gray-300 dark:border-gray-600 shadow-sm">
+                  <img
+                    src={appIcon}
+                    alt="Nexus Composer"
+                    className="w-full h-full object-contain"
+                  />
+                </div>
                 <h4 className="text-lg font-semibold text-foreground">
                   Nexus Composer
                 </h4>

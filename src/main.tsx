@@ -83,7 +83,10 @@ async function bootstrap() {
       // 数据库版本过新：渲染应用内「升级应用」恢复界面，不进入正常 App
       ReactDOM.createRoot(document.getElementById("root")!).render(
         <React.StrictMode>
-          <ThemeProvider defaultTheme="system" storageKey="nexus-composer-theme">
+          <ThemeProvider
+            defaultTheme="system"
+            storageKey="nexus-composer-theme"
+          >
             <DatabaseUpgrade payload={initError} />
             <Toaster />
           </ThemeProvider>

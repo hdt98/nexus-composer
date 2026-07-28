@@ -3149,6 +3149,7 @@ mod tests {
             .expect("select local Desktop provider");
     }
 
+    #[cfg(any(target_os = "macos", windows))]
     #[tokio::test]
     #[serial]
     async fn manual_start_isolated_from_mcp_sync_and_restores_desktop_profile() {
@@ -3233,6 +3234,7 @@ mod tests {
             .expect("stop restarted test proxy");
     }
 
+    #[cfg(any(target_os = "macos", windows))]
     #[tokio::test]
     #[serial]
     async fn manual_start_rolls_back_when_desktop_profile_is_invalid() {
@@ -3257,6 +3259,7 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_os = "macos", windows))]
     #[tokio::test]
     #[serial]
     async fn manual_start_keeps_existing_proxy_when_desktop_profile_is_invalid() {
@@ -4348,6 +4351,91 @@ wire_api = "responses"
     #[tokio::test]
     #[serial]
     async fn codex_set_takeover_for_app_preserves_oauth_auth_json_when_preserve_enabled() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .expect("enable Codex official auth preservation");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        use_ephemeral_proxy_port(&db).await;
+        let service = ProxyService::new(db.clone());
+        let oauth_auth = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": "oauth-id",
+                "access_token": "oauth-access"
+            }
+        });
+        let deepseek_live_config = r#"model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+experimental_bearer_token = "deepseek-key"
+"#;
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(deepseek_live_config))
+            .expect("seed live OAuth auth with DeepSeek config");
+
+        let mut provider = Provider::with_id(
+            "deepseek".to_string(),
+            "DeepSeek".to_string(),
+            json!({
+                "auth": {
+                    "OPENAI_API_KEY": "deepseek-key"
+                },
+                "config": r#"model_provider = "deepseek"
+model = "deepseek-v4-flash"
+
+[model_providers.deepseek]
+name = "DeepSeek"
+base_url = "https://api.deepseek.com/v1"
+wire_api = "responses"
+"#
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save misclassified DeepSeek provider");
+        db.set_current_provider("codex", "deepseek")
+            .expect("set current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some("deepseek"))
+            .expect("set local current provider");
+
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("enable Codex takeover");
+
+        let live_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read live auth");
+        assert_eq!(
+            live_auth, oauth_auth,
+            "the public takeover command path must not rewrite auth.json when preservation is enabled"
+        );
+
+        service
+            .set_takeover_for_app("codex", false)
+            .await
+            .expect("disable Codex takeover");
+        assert!(
+            !service.is_running().await,
+            "the final Codex takeover consumer should stop an otherwise unused listener"
+        );
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[tokio::test]
+    #[serial]
+    async fn codex_final_takeover_disable_keeps_desktop_listener() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
         crate::settings::update_settings(crate::settings::AppSettings {
