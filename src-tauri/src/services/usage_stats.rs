@@ -292,6 +292,8 @@ pub(crate) fn legacy_proxy_session_fingerprint_sql(
              AND {session_alias}.created_at + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
          AND (
              LOWER({proxy_alias}.model) = LOWER({session_alias}.model)
+             OR LOWER(COALESCE({proxy_alias}.request_model, '')) =
+                LOWER({session_alias}.model)
              OR LOWER({proxy_alias}.model) = 'unknown'
              OR LOWER({session_alias}.model) = 'unknown'
          )"
@@ -561,6 +563,7 @@ fn has_matching_proxy_usage_log_impl(
               AND l.created_at BETWEEN ?7 - ?8 AND ?7 + ?8
               AND (
                   LOWER(l.model) = LOWER(?2)
+                  OR LOWER(COALESCE(l.request_model, '')) = LOWER(?2)
                   OR LOWER(l.model) = 'unknown'
                   OR LOWER(?2) = 'unknown'
               )
@@ -2566,6 +2569,7 @@ mod tests {
                 message_id TEXT,
                 app_type TEXT NOT NULL,
                 model TEXT NOT NULL,
+                request_model TEXT,
                 input_tokens INTEGER NOT NULL,
                 output_tokens INTEGER NOT NULL,
                 cache_read_tokens INTEGER NOT NULL,
@@ -3430,7 +3434,7 @@ mod tests {
                 "codex-proxy",
                 "codex",
                 "openai",
-                "GPT-5.4",
+                "kimi-k3",
                 "proxy",
                 10_000,
                 100,
@@ -3440,12 +3444,18 @@ mod tests {
                 200,
                 "0.10",
             )?;
+            conn.execute(
+                "UPDATE proxy_request_logs
+                 SET request_model = 'gpt-5.6-sol'
+                 WHERE request_id = 'codex-proxy'",
+                [],
+            )?;
             insert_usage_log(
                 &conn,
                 "codex-session-dup",
                 "codex",
                 "_codex_session",
-                "gpt-5.4",
+                "gpt-5.6-sol",
                 "codex_session",
                 10_060,
                 100,

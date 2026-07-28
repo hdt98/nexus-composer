@@ -15,6 +15,7 @@ use toml_edit::DocumentMut;
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
 pub const NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID: &str = CC_SWITCH_CODEX_MODEL_PROVIDER_ID;
 pub const NEXUS_CODEX_MODEL_CATALOG_FILENAME: &str = "nexus-model-catalog.json";
+pub(crate) const CODEX_PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
 const LEGACY_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 const CODEX_OFFICIAL_AUTH_SNAPSHOT_FILENAME: &str = "codex_official_auth_snapshot.json";
 
@@ -226,6 +227,8 @@ fn write_codex_official_auth_snapshot(auth: &Value) -> Result<(), AppError> {
 }
 
 pub(crate) fn capture_live_codex_official_auth_snapshot() -> Result<bool, AppError> {
+    repair_codex_official_auth_proxy_placeholder()?;
+
     let auth_path = get_codex_auth_path();
     if !auth_path.exists() {
         return Ok(false);
@@ -238,6 +241,49 @@ pub(crate) fn capture_live_codex_official_auth_snapshot() -> Result<bool, AppErr
 
     write_codex_official_auth_snapshot(&auth)?;
     Ok(true)
+}
+
+fn remove_proxy_placeholder_from_oauth(auth: &mut Value) -> bool {
+    if !codex_auth_has_oauth_login_material(auth) {
+        return false;
+    }
+
+    let Some(auth) = auth.as_object_mut() else {
+        return false;
+    };
+    if auth.get("OPENAI_API_KEY").and_then(Value::as_str) != Some(CODEX_PROXY_TOKEN_PLACEHOLDER) {
+        return false;
+    }
+
+    auth.remove("OPENAI_API_KEY");
+    true
+}
+
+pub(crate) fn repair_codex_official_auth_proxy_placeholder() -> Result<bool, AppError> {
+    if !crate::settings::preserve_codex_official_auth_on_switch() {
+        return Ok(false);
+    }
+
+    let mut repaired = false;
+    let auth_path = get_codex_auth_path();
+    if auth_path.exists() {
+        let mut auth: Value = read_json_file(&auth_path)?;
+        if remove_proxy_placeholder_from_oauth(&mut auth) {
+            write_json_file(&auth_path, &auth)?;
+            repaired = true;
+        }
+    }
+
+    let snapshot_path = get_codex_official_auth_snapshot_path();
+    if snapshot_path.exists() {
+        let mut snapshot: Value = read_json_file(&snapshot_path)?;
+        if remove_proxy_placeholder_from_oauth(&mut snapshot) {
+            write_codex_official_auth_snapshot(&snapshot)?;
+            repaired = true;
+        }
+    }
+
+    Ok(repaired)
 }
 
 pub(crate) fn read_codex_official_auth_snapshot() -> Result<Option<Value>, AppError> {
@@ -2105,6 +2151,8 @@ fn write_codex_live_for_provider_inner(
     config_text: Option<&str>,
     force_selected_official_auth: bool,
 ) -> Result<(), AppError> {
+    repair_codex_official_auth_proxy_placeholder()?;
+
     let unified_config =
         apply_codex_unified_session_bucket_to_config(category, config_text.unwrap_or(""))?;
     let preserve_live_oauth =

@@ -521,6 +521,16 @@ pub fn run() {
             // 设置 AppHandle 用于代理故障转移时的 UI 更新
             app_state.proxy_service.set_app_handle(app.handle().clone());
 
+            match codex_config::repair_codex_official_auth_proxy_placeholder() {
+                Ok(true) => {
+                    log::info!("✓ Removed stale Codex proxy key from preserved OAuth login")
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::warn!("Failed to repair preserved Codex OAuth login: {error}")
+                }
+            }
+
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
             // ============================================================
@@ -677,6 +687,19 @@ pub fn run() {
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {
+                    match crate::codex_history_migration::repair_codex_thread_visibility() {
+                        Ok(outcome) if outcome.repaired_state_rows > 0 => {
+                            log::info!(
+                                "✓ Repaired hidden Codex thread metadata: state_rows={}",
+                                outcome.repaired_state_rows
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("✗ Codex thread visibility repair failed: {e}");
+                        }
+                    }
+
                     let history_migration = if had_nexus_state_at_startup {
                         crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
                             &db_for_codex_history_migration,

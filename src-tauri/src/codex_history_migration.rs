@@ -27,6 +27,7 @@ use toml_edit::DocumentMut;
 
 const MIGRATION_NAME: &str = "codex-history-provider-migration-v1";
 const OFFICIAL_UNIFY_MIGRATION_NAME: &str = "codex-official-history-unify-v1";
+const THREAD_VISIBILITY_REPAIR_NAME: &str = "codex-thread-visibility-repair-v1";
 /// Backup directory for restore operations (separate from migration backups to keep the migration ledger directory clean).
 const OFFICIAL_UNIFY_RESTORE_BACKUP_NAME: &str = "codex-official-history-unify-restore-v1";
 /// Conservative upper limit for SQLite variables; IN lists are chunked by this size.
@@ -111,6 +112,112 @@ pub struct CodexHistoryProviderBucketMigrationOutcome {
 pub struct CodexProviderTemplateBucketMigrationOutcome {
     pub migrated_provider_ids: Vec<String>,
     pub skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct CodexThreadVisibilityRepairOutcome {
+    pub repaired_state_rows: usize,
+}
+
+pub fn repair_codex_thread_visibility() -> Result<CodexThreadVisibilityRepairOutcome, AppError> {
+    let codex_dir = get_codex_config_dir();
+    let config_text = read_codex_config_text().unwrap_or_default();
+    let backup_root = migration_backup_root(THREAD_VISIBILITY_REPAIR_NAME);
+    let mut repaired_state_rows = 0;
+    for db_path in codex_state_db_paths(&codex_dir, &config_text) {
+        repaired_state_rows +=
+            repair_codex_state_db_thread_visibility(&db_path, &codex_dir, &backup_root)?;
+    }
+    Ok(CodexThreadVisibilityRepairOutcome {
+        repaired_state_rows,
+    })
+}
+
+fn repair_codex_state_db_thread_visibility(
+    db_path: &Path,
+    codex_dir: &Path,
+    backup_root: &Path,
+) -> Result<usize, AppError> {
+    if !db_path.exists() {
+        return Ok(0);
+    }
+
+    let mut conn = Connection::open(db_path)
+        .map_err(|e| AppError::Database(format!("Failed to open Codex state DB: {e}")))?;
+    conn.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| AppError::Database(format!("Failed to set Codex state DB timeout: {e}")))?;
+
+    if !Database::table_exists(&conn, "threads")? {
+        return Ok(0);
+    }
+    for column in [
+        "source",
+        "archived",
+        "preview",
+        "first_user_message",
+        "title",
+    ] {
+        if !Database::has_column(&conn, "threads", column)? {
+            return Ok(0);
+        }
+    }
+
+    // Codex omits threads with a blank preview from thread/list. Attachment-backed
+    // prompts can still have a durable title or first message, so restore only that
+    // missing index field and leave the rollout and lifecycle metadata untouched.
+    const REPAIR_FILTER: &str = "
+        archived = 0
+        AND source IN ('vscode', 'cli')
+        AND TRIM(COALESCE(preview, '')) = ''
+        AND COALESCE(
+            NULLIF(TRIM(first_user_message), ''),
+            NULLIF(TRIM(title), '')
+        ) IS NOT NULL";
+    let matching_rows: i64 = conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM threads WHERE {REPAIR_FILTER}"),
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| {
+            AppError::Database(format!(
+                "Failed to count hidden Codex thread repair rows: {e}"
+            ))
+        })?;
+    if matching_rows == 0 {
+        return Ok(0);
+    }
+
+    backup_codex_state_db(db_path, codex_dir, backup_root, &conn)?;
+
+    let tx = conn.transaction().map_err(|e| {
+        AppError::Database(format!(
+            "Failed to start Codex thread visibility repair transaction: {e}"
+        ))
+    })?;
+    let changed = tx
+        .execute(
+            &format!(
+                "UPDATE threads
+                 SET preview = COALESCE(
+                     NULLIF(TRIM(first_user_message), ''),
+                     NULLIF(TRIM(title), '')
+                 )
+                 WHERE {REPAIR_FILTER}"
+            ),
+            [],
+        )
+        .map_err(|e| {
+            AppError::Database(format!(
+                "Failed to repair hidden Codex thread metadata: {e}"
+            ))
+        })?;
+    tx.commit().map_err(|e| {
+        AppError::Database(format!(
+            "Failed to commit Codex thread visibility repair: {e}"
+        ))
+    })?;
+    Ok(changed)
 }
 
 pub fn maybe_migrate_codex_third_party_history_provider_bucket(
@@ -1398,6 +1505,76 @@ mod tests {
         assert!(!migration.scanned_history_files);
         assert_eq!(migration.migrated_jsonl_files, 0);
         assert_eq!(migration.migrated_state_rows, 0);
+    }
+
+    #[test]
+    fn repairs_only_active_interactive_threads_with_blank_previews() {
+        let dir = tempdir().expect("tempdir");
+        let codex_dir = dir.path().join(".codex");
+        let backup_root = dir.path().join("backup");
+        fs::create_dir_all(&codex_dir).expect("create codex dir");
+        let db_path = codex_dir.join(CODEX_STATE_DB_FILENAME);
+        let conn = Connection::open(&db_path).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                source TEXT NOT NULL,
+                archived INTEGER NOT NULL,
+                preview TEXT NOT NULL,
+                first_user_message TEXT NOT NULL,
+                title TEXT NOT NULL
+            );
+            INSERT INTO threads
+                (id, source, archived, preview, first_user_message, title)
+            VALUES
+                ('title-fallback', 'vscode', 0, '', '', 'Recovered title'),
+                ('message-first', 'cli', 0, '', 'First prompt', 'Generated title'),
+                ('already-visible', 'vscode', 0, 'Keep preview', 'First prompt', 'Title'),
+                ('archived', 'vscode', 1, '', 'Archived prompt', 'Archived title'),
+                ('non-interactive', 'exec', 0, '', 'Exec prompt', 'Exec title'),
+                ('no-candidate', 'vscode', 0, '', '', '');",
+        )
+        .expect("seed state db");
+        drop(conn);
+
+        let changed = repair_codex_state_db_thread_visibility(&db_path, &codex_dir, &backup_root)
+            .expect("repair visibility");
+
+        assert_eq!(changed, 2);
+        let conn = Connection::open(&db_path).expect("reopen state db");
+        let preview_of = |thread_id: &str| -> String {
+            conn.query_row(
+                "SELECT preview FROM threads WHERE id = ?1",
+                [thread_id],
+                |row| row.get(0),
+            )
+            .expect("thread preview")
+        };
+        assert_eq!(preview_of("title-fallback"), "Recovered title");
+        assert_eq!(preview_of("message-first"), "First prompt");
+        assert_eq!(preview_of("already-visible"), "Keep preview");
+        assert_eq!(preview_of("archived"), "");
+        assert_eq!(preview_of("non-interactive"), "");
+        assert_eq!(preview_of("no-candidate"), "");
+        drop(conn);
+
+        let backup_path = backup_root.join("state").join(CODEX_STATE_DB_FILENAME);
+        let backup_conn = Connection::open(&backup_path).expect("open backup db");
+        let backed_up_preview: String = backup_conn
+            .query_row(
+                "SELECT preview FROM threads WHERE id = 'title-fallback'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("backed up preview");
+        assert_eq!(backed_up_preview, "");
+        drop(backup_conn);
+
+        assert_eq!(
+            repair_codex_state_db_thread_visibility(&db_path, &codex_dir, &backup_root)
+                .expect("repeat repair"),
+            0
+        );
     }
 
     #[test]

@@ -22,7 +22,7 @@ use tauri::Emitter;
 use tokio::sync::RwLock;
 
 /// 用于接管 Live 配置时的占位符（避免客户端提示缺少 key，同时不泄露真实 Token）
-const PROXY_TOKEN_PLACEHOLDER: &str = "PROXY_MANAGED";
+const PROXY_TOKEN_PLACEHOLDER: &str = crate::codex_config::CODEX_PROXY_TOKEN_PLACEHOLDER;
 
 /// 代理接管模式下需要从 Claude Live 配置中移除的"模型覆盖"字段。
 ///
@@ -5133,6 +5133,83 @@ experimental_bearer_token = "PROXY_MANAGED"
             !live_config.contains("http://127.0.0.1:15721"),
             "cleanup should remove local proxy base_url"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn codex_ssot_restore_removes_legacy_proxy_key_from_newer_oauth_login() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+        crate::settings::update_settings(crate::settings::AppSettings {
+            preserve_codex_official_auth_on_switch: true,
+            ..Default::default()
+        })
+        .expect("enable Codex official auth preservation");
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let service = ProxyService::new(db.clone());
+        let mut provider = Provider::with_id(
+            "official-account".to_string(),
+            "Official account".to_string(),
+            json!({
+                "auth": {
+                    "auth_mode": "chatgpt",
+                    "last_refresh": "2026-07-23T21:53:07Z",
+                    "tokens": {
+                        "id_token": "stored-id",
+                        "access_token": "stored-access",
+                        "account_id": "same-account"
+                    }
+                },
+                "config": "model = \"gpt-5.6-sol\"\n"
+            }),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        db.save_provider("codex", &provider)
+            .expect("save official provider");
+        db.set_current_provider("codex", &provider.id)
+            .expect("set current official provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("set local current provider");
+
+        let newer_live_auth = json!({
+            "auth_mode": "chatgpt",
+            "OPENAI_API_KEY": PROXY_TOKEN_PLACEHOLDER,
+            "last_refresh": "2026-07-25T11:42:34Z",
+            "tokens": {
+                "id_token": "newer-id",
+                "access_token": "newer-access",
+                "account_id": "same-account"
+            }
+        });
+        crate::codex_config::write_codex_live_atomic(&newer_live_auth, Some("model = \"stale\"\n"))
+            .expect("seed newer OAuth login with legacy placeholder");
+
+        assert!(
+            service
+                .restore_live_from_ssot_for_app(&AppType::Codex)
+                .expect("restore current official provider"),
+            "SSOT restore should run"
+        );
+
+        let repaired_auth: Value =
+            crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
+                .expect("read repaired auth");
+        assert_eq!(
+            repaired_auth
+                .pointer("/tokens/access_token")
+                .and_then(Value::as_str),
+            Some("newer-access"),
+            "newer OAuth tokens must remain authoritative"
+        );
+        assert!(
+            repaired_auth.get("OPENAI_API_KEY").is_none(),
+            "the legacy proxy placeholder must not survive official-login restoration"
+        );
+
+        crate::settings::update_settings(crate::settings::AppSettings::default())
+            .expect("reset settings");
     }
 
     #[test]
