@@ -1,8 +1,8 @@
-//! 使用统计服务
+//! Usage statistics service
 //!
-//! 提供使用量数据的聚合查询功能
+//! Provides aggregated query functions for usage data
 
-use crate::database::{lock_conn, Database};
+use crate::database::{billable_usage_sql, lock_conn, sql_text_is_blank, Database};
 use crate::error::AppError;
 use crate::proxy::usage::calculator::ModelPricing;
 use crate::services::sql_helpers::fresh_input_sql;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-/// 使用量汇总
+/// Usage summary
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageSummary {
@@ -58,7 +58,7 @@ fn derive_real_total_and_hit_rate(
     (real_total, hit_rate)
 }
 
-/// 每日统计
+/// Daily statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyStats {
@@ -72,7 +72,7 @@ pub struct DailyStats {
     pub total_cache_read_tokens: u64,
 }
 
-/// Provider 统计
+/// Provider statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderStats {
@@ -85,7 +85,7 @@ pub struct ProviderStats {
     pub avg_latency_ms: u64,
 }
 
-/// 模型统计
+/// Model statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelStats {
@@ -96,7 +96,7 @@ pub struct ModelStats {
     pub avg_cost_per_request: String,
 }
 
-/// 请求日志过滤器
+/// Request log filters
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LogFilters {
@@ -108,7 +108,7 @@ pub struct LogFilters {
     pub end_date: Option<i64>,
 }
 
-/// 分页请求日志响应
+/// Paginated request log response
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaginatedLogs {
@@ -118,7 +118,7 @@ pub struct PaginatedLogs {
     pub page_size: u32,
 }
 
-/// 请求日志详情
+/// Request log detail
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestLogDetail {
@@ -151,14 +151,14 @@ pub struct RequestLogDetail {
     pub created_at: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_source: Option<String>,
-    /// 写入时实际用于计价的模型名。None = v11 前的历史行，"" = 未计价的错误行。
+    /// The model name actually used for pricing at write time. None = pre-v11 historical row, "" = unpriced error row.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pricing_model: Option<String>,
 }
 
-/// 把 26 列的查询结果映射为 `RequestLogDetail`。
+/// Map a 26-column query result to `RequestLogDetail`.
 ///
-/// 调用方的 SELECT **必须**按以下顺序返回 26 列：
+/// The caller's SELECT **must** return 26 columns in the following order:
 /// `request_id, provider_id, provider_name, app_type, model, request_model,
 ///  cost_multiplier, input_tokens, output_tokens, cache_read_tokens,
 ///  cache_creation_tokens, input_cost_usd, output_cost_usd, cache_read_cost_usd,
@@ -166,7 +166,7 @@ pub struct RequestLogDetail {
 ///  first_token_ms, duration_ms, status_code, error_message, created_at,
 ///  data_source, pricing_model, correlation_id`
 ///
-/// 不需要 provider_name 时（如 backfill）SELECT `NULL AS provider_name` 占位即可。
+/// When provider_name is not needed (e.g., backfill), use `NULL AS provider_name` as placeholder.
 fn row_to_request_log_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestLogDetail> {
     Ok(RequestLogDetail {
         request_id: row.get(0)?,
@@ -217,38 +217,91 @@ fn provider_name_coalesce(log_alias: &str, provider_alias: &str) -> String {
 
 pub(crate) const SESSION_PROXY_DEDUP_WINDOW_SECONDS: i64 = 10 * 60;
 
-/// SQL 片段：把指定别名的 `data_source` 包成 COALESCE，NULL 视作 'proxy'。
+/// SQL fragment: wrap the given alias's `data_source` in COALESCE, treating NULL as 'proxy'.
 ///
-/// 防御 schema v9 之前可能写入的 NULL data_source 行（见
-/// `tests::create_legacy_nullable_logs_table`）。所有用到 data_source 的查询
-/// 都应通过此 helper 生成片段，避免遗漏。
+/// Defends against NULL data_source rows that may have been written before schema v9 (see
+/// `tests::create_legacy_nullable_logs_table`). All queries using data_source
+/// should generate fragments through this helper to avoid omissions.
 fn data_source_expr(log_alias: &str) -> String {
     format!("COALESCE({log_alias}.data_source, 'proxy')")
 }
 
-/// SQL 标量表达式：把 Claude Desktop 网关的 `claude-desktop` app_type 在“展示口径”
-/// 上折叠进 `claude`，其余 app_type 原样返回。
+/// SQL scalar expression: fold Claude Desktop gateway's `claude-desktop` app_type for display purposes
+/// for display purposes, returning other app_type values unchanged.
 ///
-/// 背景：Desktop 网关流量在记账层按各自入口写为 `app_type='claude-desktop'`，
-/// 以保留路由接管的账单审计精度（不要回退这一点）。但 Dashboard 把它当作
-/// Claude Code 呈现——它本质就是跑在 Desktop 壳里的内嵌 Claude Code 运行时，
-/// 且 Desktop 聊天用量永远不经过本软件，单列只会让用户误以为是“桌面版全部用量”。
+/// Background: Desktop gateway traffic is written as `app_type='claude-desktop'` in the billing layer by entry point,
+/// to preserve billing audit precision for routing takeover (do not revert this). But the Dashboard presents it as
+/// Claude Code — it is essentially an embedded Claude Code runtime running in the Desktop shell,
+/// and Desktop chat usage never passes through this software; a separate column would mislead users.
 ///
-/// 用法：把任一参与“按应用筛选/分组”的 `app_type` 列包进此表达式即可，
-/// 这样 `= 'claude'` 过滤会同时命中 `claude-desktop`、`GROUP BY` 会把两者合并，
-/// 而不改动任何已存储的行（详情面板仍读原始 `app_type`）。
+/// Usage: wrap any `app_type` column participating in "filter/group by app" into this expression,
+/// so `= 'claude'` filtering also matches `claude-desktop`, and `GROUP BY` merges both,
+/// without modifying any stored rows (detail panel still reads original `app_type`).
 ///
-/// 注意：包裹后该列上的索引在此比较中失效，但这些都是已带时间过滤的聚合扫描，
-/// app_type 本就不是主访问路径，可接受。仅用于读侧；去重匹配（`has_matching_
-/// proxy_usage_log`）与额度检查（`check_provider_limits`）必须保留原始精确比较。
+/// Note: wrapping invalidates the index on this column for comparison, but these are all aggregate scans with time filters,
+/// app_type is not the primary access path anyway, acceptable. Used only for reads; fingerprint dedup matching (`has_matching_
+/// proxy_usage_log`) and limit checks (`check_provider_limits`) must retain original exact comparison.
 fn folded_app_type_sql(column: &str) -> String {
     format!("CASE WHEN {column} = 'claude-desktop' THEN 'claude' ELSE {column} END")
 }
 
-/// SQL 片段：把日志/汇总行 LEFT JOIN 到 providers 表以取得供应商名称。
-/// `proxy_request_logs` 与 `usage_daily_rollups` 的 (provider_id, app_type)
-/// 形状相同，两者皆可作为 `log_alias`。providers 主键即 (id, app_type)，
-/// 连接至多 1:1，不会放大行数。
+/// Exact Anthropic message IDs safely correlate Claude Code session rows with
+/// either Claude Code or Claude Desktop proxy rows. Other app types remain
+/// isolated, and the less reliable fingerprint fallback keeps raw app types.
+/// Nonblank IDs are opaque and compared verbatim; only all-whitespace values
+/// are classified as missing.
+pub(crate) fn exact_message_app_type_sql(left: &str, right: &str) -> String {
+    format!(
+        "({left} = {right}
+          OR (
+              {left} IN ('claude', 'claude-desktop')
+              AND {right} IN ('claude', 'claude-desktop')
+          ))"
+    )
+}
+
+/// Legacy session/proxy correlation used when either side lacks a message ID.
+/// Keep this as a separate predicate so exact lookups retain their keyed query
+/// plan while rollup cleanup can mirror the fallback semantics exactly.
+pub(crate) fn legacy_proxy_session_fingerprint_sql(
+    proxy_alias: &str,
+    session_alias: &str,
+) -> String {
+    let session_data_source = data_source_expr(session_alias);
+    let session_message_id_is_blank = sql_text_is_blank(&format!("{session_alias}.message_id"));
+    let proxy_message_id_is_blank = sql_text_is_blank(&format!("{proxy_alias}.message_id"));
+    format!(
+        "{proxy_alias}.app_type = {session_alias}.app_type
+         AND (
+             {session_message_id_is_blank}
+             OR {proxy_message_id_is_blank}
+         )
+         AND {proxy_alias}.input_tokens = {session_alias}.input_tokens
+         AND {proxy_alias}.output_tokens = {session_alias}.output_tokens
+         AND {proxy_alias}.cache_read_tokens = {session_alias}.cache_read_tokens
+         AND (
+             {proxy_alias}.cache_creation_tokens = {session_alias}.cache_creation_tokens
+             OR (
+                 {session_alias}.cache_creation_tokens = 0
+                 AND {session_data_source} IN
+                     ('codex_session', 'gemini_session', 'opencode_session')
+             )
+         )
+         AND {proxy_alias}.created_at BETWEEN
+             {session_alias}.created_at - {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+             AND {session_alias}.created_at + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
+         AND (
+             LOWER({proxy_alias}.model) = LOWER({session_alias}.model)
+             OR LOWER({proxy_alias}.model) = 'unknown'
+             OR LOWER({session_alias}.model) = 'unknown'
+         )"
+    )
+}
+
+/// SQL fragment: LEFT JOIN log/summary rows to providers table to get provider names.
+/// `proxy_request_logs` and `usage_daily_rollups` share the same (provider_id, app_type)
+/// shape, both can serve as `log_alias`. providers primary key is (id, app_type),
+/// join is at most 1:1, does not amplify row count.
 fn providers_join(log_alias: &str, provider_alias: &str) -> String {
     format!(
         "LEFT JOIN providers {provider_alias} \
@@ -257,19 +310,19 @@ fn providers_join(log_alias: &str, provider_alias: &str) -> String {
     )
 }
 
-/// SQL 标量表达式：行的「有效计价模型」—— pricing_model 非空优先，NULL/'' 回落
-/// model。这是 `get_model_stats` 的分组键，也是 Dashboard 模型筛选的匹配口径：
-/// 筛选值来自模型统计列表，两边必须用同一表达式才能选得中。
+/// SQL scalar expression: row's "effective pricing model" — pricing_model takes priority when non-empty, falls back to
+/// model when NULL/''. This is the grouping key for `get_model_stats` and the matching criteria for Dashboard model filtering:
+/// filter values come from the model statistics list, both sides must use the same expression to match.
 fn effective_model_sql(alias: &str) -> String {
     format!("COALESCE(NULLIF({alias}.pricing_model, ''), {alias}.model)")
 }
 
-/// 把 Dashboard 顶部的 Provider/模型筛选追加到查询条件。
+/// Append Dashboard top Provider/model filters to query conditions.
 ///
-/// Provider 按展示名精确匹配（复用 [`provider_name_coalesce`]，会话占位行的
-/// 可读名如 "Claude (Session)" 也能选中）；模型按 [`effective_model_sql`] 匹配。
-/// 注意：传入 `provider_name` 时调用方必须把 [`providers_join`] 拼进 FROM，
-/// 否则 `{provider_alias}.name` 无法解析。
+/// Provider matches by display name exactly (reuses [`provider_name_coalesce`], session placeholder rows'
+/// readable names like "Claude (Session)" can also be selected); model matches by [`effective_model_sql`].
+/// Note: when passing `provider_name`, caller must include [`providers_join`] in FROM,
+/// otherwise `{provider_alias}.name` cannot be resolved.
 fn push_provider_model_filters(
     conditions: &mut Vec<String>,
     params: &mut Vec<Box<dyn rusqlite::ToSql>>,
@@ -294,43 +347,84 @@ fn push_provider_model_filters(
 pub(crate) fn effective_usage_log_filter(log_alias: &str) -> String {
     let data_source = data_source_expr(log_alias);
     let proxy_data_source = data_source_expr("proxy_dedup");
+    let exact_app_type =
+        exact_message_app_type_sql("proxy_dedup.app_type", &format!("{log_alias}.app_type"));
+    let legacy_fingerprint = legacy_proxy_session_fingerprint_sql("proxy_dedup", log_alias);
+    let session_message_id_is_blank = sql_text_is_blank(&format!("{log_alias}.message_id"));
+    let canonical_proxy_usage = billable_usage_sql(Some("proxy_dedup"));
+    let log_usage = billable_usage_sql(Some(log_alias));
+    let fallback_data_source = data_source_expr("session_fallback");
+    let fallback_usage = billable_usage_sql(Some("session_fallback"));
+    let fallback_app_type = exact_message_app_type_sql(
+        &format!("{log_alias}.app_type"),
+        "session_fallback.app_type",
+    );
+    let sibling_data_source = data_source_expr("proxy_sibling");
+    let sibling_usage = billable_usage_sql(Some("proxy_sibling"));
+    let sibling_app_type =
+        exact_message_app_type_sql(&format!("{log_alias}.app_type"), "proxy_sibling.app_type");
     format!(
         "NOT (
-            {data_source} IN ('session_log', 'codex_session', 'gemini_session', 'opencode_session')
-            AND EXISTS (
-                SELECT 1
-                FROM proxy_request_logs proxy_dedup
-                WHERE {proxy_data_source} = 'proxy'
-                  AND proxy_dedup.app_type = {log_alias}.app_type
-                  AND proxy_dedup.status_code >= 200
-                  AND proxy_dedup.status_code < 300
-                  AND proxy_dedup.input_tokens = {log_alias}.input_tokens
-                  AND proxy_dedup.output_tokens = {log_alias}.output_tokens
-                  AND proxy_dedup.cache_read_tokens = {log_alias}.cache_read_tokens
-                  AND (
-                      proxy_dedup.cache_creation_tokens = {log_alias}.cache_creation_tokens
-                      OR (
-                          {log_alias}.cache_creation_tokens = 0
-                          AND {data_source} IN ('codex_session', 'gemini_session', 'opencode_session')
-                      )
-                  )
-                  AND proxy_dedup.created_at BETWEEN
-                      {log_alias}.created_at - {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
-                      AND {log_alias}.created_at + {SESSION_PROXY_DEDUP_WINDOW_SECONDS}
-                  AND (
-                      LOWER(proxy_dedup.model) = LOWER({log_alias}.model)
-                      OR LOWER(proxy_dedup.model) = 'unknown'
-                      OR LOWER({log_alias}.model) = 'unknown'
-                  )
+            (
+                {data_source} IN
+                    ('session_log', 'codex_session', 'gemini_session', 'opencode_session')
+                AND (
+                    (
+                        NOT ({session_message_id_is_blank})
+                        AND EXISTS (
+                            SELECT 1
+                            FROM proxy_request_logs proxy_dedup
+                            WHERE {proxy_data_source} = 'proxy'
+                              AND {exact_app_type}
+                              AND proxy_dedup.message_id = {log_alias}.message_id
+                              AND {canonical_proxy_usage}
+                        )
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM proxy_request_logs proxy_dedup
+                        WHERE {proxy_data_source} = 'proxy'
+                          AND proxy_dedup.status_code >= 200
+                          AND proxy_dedup.status_code < 300
+                          AND proxy_dedup.error_message IS NULL
+                          AND {legacy_fingerprint}
+                    )
+                )
+            )
+            OR (
+                {data_source} = 'proxy'
+                AND {log_alias}.status_code >= 200
+                AND {log_alias}.status_code < 300
+                AND {log_alias}.error_message IS NULL
+                AND NOT ({log_usage})
+                AND NOT ({session_message_id_is_blank})
+                AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM proxy_request_logs session_fallback
+                        WHERE {fallback_data_source} = 'session_log'
+                          AND {fallback_app_type}
+                          AND session_fallback.message_id = {log_alias}.message_id
+                          AND {fallback_usage}
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM proxy_request_logs proxy_sibling
+                        WHERE {sibling_data_source} = 'proxy'
+                          AND {sibling_app_type}
+                          AND proxy_sibling.message_id = {log_alias}.message_id
+                          AND {sibling_usage}
+                    )
+                )
             )
         )"
     )
 }
 
-/// 跨源去重指纹键。
+/// Cross-source deduplication fingerprint key.
 ///
-/// `cache_creation_tokens`：Codex/Gemini session 日志不暴露该字段，调用方传 0
-/// 表示"未知"，匹配器会放行 proxy 侧任意 cache_creation_tokens 值。
+/// `cache_creation_tokens`: Codex/Gemini session logs don't expose this field, callers pass 0
+/// to indicate "unknown", the matcher will allow any proxy-side cache_creation_tokens value.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DedupKey<'a> {
     pub app_type: &'a str,
@@ -342,10 +436,10 @@ pub(crate) struct DedupKey<'a> {
     pub created_at: i64,
 }
 
-/// session 日志写入前的统一去重判定。
+/// Unified deduplication check before session log insertion.
 ///
-/// 命中以下任一条件即跳过插入：① `request_id` 已存在；② 时间窗口内存在
-/// 与 `key` 匹配的 proxy 日志（指纹去重）。
+/// Skip insertion if any of the following conditions match: (1) `request_id` already exists; (2) within the time window there exists
+/// a proxy log matching `key` (fingerprint deduplication).
 pub(crate) fn should_skip_session_insert(
     conn: &Connection,
     request_id: &str,
@@ -357,23 +451,99 @@ pub(crate) fn should_skip_session_insert(
     has_matching_proxy_usage_log(conn, key)
 }
 
+/// Like `should_skip_session_insert`, but with an explicit flag to control
+/// whether proxy fingerprint deduplication is performed. When `dedup_with_proxy`
+/// is false, only the request_id existence check is done.
+pub(crate) fn should_skip_session_insert_with_proxy_dedup(
+    conn: &Connection,
+    request_id: &str,
+    key: &DedupKey,
+    dedup_with_proxy: bool,
+) -> Result<bool, AppError> {
+    if proxy_request_id_exists(conn, request_id)? {
+        return Ok(true);
+    }
+    if dedup_with_proxy {
+        has_matching_proxy_usage_log(conn, key)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Claude session logs carry the upstream Anthropic message ID. Prefer that
+/// exact identity, while retaining the fingerprint fallback for legacy proxy
+/// rows that predate message-ID persistence.
+pub(crate) fn should_skip_correlated_session_insert(
+    conn: &Connection,
+    request_id: &str,
+    message_id: &str,
+    key: &DedupKey,
+) -> Result<bool, AppError> {
+    if proxy_request_id_exists(conn, request_id)? {
+        return Ok(true);
+    }
+
+    let Some(message_id) = Some(message_id).filter(|value| !value.trim().is_empty()) else {
+        return has_matching_proxy_usage_log(conn, key);
+    };
+    if has_matching_proxy_message_id(conn, key.app_type, message_id)? {
+        return Ok(true);
+    }
+
+    has_matching_proxy_usage_log_impl(conn, key, true)
+}
+
 fn proxy_request_id_exists(conn: &Connection, request_id: &str) -> Result<bool, AppError> {
     conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM proxy_request_logs WHERE request_id = ?1)",
         params![request_id],
         |row| row.get::<_, bool>(0),
     )
-    .map_err(|e| AppError::Database(format!("查询 request_id 失败: {e}")))
+    .map_err(|e| AppError::Database(format!("Failed to query request_id: {e}")))
 }
 
 pub(crate) fn has_matching_proxy_usage_log(
     conn: &Connection,
     key: &DedupKey,
 ) -> Result<bool, AppError> {
+    has_matching_proxy_usage_log_impl(conn, key, false)
+}
+
+fn has_matching_proxy_message_id(
+    conn: &Connection,
+    app_type: &str,
+    message_id: &str,
+) -> Result<bool, AppError> {
+    let l_data_source = data_source_expr("l");
+    let exact_app_type = exact_message_app_type_sql("l.app_type", "?1");
+    let canonical_proxy_usage = billable_usage_sql(Some("l"));
+    let sql = format!(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM proxy_request_logs l
+            WHERE {l_data_source} = 'proxy'
+              AND {exact_app_type}
+              AND l.message_id = ?2
+              AND {canonical_proxy_usage}
+        )"
+    );
+
+    conn.query_row(&sql, params![app_type, message_id], |row| {
+        row.get::<_, bool>(0)
+    })
+    .map_err(|e| AppError::Database(format!("Failed to query duplicate proxy message ID: {e}")))
+}
+
+fn has_matching_proxy_usage_log_impl(
+    conn: &Connection,
+    key: &DedupKey,
+    require_missing_message_id: bool,
+) -> Result<bool, AppError> {
     let allow_missing_cache_creation =
         matches!(key.app_type, "codex" | "gemini" | "opencode") && key.cache_creation_tokens == 0;
 
     let l_data_source = data_source_expr("l");
+    let message_id_is_blank = sql_text_is_blank("l.message_id");
     let sql = format!(
         "SELECT EXISTS (
             SELECT 1
@@ -382,6 +552,8 @@ pub(crate) fn has_matching_proxy_usage_log(
               AND l.app_type = ?1
               AND l.status_code >= 200
               AND l.status_code < 300
+              AND l.error_message IS NULL
+              AND (?10 = 0 OR {message_id_is_blank})
               AND l.input_tokens = ?3
               AND l.output_tokens = ?4
               AND l.cache_read_tokens = ?5
@@ -407,10 +579,11 @@ pub(crate) fn has_matching_proxy_usage_log(
             key.created_at,
             SESSION_PROXY_DEDUP_WINDOW_SECONDS,
             allow_missing_cache_creation as i64,
+            require_missing_message_id as i64,
         ],
         |row| row.get::<_, bool>(0),
     )
-    .map_err(|e| AppError::Database(format!("查询重复代理用量日志失败: {e}")))
+    .map_err(|e| AppError::Database(format!("Failed to query duplicate proxy usage log: {e}")))
 }
 
 #[derive(Debug, Clone, Default)]
@@ -424,7 +597,7 @@ fn local_datetime_from_timestamp(ts: i64) -> Result<chrono::DateTime<Local>, App
     Local
         .timestamp_opt(ts, 0)
         .single()
-        .ok_or_else(|| AppError::Database(format!("无法解析本地时间戳: {ts}")))
+        .ok_or_else(|| AppError::Database(format!("Failed to parse local timestamp: {ts}")))
 }
 
 fn compute_rollup_date_bounds(
@@ -504,7 +677,7 @@ fn local_day_start_rfc3339(day: NaiveDate) -> String {
 }
 
 impl Database {
-    /// 获取使用量汇总
+    /// Get usage summary
     pub fn get_usage_summary(
         &self,
         start_date: Option<i64>,
@@ -661,8 +834,8 @@ impl Database {
         Ok(result)
     }
 
-    /// 按 app_type 维度拆分的使用量汇总，用于 Dashboard 的分应用展示条。
-    /// 返回所有有数据的 app_type，按 real_total_tokens 降序。
+    /// Usage summary split by app_type dimension, used for the Dashboard per-app display bar.
+    /// Returns all app_types with data, sorted by real_total_tokens descending.
     ///
     /// Single SQL with `GROUP BY app_type` — avoids the N+1 round-trip that
     /// would result from invoking `get_usage_summary` once per app_type.
@@ -730,7 +903,7 @@ impl Database {
 
         let fresh_input_detail = fresh_input_sql("l");
         let fresh_input_rollup = fresh_input_sql("r");
-        // 折叠 claude-desktop → claude：内层投影成同一桶名，外层 GROUP BY 自然合并。
+        // Fold claude-desktop → claude: inner projection to same bucket name, outer GROUP BY naturally merges.
         let detail_app_type = folded_app_type_sql("l.app_type");
         let rollup_app_type = folded_app_type_sql("r.app_type");
 
@@ -828,7 +1001,7 @@ impl Database {
         Ok(summaries)
     }
 
-    /// 获取每日趋势（滑动窗口，<=24h 按小时，>24h 按天，窗口与汇总一致）
+    /// Get daily trends (sliding window, <=24h by hour, >24h by day, window consistent with summary)
     pub fn get_daily_trends(
         &self,
         start_date: Option<i64>,
@@ -1044,7 +1217,7 @@ impl Database {
         for row in detail_rows {
             let (bucket_date, stat) = row?;
             let date = NaiveDate::parse_from_str(&bucket_date, "%Y-%m-%d")
-                .map_err(|err| AppError::Database(format!("解析趋势日期失败: {err}")))?;
+                .map_err(|err| AppError::Database(format!("Failed to parse trend date: {err}")))?;
             map.insert(date, stat);
         }
 
@@ -1119,8 +1292,9 @@ impl Database {
 
         for row in rollup_rows {
             let (bucket_date, (req, cost, tok, inp, out, cc, cr)) = row?;
-            let date = NaiveDate::parse_from_str(&bucket_date, "%Y-%m-%d")
-                .map_err(|err| AppError::Database(format!("解析 rollup 趋势日期失败: {err}")))?;
+            let date = NaiveDate::parse_from_str(&bucket_date, "%Y-%m-%d").map_err(|err| {
+                AppError::Database(format!("Failed to parse rollup trend date: {err}"))
+            })?;
             let entry = map.entry(date).or_insert_with(|| DailyStats {
                 date: String::new(),
                 request_count: 0,
@@ -1168,7 +1342,7 @@ impl Database {
         Ok(stats)
     }
 
-    /// 获取 Provider 统计
+    /// Get Provider statistics
     pub fn get_provider_stats(
         &self,
         start_date: Option<i64>,
@@ -1312,7 +1486,7 @@ impl Database {
         Ok(stats)
     }
 
-    /// 获取模型统计
+    /// Get model statistics
     pub fn get_model_stats(
         &self,
         start_date: Option<i64>,
@@ -1390,10 +1564,10 @@ impl Database {
 
         // UNION detail logs + rollup data
         //
-        // 分组键用「有效计价模型」：pricing_model 非空时优先（成本就是按它的
-        // 定价算的，金额与定价表自洽），NULL/'' 回落 model。默认 response 计价
-        // 模式下两者相同，行为不变；request 模式 + 路由接管下，钱挂在实际计价
-        // 基准名下，而不是上游回显/客户端别名名下。
+        // Grouping key uses "effective pricing model": pricing_model takes priority when non-empty (cost is calculated
+        // by its pricing, amount is self-consistent with pricing table), falls back to model when NULL/''. Default response pricing
+        // mode makes both the same, behavior unchanged; request mode + routing takeover puts cost on the actual pricing
+        // base name, not under upstream echo/client alias name.
         let fresh_input_detail = fresh_input_sql("l");
         let fresh_input_rollup = fresh_input_sql("r");
         let detail_model = effective_model_sql("l");
@@ -1459,7 +1633,7 @@ impl Database {
         Ok(stats)
     }
 
-    /// 获取请求日志列表（分页）
+    /// Get request log list (paginated)
     pub fn get_request_logs(
         &self,
         filters: &LogFilters,
@@ -1472,13 +1646,13 @@ impl Database {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
         if let Some(ref app_type) = filters.app_type {
-            // 仅过滤口径折叠 claude-desktop→claude；行投影仍返回原始 app_type，
-            // 详情面板据此展示真实入口（路由接管账单审计需要）。
+            // Only fold claude-desktop→claude for filtering; row projection still returns original app_type,
+            // detail panel uses this to show real entry point (routing takeover billing audit requires it).
             conditions.push(format!("{} = ?", folded_app_type_sql("l.app_type")));
             params.push(Box::new(app_type.clone()));
         }
-        // 与 Dashboard 顶部下拉筛选同口径：Provider 按展示名精确匹配（会话占位
-        // 行如 "Claude (Session)" 也能命中），模型按有效计价模型匹配。
+        // Same criteria as Dashboard top dropdown filter: Provider matches by display name exactly (session placeholder
+        // rows like "Claude (Session)" also match), model matches by effective pricing model.
         push_provider_model_filters(
             &mut conditions,
             &mut params,
@@ -1506,7 +1680,7 @@ impl Database {
             format!("WHERE {}", conditions.join(" AND "))
         };
 
-        // 获取总数
+        // Get total count
         let count_sql = format!(
             "SELECT COUNT(*) FROM proxy_request_logs l
              LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
@@ -1517,7 +1691,7 @@ impl Database {
             row.get::<_, i64>(0).map(|v| v as u32)
         })?;
 
-        // 获取数据
+        // Get data
         let offset = page * page_size;
         params.push(Box::new(page_size as i64));
         params.push(Box::new(offset as i64));
@@ -1560,7 +1734,7 @@ impl Database {
         })
     }
 
-    /// 获取单个请求详情
+    /// Get single request detail
     pub fn get_request_detail(
         &self,
         request_id: &str,
@@ -1594,7 +1768,7 @@ impl Database {
         }
     }
 
-    /// 检查 Provider 使用限额
+    /// Check Provider usage limits
     pub fn check_provider_limits(
         &self,
         provider_id: &str,
@@ -1602,7 +1776,7 @@ impl Database {
     ) -> Result<ProviderLimitStatus, AppError> {
         let conn = lock_conn!(self.conn);
 
-        // 获取 provider 的限额设置
+        // Get provider's limit settings
         let (limit_daily, limit_monthly) = conn
             .query_row(
                 "SELECT meta FROM providers WHERE id = ? AND app_type = ?",
@@ -1627,7 +1801,7 @@ impl Database {
             })
             .unwrap_or((None, None));
 
-        // 计算今日使用量 (detail logs + rollup)
+        // Calculate today's usage (detail logs + rollup)
         let daily_usage: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost), 0) FROM (
@@ -1646,7 +1820,7 @@ impl Database {
             )
             .unwrap_or(0.0);
 
-        // 计算本月使用量 (detail logs + rollup)
+        // Calculate this month's usage (detail logs + rollup)
         let monthly_usage: f64 = conn
             .query_row(
                 "SELECT COALESCE(SUM(cost), 0) FROM (
@@ -1684,7 +1858,7 @@ impl Database {
     }
 }
 
-/// Provider 限额状态
+/// Provider limit status
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderLimitStatus {
@@ -1712,7 +1886,7 @@ impl Database {
         Self::backfill_missing_usage_costs_on_conn(&conn, None)
     }
 
-    /// 仅回填指定 model_id 相关的零成本行；用于单条定价更新后的精准回填。
+    /// Only backfill zero-cost rows related to a specific model_id; used for precise backfill after a single pricing update.
     pub(crate) fn backfill_missing_usage_costs_for_model(
         &self,
         model_id: &str,
@@ -1745,10 +1919,10 @@ impl Database {
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
-        // 精准回填的行筛选必须与查价层共用 candidates 归一化：SQL 精确匹配会漏掉
-        // 以原始别名落库的行（如 openrouter/anthropic/claude-sonnet-4.5:free），
-        // 这些行查价时能归一化命中新定价，却在筛选层被挡掉，导致导入定价后
-        // 历史成本要等下次全量回填才更新。误纳无害——查不到价的行会被跳过。
+        // Precise backfill row filtering must share candidate normalization with pricing layer: SQL exact match would miss
+        // rows stored with original aliases (e.g., openrouter/anthropic/claude-sonnet-4.5:free),
+        // these rows can normalize-match new pricing during lookup but get blocked at filter layer, causing after pricing import
+        // historical costs to wait for next full backfill to update. False positives are harmless — rows without pricing are skipped.
         if let Some(model_id) = only_model_id {
             let target = model_pricing_candidates(model_id);
             logs.retain(|log| log_pricing_scope_matches(log, &target));
@@ -1758,9 +1932,11 @@ impl Database {
             return Ok(0);
         }
 
-        let tx = conn
-            .unchecked_transaction()
-            .map_err(|e| AppError::Database(format!("启动用量成本回填事务失败: {e}")))?;
+        let tx = conn.unchecked_transaction().map_err(|e| {
+            AppError::Database(format!(
+                "Failed to start usage cost backfill transaction: {e}"
+            ))
+        })?;
 
         let mut updated = 0u64;
         let mut pricing_cache = HashMap::new();
@@ -1769,17 +1945,20 @@ impl Database {
                 updated += 1;
             }
         }
-        tx.commit()
-            .map_err(|e| AppError::Database(format!("提交用量成本回填事务失败: {e}")))?;
+        tx.commit().map_err(|e| {
+            AppError::Database(format!(
+                "Failed to commit usage cost backfill transaction: {e}"
+            ))
+        })?;
 
         if updated > 0 {
-            log::info!("已回填 {updated} 条缺失的用量成本");
+            log::info!("Backfilled {updated} missing usage costs");
         }
 
         Ok(updated)
     }
 
-    /// 尝试为单条 log 回填成本字段。返回是否实际写入（true=已 UPDATE，false=跳过）。
+    /// Try to backfill cost fields for a single log. Returns whether actually written (true=UPDATE performed, false=skipped).
     fn maybe_backfill_log_costs(
         conn: &Connection,
         log: &mut RequestLogDetail,
@@ -1804,7 +1983,7 @@ impl Database {
         let multiplier =
             rust_decimal::Decimal::from_str(&log.cost_multiplier).unwrap_or_else(|e| {
                 log::warn!(
-                    "历史用量倍率解析失败 request_id={}: {} - {e}",
+                    "Historical usage multiplier parse failed request_id={}: {} - {e}",
                     log.request_id,
                     log.cost_multiplier
                 );
@@ -1813,10 +1992,10 @@ impl Database {
 
         let million = rust_decimal::Decimal::from(1_000_000u64);
 
-        // 与 CostCalculator::calculate_for_app 保持一致的计算逻辑：
-        // 1. Codex/Gemini 的 input_tokens 包含 cache_read_tokens，需要扣除后按输入价计费
-        // 2. Claude/Anthropic 的 input_tokens 已经是 fresh input，不能再次扣减
-        // 3. 各项成本是基础成本（不含倍率），倍率只作用于最终总价
+        // Calculation logic consistent with CostCalculator::calculate_for_app:
+        // 1. Codex/Gemini input_tokens include cache_read_tokens, need to subtract before charging at input price
+        // 2. Claude/Anthropic input_tokens are already fresh input, cannot subtract again
+        // 3. Each cost item is the base cost (without multiplier), multiplier only applies to the final total
         let input_includes_cache_read = matches!(log.app_type.as_str(), "codex" | "gemini");
         let billable_input_tokens = if input_includes_cache_read {
             (log.input_tokens as u64).saturating_sub(log.cache_read_tokens as u64)
@@ -1833,7 +2012,7 @@ impl Database {
         let cache_creation_cost = rust_decimal::Decimal::from(log.cache_creation_tokens as u64)
             * pricing.cache_creation
             / million;
-        // 总成本 = 基础成本之和 × 倍率
+        // Total cost = sum of base costs × multiplier
         let base_total = input_cost + output_cost + cache_read_cost + cache_creation_cost;
         let total_cost = base_total * multiplier;
 
@@ -1860,7 +2039,7 @@ impl Database {
                 log.request_id
             ],
         )
-        .map_err(|e| AppError::Database(format!("更新请求成本失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to update request costs: {e}")))?;
 
         Ok(true)
     }
@@ -1881,13 +2060,15 @@ impl Database {
 
         let pricing = PricingInfo {
             input: rust_decimal::Decimal::from_str(&input)
-                .map_err(|e| AppError::Database(format!("解析输入价格失败: {e}")))?,
+                .map_err(|e| AppError::Database(format!("Failed to parse input price: {e}")))?,
             output: rust_decimal::Decimal::from_str(&output)
-                .map_err(|e| AppError::Database(format!("解析输出价格失败: {e}")))?,
-            cache_read: rust_decimal::Decimal::from_str(&cache_read)
-                .map_err(|e| AppError::Database(format!("解析缓存读取价格失败: {e}")))?,
-            cache_creation: rust_decimal::Decimal::from_str(&cache_creation)
-                .map_err(|e| AppError::Database(format!("解析缓存写入价格失败: {e}")))?,
+                .map_err(|e| AppError::Database(format!("Failed to parse output price: {e}")))?,
+            cache_read: rust_decimal::Decimal::from_str(&cache_read).map_err(|e| {
+                AppError::Database(format!("Failed to parse cache read price: {e}"))
+            })?,
+            cache_creation: rust_decimal::Decimal::from_str(&cache_creation).map_err(|e| {
+                AppError::Database(format!("Failed to parse cache write price: {e}"))
+            })?,
         };
 
         cache.insert(model.to_string(), pricing.clone());
@@ -1899,11 +2080,11 @@ impl Database {
         cache: &mut HashMap<String, PricingInfo>,
         log: &RequestLogDetail,
     ) -> Result<Option<PricingInfo>, AppError> {
-        // 写入时的计价基准已落库（v11+）：回填只按它重算，找不到就保持 0 成本
-        // 等补价。不能换用 model/request_model 猜——路由接管 + request 计价模式下
-        // 三者可能各不相同（model=上游回显、request_model=客户端别名、
-        // pricing_model=实际出站模型），换基准会按错误价格永久固化。
-        // 占位符（"" = 未计价错误行 / "unknown"）视同缺失，走历史行逻辑。
+        // The pricing basis at write time is already persisted (v11+): backfill only recalculates by it, keeps 0 cost if not found
+        // for price supplement. Cannot guess with model/request_model — under routing takeover + request pricing mode
+        // all three may differ (model=upstream echo, request_model=client alias,
+        // pricing_model=actual outbound model), changing basis would permanently lock in wrong price.
+        // Placeholders ("" = unpriced error row / "unknown") treated as missing, uses historical row logic.
         if let Some(pricing_model) = log
             .pricing_model
             .as_deref()
@@ -1916,11 +2097,11 @@ impl Database {
             return Ok(Some(pricing));
         }
 
-        // 仅当 model 列是占位符（解析失败留下的 ""/"unknown" 等）时才回退到
-        // request_model 定价。model 是真实模型名但缺定价时必须保持 0 成本等待
-        // 补价：路由接管下 request_model 是客户端别名（如 claude-sonnet-4-6），
-        // 按别名回填会把真实上游模型的 tokens 按错误价格永久固化（行一旦有成本
-        // 就不再进入回填范围）。
+        // Only fall back to request_model pricing when model column is a placeholder (""/ "unknown" etc. left by parse failures)
+        // request_model pricing. When model is a real model name lacking pricing, must keep 0 cost waiting
+        // for price supplement: under routing takeover, request_model is client alias (e.g., claude-sonnet-4-6),
+        // backfilling by alias would permanently lock real upstream model tokens at wrong price (once a row has cost
+        // it no longer enters the backfill scope).
         if !is_placeholder_pricing_model(&log.model) {
             return Ok(None);
         }
@@ -1971,9 +2152,9 @@ pub(crate) fn find_model_pricing_row(
     Ok(None)
 }
 
-/// 精准回填的行筛选：log 的任一模型字段归一化后与目标模型的 candidates 相交，
-/// 或可按查价层的前缀规则命中目标，即视为相关。镜像 find_model_pricing_row 的
-/// 匹配语义，宁可误纳（后续查价会兜底）不可漏筛。
+/// Precise backfill row filtering: any model field of the log, after normalization, intersects with target model's candidates,
+/// or can match the target by pricing layer's prefix rules, considered relevant. Mirrors find_model_pricing_row's
+/// matching semantics, prefer false positives (subsequent pricing lookup will handle) over false negatives.
 fn log_pricing_scope_matches(log: &RequestLogDetail, target_candidates: &[String]) -> bool {
     [
         Some(log.model.as_str()),
@@ -2020,7 +2201,7 @@ fn query_model_pricing_exact(
         },
     )
     .optional()
-    .map_err(|e| AppError::Database(format!("查询模型定价失败: {e}")))
+    .map_err(|e| AppError::Database(format!("Failed to query model pricing: {e}")))
 }
 
 fn query_model_pricing_prefix(
@@ -2046,7 +2227,7 @@ fn query_model_pricing_prefix(
         },
     )
     .optional()
-    .map_err(|e| AppError::Database(format!("查询模型前缀定价失败: {e}")))
+    .map_err(|e| AppError::Database(format!("Failed to query model prefix pricing: {e}")))
 }
 
 fn model_pricing_candidates(model_id: &str) -> Vec<String> {
@@ -2213,13 +2394,13 @@ fn strip_model_date_suffix(model_id: &str) -> Option<String> {
     if base.is_empty() || !suffix.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
-    // 8 位 YYYYMMDD（如 -20250615；OpenAI / Claude / 通义千问等）。
+    // 8 digit YYYYMMDD (e.g., -20250615; OpenAI / Claude / Qwen etc.).
     if suffix.len() == 8 {
         return Some(base.to_string());
     }
-    // 6 位 YYMMDD（如 -260628；火山方舟 doubao-seed-*、部分国产厂商）。
-    // 6 位比 8 位更易误伤非日期尾巴（如 -123456 的版本号），故额外校验
-    // 月 01-12、日 01-31 才剥离；剥不动时退回 None 由上层精确匹配兜底。
+    // 6 digit YYMMDD (e.g., -260628; Volcengine doubao-seed-*, some domestic providers).
+    // 6 digit is more likely to false-positive on non-date tails (e.g., -123456 version numbers), so extra validation
+    // month 01-12, day 01-31 to strip; returns None when can't strip, leaving precise matching as fallback.
     if suffix.len() == 6 {
         let month: u32 = suffix[2..4].parse().unwrap_or(0);
         let day: u32 = suffix[4..6].parse().unwrap_or(0);
@@ -2325,6 +2506,18 @@ mod tests {
         Ok(())
     }
 
+    fn set_usage_message_id(
+        conn: &Connection,
+        request_id: &str,
+        message_id: &str,
+    ) -> Result<(), AppError> {
+        conn.execute(
+            "UPDATE proxy_request_logs SET message_id = ?1 WHERE request_id = ?2",
+            params![message_id, request_id],
+        )?;
+        Ok(())
+    }
+
     #[test]
     fn request_log_queries_return_correlation_id() -> Result<(), AppError> {
         let db = Database::memory()?;
@@ -2332,7 +2525,7 @@ mod tests {
             let conn = lock_conn!(db.conn);
             insert_usage_log(
                 &conn,
-                "response-id",
+                "trace-id",
                 "codex",
                 "provider-1",
                 "glm-5.2",
@@ -2347,21 +2540,20 @@ mod tests {
             )?;
             conn.execute(
                 "UPDATE proxy_request_logs SET correlation_id = 'server-request-id'
-                 WHERE request_id = 'response-id'",
+                 WHERE request_id = 'trace-id'",
                 [],
             )?;
         }
 
         let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
-        assert_eq!(logs.data[0].request_id, "response-id");
+        assert_eq!(logs.data[0].request_id, "trace-id");
         assert_eq!(
             logs.data[0].correlation_id.as_deref(),
             Some("server-request-id")
         );
         assert_eq!(logs.data[0].duration_ms, Some(100));
-        let detail = db
-            .get_request_detail("response-id")?
-            .expect("request detail");
+
+        let detail = db.get_request_detail("trace-id")?.expect("request detail");
         assert_eq!(detail.correlation_id.as_deref(), Some("server-request-id"));
         assert_eq!(detail.duration_ms, Some(100));
         Ok(())
@@ -2371,6 +2563,7 @@ mod tests {
         conn.execute(
             "CREATE TABLE proxy_request_logs (
                 request_id TEXT PRIMARY KEY,
+                message_id TEXT,
                 app_type TEXT NOT NULL,
                 model TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL,
@@ -2378,6 +2571,7 @@ mod tests {
                 cache_read_tokens INTEGER NOT NULL,
                 cache_creation_tokens INTEGER NOT NULL,
                 status_code INTEGER NOT NULL,
+                error_message TEXT,
                 created_at INTEGER NOT NULL,
                 data_source TEXT
             )",
@@ -2439,7 +2633,7 @@ mod tests {
 
         {
             let conn = lock_conn!(db.conn);
-            // 一条 Claude Code 行 + 一条 Claude Desktop 网关行，同一时间窗。
+            // One Claude Code row + one Claude Desktop gateway row, same time window.
             insert_usage_log(
                 &conn,
                 "cc-1",
@@ -2470,38 +2664,49 @@ mod tests {
                 200,
                 "1.5",
             )?;
+            conn.execute(
+                "UPDATE proxy_request_logs
+                 SET error_message = 'upstream_response_incomplete:length'
+                 WHERE request_id = 'cd-1'",
+                [],
+            )?;
         }
 
-        // ① 分应用汇总：desktop 折叠进 claude，不再单列 claude-desktop 桶。
+        // (1) Per-app summary: desktop folded into claude, no longer a separate claude-desktop bucket.
         let by_app = db.get_usage_summary_by_app(None, None, None, None)?;
-        assert_eq!(by_app.len(), 1, "应只剩一个合并后的 claude 桶");
+        assert_eq!(by_app.len(), 1, "should only have one merged claude bucket");
         assert_eq!(by_app[0].app_type, "claude");
-        assert_eq!(by_app[0].summary.total_requests, 2, "两条行都计入 claude");
+        assert_eq!(
+            by_app[0].summary.total_requests, 2,
+            "both rows count as claude"
+        );
+        assert_eq!(by_app[0].summary.success_rate, 50.0);
         assert!(
             !by_app.iter().any(|a| a.app_type == "claude-desktop"),
-            "不应再出现 claude-desktop 桶"
+            "claude-desktop bucket should no longer appear"
         );
 
-        // ② 选中 claude 过滤：汇总应同时覆盖 desktop 行。
+        // (2) Select claude filter: summary should cover desktop rows too.
         let claude_summary = db.get_usage_summary(None, None, Some("claude"), None, None)?;
         assert_eq!(claude_summary.total_requests, 2);
+        assert_eq!(claude_summary.success_rate, 50.0);
 
-        // ③ 请求日志按 claude 过滤返回两行，且 desktop 行投影仍是原始 app_type。
+        // (3) Request logs filtered by claude return two rows, and desktop row projection is still original app_type.
         let logs = db.get_request_logs(
             &LogFilters {
                 app_type: Some("claude".to_string()),
                 ..Default::default()
             },
-            0, // 页码从 0 开始
+            0, // page number starts from 0
             50,
         )?;
-        assert_eq!(logs.total, 2, "claude 过滤含 desktop 行");
+        assert_eq!(logs.total, 2, "claude filter includes desktop rows");
         assert!(
             logs.data.iter().any(|r| r.app_type == "claude-desktop"),
-            "详情面板需要看到真实入口，行投影不可被折叠"
+            "detail panel needs to see real entry, row projection must not be folded"
         );
 
-        // ④ 折叠不外溢：codex 过滤为空。
+        // ④ Folding does not overflow: codex filter is empty。
         let codex_summary = db.get_usage_summary(None, None, Some("codex"), None, None)?;
         assert_eq!(codex_summary.total_requests, 0);
 
@@ -2634,8 +2839,8 @@ mod tests {
 
         {
             let conn = lock_conn!(db.conn);
-            // 路由接管场景：model 是上游回显的真实模型（缺定价），request_model
-            // 是客户端别名（有定价）。回填不得按别名定价，必须保持 0 成本等待补价。
+            // Routing takeover scenario: model is upstream-echoed real model (lacking pricing), request_model
+            // is client alias (has pricing). Backfill must not use alias pricing, must keep 0 cost waiting for price supplement.
             conn.execute(
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model,
@@ -2653,7 +2858,7 @@ mod tests {
             )?;
         }
 
-        // request_model（claude-sonnet-4-6）有定价，但 model 是真实模型名：不得回退
+        // request_model (claude-sonnet-4-6) has pricing, but model is the real model name: must not fall back
         assert_eq!(db.backfill_missing_usage_costs()?, 0);
 
         {
@@ -2666,7 +2871,7 @@ mod tests {
             )?;
             assert_eq!(total_cost, "0");
 
-            // 补上真实模型定价后，回填必须按真实模型价格修复（0 成本行未被污染固化）
+            // After supplementing real model pricing, backfill must repair with real model price (0 cost rows not polluted)
             conn.execute(
                 "INSERT INTO model_pricing (model_id, display_name, input_cost_per_million, output_cost_per_million)
                  VALUES ('takeover-real-model-unpriced', 'Takeover Real Model', '0.6', '2.5')",
@@ -2694,9 +2899,9 @@ mod tests {
 
         {
             let conn = lock_conn!(db.conn);
-            // request 计价模式 + 接管：写入时锚定出站模型 kimi-k2-novel（当时缺价），
-            // 但上游回显了别名 → model/request_model 都是 claude-sonnet-4-6（有定价）。
-            // 回填必须按落库的 pricing_model 重算，不得换用 model 列的别名价格。
+            // request pricing mode + takeover: anchored outbound model at write time kimi-k2-novel（lacked pricing then),
+            // but upstream echoed back the alias → model/request_model are both claude-sonnet-4-6 (has pricing).
+            // Backfill must recalculate by persisted pricing_model, must not use model column alias price.
             conn.execute(
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model, pricing_model,
@@ -2714,7 +2919,7 @@ mod tests {
             )?;
         }
 
-        // pricing_model（kimi-k2-novel）缺价：不得回退到 model 列的别名价格
+        // pricing_model (kimi-k2-novel) lacks pricing: must not fall back to model column alias price
         assert_eq!(db.backfill_missing_usage_costs()?, 0);
 
         {
@@ -2726,7 +2931,7 @@ mod tests {
             )?;
         }
 
-        // 按 pricing_model 也能定位到该行（model/request_model 都不是 kimi-k2-novel）
+        // Can also locate this row by pricing_model (neither model nor request_model is kimi-k2-novel)
         assert_eq!(
             db.backfill_missing_usage_costs_for_model("kimi-k2-novel")?,
             1
@@ -2750,8 +2955,8 @@ mod tests {
 
         {
             let conn = lock_conn!(db.conn);
-            // 代理日志按上游原文落库：带路由前缀和 :free 后缀的别名形式。
-            // 精准回填的筛选必须归一化后匹配，否则这类行要等全量回填才更新。
+            // Proxy logs are stored verbatim from upstream: alias form with route prefix and :free suffix.
+            // Precise backfill filtering must match after normalization, otherwise these rows wait for full backfill to update.
             insert_usage_log(
                 &conn,
                 "openrouter-alias-zero-cost",
@@ -2769,7 +2974,7 @@ mod tests {
             )?;
         }
 
-        // 定价缺失时不应回填
+        // Should not backfill when pricing is missing
         assert_eq!(db.backfill_missing_usage_costs()?, 0);
 
         {
@@ -2781,7 +2986,7 @@ mod tests {
             )?;
         }
 
-        // 按归一化 ID 精准回填，应命中以原始别名落库的行
+        // Precise backfill by normalized ID should match rows stored with original aliases
         assert_eq!(
             db.backfill_missing_usage_costs_for_model("kimi-k2-novel")?,
             1
@@ -2842,7 +3047,7 @@ mod tests {
     fn test_get_usage_summary() -> Result<(), AppError> {
         let db = Database::memory()?;
 
-        // 插入测试数据
+        // Insert test data
         {
             let conn = lock_conn!(db.conn);
             conn.execute(
@@ -3026,7 +3231,7 @@ mod tests {
                 200,
                 "2.0",
             )?;
-            // 会话占位行：providers 表无此 id，展示名走 CASE 映射。
+            // Session placeholder row: providers table has no such id, display name uses CASE mapping.
             insert_usage_log(
                 &conn,
                 "s-1",
@@ -3042,7 +3247,7 @@ mod tests {
                 200,
                 "0.5",
             )?;
-            // 计价模型与请求模型不同的行：模型筛选必须按有效计价模型命中。
+            // Rows where pricing model differs from request model: model filter must match by effective pricing model.
             insert_usage_log(
                 &conn,
                 "a-2",
@@ -3063,7 +3268,7 @@ mod tests {
                 [],
             )?;
 
-            // rollup 历史日行：无范围过滤时全部计入。
+            // rollup historical day rows: all counted when no range filter.
             conn.execute(
                 "INSERT INTO usage_daily_rollups (
                     date, app_type, provider_id, model,
@@ -3076,52 +3281,52 @@ mod tests {
             )?;
         }
 
-        // ① 汇总按 Provider 展示名过滤：明细 + rollup 都命中。
+        // ① Summary filtered by provider display name: detail + rollup both match.
         let packy = db.get_usage_summary(None, None, None, Some("Packy"), None)?;
         assert_eq!(packy.total_requests, 7, "a-1 + a-2 + rollup 5");
 
-        // ② 汇总按模型过滤（有效计价模型口径）。
+        // ② Summary filtered by model (effective pricing model scope).
         let deepseek = db.get_usage_summary(None, None, None, None, Some("deepseek-v3"))?;
         assert_eq!(deepseek.total_requests, 8, "b-1 + rollup 7");
 
-        // ③ pricing_model 优先于 model：alias-model 查不到，real-model 查得到。
+        // ③ pricing_model takes priority over model: alias-model not found, real-model found.
         let by_alias = db.get_usage_summary(None, None, None, None, Some("alias-model"))?;
         assert_eq!(by_alias.total_requests, 0);
         let by_real = db.get_usage_summary(None, None, None, None, Some("real-model"))?;
         assert_eq!(by_real.total_requests, 1);
 
-        // ④ 会话占位行可按可读名选中。
+        // ④ Session placeholder rows can be selected by readable name.
         let session = db.get_usage_summary(None, None, None, Some("Claude (Session)"), None)?;
         assert_eq!(session.total_requests, 1);
 
-        // ⑤ Provider 统计 + 模型过滤：只剩 DeepSeek 一行。
+        // (5) Provider stats + model filter: only DeepSeek row remains.
         let provider_stats = db.get_provider_stats(None, None, None, None, Some("deepseek-v3"))?;
         assert_eq!(provider_stats.len(), 1);
         assert_eq!(provider_stats[0].provider_name, "DeepSeek");
         assert_eq!(provider_stats[0].request_count, 8);
 
-        // ⑥ 模型统计 + Provider 过滤：只剩 Packy 名下的模型。
+        // (6) Model stats + Provider filter: only models under Packy.
         let model_stats = db.get_model_stats(None, None, None, Some("Packy"), None)?;
         let models: Vec<&str> = model_stats.iter().map(|m| m.model.as_str()).collect();
         assert!(models.contains(&"claude-sonnet-4-6"));
         assert!(models.contains(&"real-model"));
         assert!(!models.contains(&"deepseek-v3"));
 
-        // ⑦ 分应用汇总（Hero 卡片数据源）同样受过滤影响。
+        // ⑦ Per-app summary (Hero card data source) is also affected by filters.
         let by_app = db.get_usage_summary_by_app(None, None, Some("Packy"), None)?;
         assert_eq!(by_app.len(), 1);
         assert_eq!(by_app[0].app_type, "claude");
         assert_eq!(by_app[0].summary.total_requests, 7);
 
-        // ⑧ 趋势（>24h 走天分桶 + rollup 分支）。
+        // (8) Trends (>24h uses day buckets + rollup branch).
         let t_start = local_ts(2026, 6, 8, 0, 0, 0);
         let t_end = local_ts(2026, 6, 10, 23, 59, 0);
         let trends = db.get_daily_trends(Some(t_start), Some(t_end), None, Some("Packy"), None)?;
         let total_req: u64 = trends.iter().map(|d| d.request_count).sum();
-        assert_eq!(total_req, 7, "明细 2 + rollup 5");
+        assert_eq!(total_req, 7, "detail 2 + rollup 5");
 
-        // ⑨ 趋势 ≤24h 走小时分桶分支（?1/?2/?3 编号参数与追加过滤混用的路径），
-        //    同时验证 Provider + 模型组合过滤。
+        // (9) Trends <=24h hourly bucket branch (?1/?2/?3 numbered params mixed with appended filters path),
+        //    also validates Provider + model combined filtering.
         let h_start = local_ts(2026, 6, 10, 0, 0, 0);
         let h_end = local_ts(2026, 6, 10, 20, 0, 0);
         let hourly = db.get_daily_trends(
@@ -3132,9 +3337,12 @@ mod tests {
             Some("claude-sonnet-4-6"),
         )?;
         let hourly_req: u64 = hourly.iter().map(|d| d.request_count).sum();
-        assert_eq!(hourly_req, 1, "仅 a-1 命中（a-2 计价模型不同）");
+        assert_eq!(
+            hourly_req, 1,
+            "only a-1 matches (a-2 has different pricing model)"
+        );
 
-        // ⑩ 请求日志列表与下拉同口径：精确名 + 有效计价模型。
+        // (10) Request log list same criteria as dropdown: exact name + effective pricing model.
         let logs = db.get_request_logs(
             &LogFilters {
                 provider_name: Some("Packy".to_string()),
@@ -3410,6 +3618,388 @@ mod tests {
     }
 
     #[test]
+    fn test_effective_usage_dedup_prefers_exact_message_id() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_same")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-proxy",
+                "claude",
+                "anthropic",
+                "routed-upstream-model",
+                "proxy",
+                100_000,
+                999,
+                888,
+                777,
+                666,
+                200,
+                "1.00",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy", "msg_same")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 1);
+        assert_eq!(logs.data[0].request_id, "claude-proxy");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_hides_zero_usage_proxy_sibling() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "claude-proxy-billable",
+                "claude",
+                "anthropic",
+                "claude-sonnet-4-5",
+                "proxy",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy-billable", "msg_same")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-proxy-empty",
+                "claude-desktop",
+                "anthropic",
+                "routed-upstream-model",
+                "proxy",
+                100_000,
+                0,
+                0,
+                0,
+                0,
+                200,
+                "0",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy-empty", "msg_same")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 1);
+        assert_eq!(logs.data[0].request_id, "claude-proxy-billable");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_keeps_different_message_ids() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "claude-proxy",
+                "claude",
+                "anthropic",
+                "claude-sonnet-4-5",
+                "proxy",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy", "msg_proxy")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                1_060,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_session")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_falls_back_when_proxy_message_id_is_blank() -> Result<(), AppError>
+    {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "claude-proxy",
+                "claude",
+                "anthropic",
+                "claude-sonnet-4-5",
+                "proxy",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy", "\t\n")?;
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                1_060,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_session")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 1);
+        assert_eq!(logs.data[0].request_id, "claude-proxy");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_keeps_same_message_id_from_other_app() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "codex-proxy",
+                "codex",
+                "openai",
+                "gpt-5.4",
+                "proxy",
+                1_000,
+                999,
+                888,
+                777,
+                0,
+                200,
+                "1.00",
+            )?;
+            set_usage_message_id(&conn, "codex-proxy", "msg_shared")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                100_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_shared")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_matches_claude_desktop_message_id() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "desktop-proxy",
+                "claude-desktop",
+                "anthropic",
+                "routed-upstream-model",
+                "proxy",
+                100_000,
+                999,
+                888,
+                777,
+                666,
+                200,
+                "1.00",
+            )?;
+            set_usage_message_id(&conn, "desktop-proxy", "msg_same")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_same")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 1);
+        assert_eq!(logs.data[0].request_id, "desktop-proxy");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_prefers_billable_failed_proxy() -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "claude-proxy-failed",
+                "claude",
+                "anthropic",
+                "routed-upstream-model",
+                "proxy",
+                100_000,
+                999,
+                888,
+                777,
+                666,
+                502,
+                "0",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy-failed", "msg_same")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_same")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 1);
+        assert_eq!(logs.data[0].request_id, "claude-proxy-failed");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_effective_usage_dedup_keeps_session_after_zero_usage_failed_proxy(
+    ) -> Result<(), AppError> {
+        let db = Database::memory()?;
+
+        {
+            let conn = lock_conn!(db.conn);
+            insert_usage_log(
+                &conn,
+                "claude-proxy-failed",
+                "claude",
+                "anthropic",
+                "routed-upstream-model",
+                "proxy",
+                100_000,
+                0,
+                0,
+                0,
+                0,
+                502,
+                "0",
+            )?;
+            set_usage_message_id(&conn, "claude-proxy-failed", "msg_same")?;
+
+            insert_usage_log(
+                &conn,
+                "claude-session",
+                "claude",
+                "_session",
+                "claude-sonnet-4-5",
+                "session_log",
+                1_000,
+                100,
+                20,
+                10,
+                5,
+                200,
+                "0.10",
+            )?;
+            set_usage_message_id(&conn, "claude-session", "msg_same")?;
+        }
+
+        let logs = db.get_request_logs(&LogFilters::default(), 0, 10)?;
+        assert_eq!(logs.total, 2);
+
+        Ok(())
+    }
+
+    #[test]
     fn test_effective_usage_dedup_keeps_non_matching_session_rows() -> Result<(), AppError> {
         let db = Database::memory()?;
 
@@ -3576,7 +4166,7 @@ mod tests {
     fn test_get_model_stats() -> Result<(), AppError> {
         let db = Database::memory()?;
 
-        // 插入测试数据
+        // Insert test data
         {
             let conn = lock_conn!(db.conn);
             conn.execute(
@@ -3955,15 +4545,15 @@ mod tests {
     #[test]
     fn test_strip_model_date_suffix_is_utf8_safe() {
         assert_eq!(
-            strip_model_date_suffix("模型-2026-05-14").as_deref(),
-            Some("模型")
+            strip_model_date_suffix("mymodel-2026-05-14").as_deref(),
+            Some("mymodel")
         );
         assert_eq!(strip_model_date_suffix("abc🚀12345678"), None);
     }
 
     #[test]
     fn test_strip_model_date_suffix_handles_six_digit_yymmdd() {
-        // 火山方舟 6 位 YYMMDD 后缀应被剥离（doubao 全系都用这种格式）。
+        // Volcengine 6-digit YYMMDD suffix should be stripped (all doubao models use this format).
         assert_eq!(
             strip_model_date_suffix("doubao-seed-2-1-pro-260628").as_deref(),
             Some("doubao-seed-2-1-pro")
@@ -3972,21 +4562,21 @@ mod tests {
             strip_model_date_suffix("doubao-seed-1-6-250615").as_deref(),
             Some("doubao-seed-1-6")
         );
-        // 8 位 YYYYMMDD 仍照旧剥离。
+        // 8 digit YYYYMMDD still stripped as before.
         assert_eq!(
             strip_model_date_suffix("claude-3-5-sonnet-20241022").as_deref(),
             Some("claude-3-5-sonnet")
         );
-        // 月/日非法的 6 位尾巴（版本号等）不剥离，避免误伤。
-        assert_eq!(strip_model_date_suffix("foo-bar-123456"), None); // 月=34
-        assert_eq!(strip_model_date_suffix("widget-209900"), None); // 月=99
-        assert_eq!(strip_model_date_suffix("gizmo-251200"), None); // 日=00
+        // 6-digit tails with invalid month/day (version numbers etc.) are not stripped to avoid false positives.
+        assert_eq!(strip_model_date_suffix("foo-bar-123456"), None); // month=34
+        assert_eq!(strip_model_date_suffix("widget-209900"), None); // month=99
+        assert_eq!(strip_model_date_suffix("gizmo-251200"), None); // day=00
     }
 
     #[test]
     fn test_pricing_resolves_volcengine_dated_model_to_bare_seed_row() -> Result<(), AppError> {
-        // 回归：火山真实用量带 6 位日期后缀（doubao-seed-2-1-pro-260628），
-        // 必须能归一化命中定价表里的裸名 seed 行（doubao-seed-2-1-pro），否则成本显示 $0。
+        // Regression: Volcengine real usage with 6-digit date suffix (doubao-seed-2-1-pro-260628),
+        // Must normalize to match the bare name in the pricing table (doubao-seed-2-1-pro), otherwise cost shows $0.
         let db = Database::memory()?;
         let conn = lock_conn!(db.conn);
 
@@ -4001,7 +4591,7 @@ mod tests {
         let row = find_model_pricing_row(&conn, "doubao-seed-2-1-pro-260628")?;
         assert!(
             row.is_some(),
-            "带日期的火山模型应通过 6 位日期剥离命中裸名定价行"
+            "dated Volcengine model should match bare-name pricing row through 6-digit date stripping"
         );
         let (input, output, ..) = row.unwrap();
         assert_eq!(input, "0.84");
@@ -4029,7 +4619,7 @@ mod tests {
         let result = find_model_pricing_row(&conn, "gpt-5")?;
         assert!(
             result.is_none(),
-            "缺少 gpt-5 基础定价时，不应前缀误匹配到 gpt-5-mini/gpt-5-pro"
+            "Missing gpt-5 base pricing should not prefix-match to gpt-5-mini/gpt-5-pro"
         );
 
         Ok(())
@@ -4040,7 +4630,7 @@ mod tests {
         let db = Database::memory()?;
         let conn = lock_conn!(db.conn);
 
-        // 准备额外定价数据，覆盖前缀/后缀清洗场景
+        // Prepare additional pricing data, covering prefix/suffix cleaning scenarios
         conn.execute(
             "INSERT OR REPLACE INTO model_pricing (
                 model_id, display_name, input_cost_per_million, output_cost_per_million,
@@ -4056,98 +4646,101 @@ mod tests {
             ],
         )?;
 
-        // 测试精确匹配（seed_model_pricing 已预置 claude-sonnet-4-5-20250929）
+        // Test exact match (seed_model_pricing already has claude-sonnet-4-5-20250929)
         let result = find_model_pricing_row(&conn, "claude-sonnet-4-5-20250929")?;
         assert!(
             result.is_some(),
-            "应该能精确匹配 claude-sonnet-4-5-20250929"
+            "should exactly match claude-sonnet-4-5-20250929"
         );
 
-        // 清洗：去除前缀和冒号后缀
+        // Cleaning: remove prefix and colon suffix
         let result = find_model_pricing_row(&conn, "anthropic/claude-haiku-4.5")?;
         assert!(
             result.is_some(),
-            "带前缀的模型 anthropic/claude-haiku-4.5 应能匹配到 claude-haiku-4.5"
+            "model with prefix anthropic/claude-haiku-4.5 should match claude-haiku-4.5"
         );
         let result = find_model_pricing_row(&conn, "moonshotai/kimi-k2-0905:exa")?;
         assert!(
             result.is_some(),
-            "带前缀+冒号后缀的模型应清洗后匹配到 kimi-k2-0905"
+            "model with prefix+colon suffix should match after cleaning kimi-k2-0905"
         );
 
-        // 清洗：@ 替换为 -（seed_model_pricing 已预置 gpt-5.2-codex-low）
+        // Cleaning: @ replaced by - (seed_model_pricing already has gpt-5.2-codex-low)
         let result = find_model_pricing_row(&conn, "gpt-5.2-codex@low")?;
         assert!(
             result.is_some(),
-            "带 @ 分隔符的模型 gpt-5.2-codex@low 应能匹配到 gpt-5.2-codex-low"
+            "model with @ separator gpt-5.2-codex@low should match gpt-5.2-codex-low"
         );
         let result = find_model_pricing_row(&conn, "OpenAI/GPT-5.5@HIGH")?;
         assert!(
             result.is_some(),
-            "大小写混合的 GPT-5.5 模型应能归一化匹配到 gpt-5.5-high"
+            "mixed-case GPT-5.5 model should normalize-match to gpt-5.5-high"
         );
         let result = find_model_pricing_row(&conn, "OpenAI/GPT-5.5-2026-05-14")?;
         assert!(
             result.is_some(),
-            "OpenAI 日期后缀模型应能回退到 gpt-5.5 基础定价"
+            "OpenAI date-suffix model should fall back to gpt-5.5 base pricing"
         );
         let result = find_model_pricing_row(&conn, "google/gemini-3-pro-preview-20260514")?;
         assert!(
             result.is_some(),
-            "Gemini 日期后缀模型应能回退到 gemini-3-pro-preview 基础定价"
+            "Gemini date-suffix model should fall back to gemini-3-pro-preview base pricing"
         );
 
-        // Claude Desktop route 短 ID：应通过前缀匹配到带日期的定价
+        // Claude Desktop route short ID: should prefix-match to dated pricing
         let result = find_model_pricing_row(&conn, "claude-haiku-4-5")?;
         assert!(
             result.is_some(),
-            "Claude Desktop 短路由 claude-haiku-4-5 应能匹配到 claude-haiku-4-5-20251001"
+            "Claude Desktop short route claude-haiku-4-5 should match claude-haiku-4-5-20251001"
         );
         let result = find_model_pricing_row(&conn, "anthropic/claude-opus-4.8")?;
         assert!(
             result.is_some(),
-            "聚合商点号格式 anthropic/claude-opus-4.8 应能匹配到 claude-opus-4-8"
+            "aggregator dot-notation format anthropic/claude-opus-4.8 should match claude-opus-4-8"
         );
 
-        // Claude Desktop 旧版/异常包装的非 Anthropic route：claude-gpt-5.5 → gpt-5.5
+        // Claude Desktop Legacy/abnormal wrapped non-Anthropic route: claude-gpt-5.5 → gpt-5.5
         let result = find_model_pricing_row(&conn, "claude-gpt-5.5")?;
         assert!(
             result.is_some(),
-            "带 claude- 包装的非 Anthropic 模型应能剥离后匹配到真实模型定价"
+            "non-Anthropic model wrapped with claude- should match real model pricing after stripping"
         );
 
-        // Bedrock/Vertex 常见形态：provider 前缀 + -vN 后缀 + :0 修饰
+        // Bedrock/Vertex Common form: provider prefix + -vN suffix + :0 modifier
         let result =
             find_model_pricing_row(&conn, "global.anthropic.claude-haiku-4-5-20251001-v1:0")?;
         assert!(
             result.is_some(),
-            "Bedrock/Vertex 风格 Claude 模型 ID 应能归一化到基础 Claude 模型定价"
+            "Bedrock/Vertex style Claude model ID should normalize to base Claude model pricing"
         );
         let result = find_model_pricing_row(&conn, "global.anthropic.claude-opus-4-8-v1:0")?;
         assert!(
             result.is_some(),
-            "Bedrock 风格 Claude Opus 4.8 模型 ID 应能归一化到基础 Claude 模型定价"
+            "Bedrock style Claude Opus 4.8 model ID should normalize to base Claude model pricing"
         );
         let result = find_model_pricing_row(&conn, "claude-opus-4-8@20260527")?;
         assert!(
             result.is_some(),
-            "Vertex 风格 Claude Opus 4.8 模型 ID 应能归一化到基础 Claude 模型定价"
+            "Vertex style Claude Opus 4.8 model ID should normalize to base Claude model pricing"
         );
 
-        // Reasoning effort 后缀：没有专门价格时回退到基础模型
+        // Reasoning effort suffix: fall back to base model when no specific pricing exists
         let result = find_model_pricing_row(&conn, "gpt-5.4@low")?;
         assert!(
             result.is_some(),
-            "缺少专门 effort 价格时应回退到 gpt-5.4 基础模型定价"
+            "Missingspecific effort price is missing, should fall back to gpt-5.4 base model pricing"
         );
 
-        // Kimi Code 是订阅/额度模型，不应伪装成公开按 token 计费模型
+        // Kimi Code is a subscription/quota model, should not masquerade as publicly per-token-billed model
         let result = find_model_pricing_row(&conn, "kimi-for-coding")?;
-        assert!(result.is_none(), "kimi-for-coding 没有固定 token 单价");
+        assert!(
+            result.is_none(),
+            "kimi-for-coding has no fixed per-token pricing"
+        );
 
-        // 测试不存在的模型
+        // Test non-existent model
         let result = find_model_pricing_row(&conn, "unknown-model-123")?;
-        assert!(result.is_none(), "不应该匹配不存在的模型");
+        assert!(result.is_none(), "should not match non-existent models");
 
         Ok(())
     }

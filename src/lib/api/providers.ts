@@ -25,6 +25,150 @@ export interface OpenTerminalOptions {
   cwd?: string;
 }
 
+export interface SshHostEntry {
+  alias: string;
+  hostName?: string;
+  user?: string;
+  port?: string;
+  source?: string;
+}
+
+export type SshConnectionTarget =
+  | {
+      type: "config";
+      alias: string;
+    }
+  | {
+      type: "manual";
+      host: string;
+      user?: string;
+      port?: number;
+      password?: string;
+    };
+
+export interface RemoteApplyResult {
+  hostAlias: string;
+  app: AppId;
+  providerId: string;
+  writtenFiles: string[];
+  overwroteExistingConfig: boolean;
+  warnings: string[];
+}
+
+export interface RemoteConfigFile {
+  path: string;
+  exists: boolean;
+  bytes: number;
+}
+
+export interface RemoteProviderState {
+  hostAlias: string;
+  app: AppId;
+  provider?: Provider | null;
+  matchedProviderId?: string | null;
+  files: RemoteConfigFile[];
+  hasExistingConfig: boolean;
+  hasUnmanagedConfig: boolean;
+  overwriteWarning?: string | null;
+  warnings: string[];
+}
+
+export interface RemoteImportResult {
+  hostAlias: string;
+  app: AppId;
+  provider: Provider;
+}
+
+export interface RemoteUsageSyncResult {
+  hostAlias: string;
+  app: AppId;
+  imported: number;
+  skipped: number;
+  unchangedFiles: number;
+  filesScanned: number;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface RemoteAgentStatus {
+  hostAlias: string;
+  installed: boolean;
+  running: boolean;
+  nodeVersion?: string | null;
+  pid?: number | null;
+  status?: any | null;
+  error?: string | null;
+}
+
+export interface RemoteCodexReloadResult {
+  attempted: boolean;
+  stoppedProcesses: number;
+  reconnectTriggered: boolean;
+  error?: string | null;
+}
+
+export interface RemoteAgentDeployResult {
+  hostAlias: string;
+  installed: boolean;
+  running: boolean;
+  writtenFiles: string[];
+  status?: any | null;
+  historyPreparation: RemoteAgentHistoryMaintenanceResult;
+  codexReload: RemoteCodexReloadResult;
+}
+
+export interface RemoteAgentSwitchResult {
+  hostAlias: string;
+  providerId: string;
+  response: any;
+  historyPreparation: RemoteAgentHistoryMaintenanceResult;
+  codexReload: RemoteCodexReloadResult;
+}
+
+export interface RemoteAgentHistoryMaintenanceResult {
+  ok: boolean;
+  sourceProvider?: string;
+  targetProvider?: string;
+  targetModel?: string;
+  jsonlFiles?: number;
+  stateRows?: number;
+  backupDir?: string;
+  skipped?: string;
+}
+
+export interface RemoteAgentStopResult {
+  ok: boolean;
+  restored_backup?: boolean;
+  history_maintenance?: RemoteAgentHistoryMaintenanceResult;
+  codex_reload?: RemoteCodexReloadResult;
+}
+
+export type RemoteUsageSyncStage =
+  | "starting"
+  | "connecting"
+  | "listed"
+  | "analyzing"
+  | "analyzed"
+  | "importing"
+  | "completed"
+  | "failed";
+
+export interface RemoteUsageSyncProgressEvent {
+  syncId: string;
+  hostAlias: string;
+  app: AppId;
+  stage: RemoteUsageSyncStage;
+  currentStep: number;
+  totalSteps: number;
+  fileCount?: number;
+  payloadBytes?: number;
+  filesScanned?: number;
+  imported?: number;
+  skipped?: number;
+  unchangedFiles?: number;
+  error?: string;
+}
+
 export interface ClaudeDesktopStatus {
   supported: boolean;
   configured: boolean;
@@ -91,6 +235,86 @@ export const providersApi = {
     return await invoke("switch_provider", { id, app: appId });
   },
 
+  async getSshHosts(): Promise<SshHostEntry[]> {
+    return await invoke("get_ssh_config_hosts");
+  },
+
+  async applyToRemote(
+    id: string,
+    appId: AppId,
+    target: SshConnectionTarget,
+    forceOverwrite = false,
+  ): Promise<RemoteApplyResult> {
+    return await invoke("apply_provider_to_remote", {
+      id,
+      app: appId,
+      target,
+      forceOverwrite,
+    });
+  },
+
+  async inspectRemote(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteProviderState> {
+    return await invoke("inspect_remote_provider", { app: appId, target });
+  },
+
+  async importRemote(
+    appId: AppId,
+    target: SshConnectionTarget,
+  ): Promise<RemoteImportResult> {
+    return await invoke("import_remote_provider", { app: appId, target });
+  },
+
+  async syncRemoteUsage(
+    appId: AppId,
+    target: SshConnectionTarget,
+    syncId?: string,
+  ): Promise<RemoteUsageSyncResult> {
+    return await invoke("sync_remote_session_usage", {
+      app: appId,
+      target,
+      syncId,
+    });
+  },
+
+  async getRemoteAgentStatus(
+    target: SshConnectionTarget,
+  ): Promise<RemoteAgentStatus> {
+    return await invoke("get_remote_agent_status", { target });
+  },
+
+  async deployRemoteAgent(
+    target: SshConnectionTarget,
+    providerId: string,
+  ): Promise<RemoteAgentDeployResult> {
+    return await invoke("deploy_remote_agent", { target, providerId });
+  },
+
+  async switchRemoteAgentProvider(
+    target: SshConnectionTarget,
+    providerId: string,
+  ): Promise<RemoteAgentSwitchResult> {
+    return await invoke("switch_remote_agent_provider", {
+      target,
+      providerId,
+    });
+  },
+
+  async stopRemoteAgent(
+    target: SshConnectionTarget,
+  ): Promise<RemoteAgentStopResult> {
+    return await invoke("stop_remote_agent", { target });
+  },
+
+  async getRemoteAgentLogs(
+    target: SshConnectionTarget,
+    lines = 120,
+  ): Promise<string> {
+    return await invoke("get_remote_agent_logs", { target, lines });
+  },
+
   async importDefault(appId: AppId): Promise<boolean> {
     return await invoke("import_default_config", { app: appId });
   },
@@ -127,6 +351,15 @@ export const providersApi = {
   ): Promise<UnlistenFn> {
     return await listen("provider-switched", (event) => {
       const payload = event.payload as ProviderSwitchEvent;
+      handler(payload);
+    });
+  },
+
+  async onRemoteUsageSyncProgress(
+    handler: (event: RemoteUsageSyncProgressEvent) => void,
+  ): Promise<UnlistenFn> {
+    return await listen("remote-usage-sync-progress", (event) => {
+      const payload = event.payload as RemoteUsageSyncProgressEvent;
       handler(payload);
     });
   },

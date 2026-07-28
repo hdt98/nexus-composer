@@ -32,15 +32,14 @@ mod schema;
 mod tests;
 
 // DAO 类型导出供外部使用
+use crate::config::get_app_config_dir;
+use crate::error::AppError;
 pub(crate) use dao::providers_seed::{is_official_seed_id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
 pub(crate) use dao::proxy::{
     validate_cost_multiplier, validate_pricing_source, PRICING_SOURCE_REQUEST,
     PRICING_SOURCE_RESPONSE,
 };
 pub use dao::FailoverQueueItem;
-
-use crate::config::get_app_config_dir;
-use crate::error::AppError;
 use rusqlite::{hooks::Action, Connection};
 use serde::Serialize;
 use std::sync::Mutex;
@@ -49,7 +48,25 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 12;
+pub(crate) const SCHEMA_VERSION: i32 = 13;
+
+pub(crate) fn sql_text_is_blank(expression: &str) -> String {
+    format!(
+        "NULLIF(TRIM({expression}, CHAR(9,10,11,12,13,32,133,160,5760,\
+         8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,\
+         8232,8233,8239,8287,12288)), '') IS NULL"
+    )
+}
+
+pub(crate) fn billable_usage_sql(alias: Option<&str>) -> String {
+    let qualifier = alias.map(|value| format!("{value}.")).unwrap_or_default();
+    format!(
+        "({qualifier}input_tokens > 0
+          OR {qualifier}output_tokens > 0
+          OR {qualifier}cache_read_tokens > 0
+          OR {qualifier}cache_creation_tokens > 0)"
+    )
+}
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -159,11 +176,6 @@ impl Database {
         Ok(db)
     }
 
-    /// 读取磁盘上数据库的 `user_version`；仅当它比应用支持的 [`SCHEMA_VERSION`]
-    /// 更新时返回 `Some(version)`。
-    ///
-    /// 用于初始化失败后判断是否为「数据库版本过新（应用过旧，需升级应用）」的可恢复
-    /// 场景——此时不应反复弹出无效的重试对话框，而应引导用户在应用内升级。
     pub fn stored_user_version_exceeds_supported(
         db_path: &std::path::Path,
     ) -> Result<Option<i32>, AppError> {

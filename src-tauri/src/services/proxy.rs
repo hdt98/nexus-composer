@@ -417,9 +417,32 @@ impl ProxyService {
     }
 
     fn get_current_provider_for_app(&self, app_type: &AppType) -> Result<Option<Provider>, String> {
-        let Some(current_id) = crate::settings::get_effective_current_provider(&self.db, app_type)
-            .map_err(|e| format!("获取 {app_type:?} 当前供应商失败: {e}"))?
-        else {
+        // During takeover the database target drives request routing, so it must
+        // also drive the live profile. A crash/restart can leave the device
+        // settings pointing at the previously restored Official profile even
+        // though the database still selects a third-party provider.
+        let database_current = self
+            .db
+            .get_current_provider(app_type.as_str())
+            .map_err(|e| format!("Failed to read the {app_type:?} database provider: {e}"))?;
+        let current_id = if let Some(database_id) = database_current {
+            if crate::settings::get_current_provider(app_type).as_deref()
+                != Some(database_id.as_str())
+            {
+                log::warn!(
+                    "{app_type:?} takeover target differs from device settings; using database target {database_id} and repairing device settings"
+                );
+                crate::settings::set_current_provider(app_type, Some(&database_id)).map_err(
+                    |e| format!("Failed to repair the {app_type:?} device provider: {e}"),
+                )?;
+            }
+            Some(database_id)
+        } else {
+            crate::settings::get_effective_current_provider(&self.db, app_type)
+                .map_err(|e| format!("获取 {app_type:?} 当前供应商失败: {e}"))?
+        };
+
+        let Some(current_id) = current_id else {
             return Ok(None);
         };
 
@@ -726,6 +749,13 @@ impl ProxyService {
 
             // A healthy active takeover requires all three durable signals.
             if current_config.enabled && backup_is_usable && live_matches_current_proxy {
+                // The endpoint can already be correct while the restored Codex
+                // profile still advertises the previous GPT model. Reapply the
+                // current database target so the Desktop model label/catalog and
+                // the router agree after restart.
+                if matches!(app, AppType::Codex) {
+                    self.takeover_live_config_strict(&app).await?;
+                }
                 return Ok(());
             }
 
@@ -2305,11 +2335,24 @@ impl ProxyService {
         let live_taken_over = self.detect_takeover_in_live_config_for_app(&app_type_enum);
         let should_sync_backup = has_backup || live_taken_over;
 
-        self.db
-            .set_current_provider(app_type_enum.as_str(), provider_id)
-            .map_err(|e| format!("更新当前供应商失败: {e}"))?;
+        let previous_local_provider = crate::settings::get_current_provider(&app_type_enum);
         crate::settings::set_current_provider(&app_type_enum, Some(provider_id))
             .map_err(|e| format!("更新本地当前供应商失败: {e}"))?;
+        if let Err(error) = self
+            .db
+            .set_current_provider(app_type_enum.as_str(), provider_id)
+        {
+            let rollback = crate::settings::set_current_provider(
+                &app_type_enum,
+                previous_local_provider.as_deref(),
+            );
+            return Err(match rollback {
+                Ok(()) => format!("更新当前供应商失败: {error}"),
+                Err(rollback_error) => {
+                    format!("更新当前供应商失败: {error}; 恢复本地当前供应商失败: {rollback_error}")
+                }
+            });
+        }
 
         if should_sync_backup {
             self.update_live_backup_from_provider_inner(app_type, &provider)
@@ -4821,12 +4864,21 @@ wire_api = "responses"
             None,
         );
         provider.category = Some("official".to_string());
+        let mut stale_official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({ "config": "model = \"gpt-5.6-sol\"" }),
+            None,
+        );
+        stale_official.category = Some("official".to_string());
         db.save_provider("codex", &provider)
             .expect("save misclassified DeepSeek provider");
+        db.save_provider("codex", &stale_official)
+            .expect("save stale Official provider");
         db.set_current_provider("codex", "deepseek")
             .expect("set current provider");
-        crate::settings::set_current_provider(&AppType::Codex, Some("deepseek"))
-            .expect("set local current provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&stale_official.id))
+            .expect("seed stale Official device provider");
         db.save_live_backup(
             "codex",
             &serde_json::to_string(&json!({
@@ -4850,6 +4902,11 @@ wire_api = "responses"
             .set_takeover_for_app("codex", true)
             .await
             .expect("rebuild Codex takeover");
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex).as_deref(),
+            Some("deepseek"),
+            "takeover should repair the device provider from the database target"
+        );
 
         let live_auth: Value =
             crate::config::read_json_file(&crate::codex_config::get_codex_auth_path())
@@ -4871,11 +4928,30 @@ wire_api = "responses"
             "rebuilt takeover should keep the proxy bearer placeholder"
         );
         assert!(
+            live_config.contains("model = \"deepseek-v4-flash\""),
+            "the repaired Desktop profile should advertise the routed model"
+        );
+        assert!(
             service
                 .live_takeover_matches_current_proxy(&AppType::Codex)
                 .await
                 .expect("detect rebuilt Codex takeover"),
             "rebuilt Codex live config should match the active proxy address"
+        );
+
+        let stale_running_profile = live_config.replace("deepseek-v4-flash", "gpt-5.6-sol");
+        crate::codex_config::write_codex_live_atomic(&oauth_auth, Some(&stale_running_profile))
+            .expect("simulate a stale GPT label on a healthy takeover");
+        service
+            .set_takeover_for_app("codex", true)
+            .await
+            .expect("reconcile the healthy Codex takeover");
+        let reconciled_config =
+            std::fs::read_to_string(crate::codex_config::get_codex_config_path())
+                .expect("read reconciled Codex config");
+        assert!(
+            reconciled_config.contains("model = \"deepseek-v4-flash\""),
+            "an idempotent restore should repair a stale model label"
         );
 
         let backup = db

@@ -40,13 +40,14 @@ impl ProviderRouter {
         let mut circuit_open_count = 0usize;
 
         // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
-        let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
-            Ok(config) => config.auto_failover_enabled,
-            Err(e) => {
-                log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
-                false
-            }
-        };
+        let (auto_failover_enabled, takeover_enabled) =
+            match self.db.get_proxy_config_for_app(app_type).await {
+                Ok(config) => (config.auto_failover_enabled, config.enabled),
+                Err(e) => {
+                    log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
+                    (false, false)
+                }
+            };
 
         if auto_failover_enabled {
             // 故障转移开启：仅按队列顺序依次尝试（P1 → P2 → ...）
@@ -78,17 +79,50 @@ impl ProviderRouter {
             }
         } else {
             // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
-            let current_id = AppType::from_str(app_type)
-                .ok()
-                .and_then(|app_enum| {
-                    crate::settings::get_effective_current_provider(&self.db, &app_enum)
-                        .ok()
-                        .flatten()
-                })
-                .or_else(|| self.db.get_current_provider(app_type).ok().flatten());
+            let app_enum = AppType::from_str(app_type).ok();
+            let current_id = if takeover_enabled {
+                // During takeover the database is the proxy's routing source of
+                // truth. A failed/interrupted switch can leave the device-local
+                // setting stale; preferring it here can route Official through
+                // the proxy even though Official intentionally has no base_url.
+                let database_current = self.db.get_current_provider(app_type)?;
+                if let (Some(app_enum), Some(database_id)) =
+                    (app_enum.as_ref(), database_current.as_deref())
+                {
+                    if crate::settings::get_current_provider(app_enum).as_deref()
+                        != Some(database_id)
+                    {
+                        log::warn!(
+                            "[{app_type}] takeover current-provider mismatch; repairing device setting to database target {database_id}"
+                        );
+                        if let Err(error) =
+                            crate::settings::set_current_provider(app_enum, Some(database_id))
+                        {
+                            log::error!(
+                                "[{app_type}] failed to repair device current provider: {error}"
+                            );
+                        }
+                    }
+                }
+                database_current
+            } else {
+                app_enum
+                    .as_ref()
+                    .and_then(|app_enum| {
+                        crate::settings::get_effective_current_provider(&self.db, app_enum)
+                            .ok()
+                            .flatten()
+                    })
+                    .or_else(|| self.db.get_current_provider(app_type).ok().flatten())
+            };
 
             if let Some(current_id) = current_id {
                 if let Some(current) = self.db.get_provider_by_id(&current_id, app_type)? {
+                    if takeover_enabled && current.category.as_deref() == Some("official") {
+                        return Err(AppError::Message(format!(
+                            "Invalid {app_type} takeover target: Official providers cannot be routed through the local proxy"
+                        )));
+                    }
                     total_providers = 1;
                     result.push(current);
                 }
@@ -358,6 +392,47 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "a");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_repairs_stale_local_provider_and_routes_database_target() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let mut official = Provider::with_id(
+            "codex-official".to_string(),
+            "OpenAI Official".to_string(),
+            json!({"config": "model = \"gpt-5.5\""}),
+            None,
+        );
+        official.category = Some("official".to_string());
+        let mut glm = Provider::with_id(
+            "nexus-glm".to_string(),
+            "Nexus GLM-5.2".to_string(),
+            json!({"base_url": "https://glm.example/v1"}),
+            None,
+        );
+        glm.category = Some("third_party".to_string());
+
+        db.save_provider("codex", &official).unwrap();
+        db.save_provider("codex", &glm).unwrap();
+        db.set_current_provider("codex", &glm.id).unwrap();
+        crate::settings::set_current_provider(&AppType::Codex, Some(&official.id)).unwrap();
+
+        let mut config = db.get_proxy_config_for_app("codex").await.unwrap();
+        config.enabled = true;
+        db.update_proxy_config_for_app(config).await.unwrap();
+
+        let router = ProviderRouter::new(db);
+        let providers = router.select_providers("codex").await.unwrap();
+
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, glm.id);
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Codex),
+            Some(glm.id)
+        );
     }
 
     #[tokio::test]

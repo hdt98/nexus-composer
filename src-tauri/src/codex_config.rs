@@ -13,6 +13,7 @@ use std::process::Command;
 use toml_edit::DocumentMut;
 
 pub const CC_SWITCH_CODEX_MODEL_PROVIDER_ID: &str = "custom";
+pub const NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID: &str = CC_SWITCH_CODEX_MODEL_PROVIDER_ID;
 pub const NEXUS_CODEX_MODEL_CATALOG_FILENAME: &str = "nexus-model-catalog.json";
 const LEGACY_CODEX_MODEL_CATALOG_FILENAME: &str = "cc-switch-model-catalog.json";
 const CODEX_OFFICIAL_AUTH_SNAPSHOT_FILENAME: &str = "codex_official_auth_snapshot.json";
@@ -60,12 +61,16 @@ const CODEX_WEB_SEARCH_REJECT_MODEL_PREFIXES: &[&str] =
     &["mimo", "longcat", "minimax", "qwen3-coder"];
 
 /// Top-level `model` id from a Codex `config.toml`.
-fn codex_top_level_model(config_text: &str) -> Option<String> {
+pub(crate) fn codex_top_level_model(config_text: &str) -> Option<String> {
     let doc = config_text.parse::<toml::Value>().ok()?;
     doc.get("model")
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn default_codex_official_model() -> &'static str {
+    "gpt-5.5"
 }
 
 /// Whether a native `/responses` provider's gateway is known to reject the Codex
@@ -619,6 +624,109 @@ pub fn should_restore_codex_provider_token_for_backfill(
     !has_oauth_login || has_provider_api_key
 }
 
+fn stable_codex_model_provider_id_from_config(config_text: &str) -> Option<String> {
+    let doc = config_text.parse::<DocumentMut>().ok()?;
+    let provider_id = active_codex_model_provider_id(&doc)?;
+
+    if is_custom_codex_model_provider_id(&provider_id) {
+        Some(provider_id)
+    } else {
+        None
+    }
+}
+
+fn normalize_codex_live_config_model_provider_with_anchors<'a>(
+    config_text: &str,
+    anchor_config_texts: impl IntoIterator<Item = &'a str>,
+) -> Result<String, AppError> {
+    if config_text.trim().is_empty() {
+        return Ok(config_text.to_string());
+    }
+
+    let mut doc = config_text
+        .parse::<DocumentMut>()
+        .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
+
+    let Some(source_provider_id) = active_codex_model_provider_id(&doc) else {
+        return Ok(config_text.to_string());
+    };
+
+    let has_source_provider_table = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|table| table.get(source_provider_id.as_str()))
+        .is_some();
+    if !has_source_provider_table {
+        return Ok(config_text.to_string());
+    }
+
+    let stable_provider_id = anchor_config_texts
+        .into_iter()
+        .find_map(stable_codex_model_provider_id_from_config)
+        .or_else(|| {
+            is_custom_codex_model_provider_id(&source_provider_id)
+                .then(|| source_provider_id.clone())
+        })
+        .unwrap_or_else(|| CC_SWITCH_CODEX_MODEL_PROVIDER_ID.to_string());
+
+    if stable_provider_id == source_provider_id {
+        return Ok(config_text.to_string());
+    }
+
+    if let Some(model_providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        let Some(provider_table) = model_providers.remove(source_provider_id.as_str()) else {
+            return Ok(config_text.to_string());
+        };
+        model_providers[stable_provider_id.as_str()] = provider_table;
+    }
+
+    rewrite_codex_profile_model_provider_refs(&mut doc, &source_provider_id, &stable_provider_id);
+    doc["model_provider"] = toml_edit::value(stable_provider_id.as_str());
+
+    Ok(doc.to_string())
+}
+
+pub fn normalize_codex_config_text_with_anchor(
+    config_text: &str,
+    anchor_config_text: Option<&str>,
+) -> Result<String, AppError> {
+    normalize_codex_live_config_model_provider_with_anchors(config_text, anchor_config_text)
+}
+
+fn rewrite_codex_profile_model_provider_refs(
+    doc: &mut DocumentMut,
+    source_provider_id: &str,
+    stable_provider_id: &str,
+) {
+    let Some(profiles) = doc
+        .get_mut("profiles")
+        .and_then(|item| item.as_table_like_mut())
+    else {
+        return;
+    };
+
+    let profile_keys: Vec<String> = profiles.iter().map(|(key, _)| key.to_string()).collect();
+    for profile_key in profile_keys {
+        let Some(profile_table) = profiles
+            .get_mut(&profile_key)
+            .and_then(|item| item.as_table_like_mut())
+        else {
+            continue;
+        };
+
+        let references_source = profile_table
+            .get("model_provider")
+            .and_then(|item| item.as_str())
+            == Some(source_provider_id);
+        if references_source {
+            profile_table.insert("model_provider", toml_edit::value(stable_provider_id));
+        }
+    }
+}
+
 fn parse_codex_positive_u64(value: Option<&Value>) -> Option<u64> {
     match value {
         Some(Value::Number(n)) => n.as_u64().filter(|v| *v > 0),
@@ -1090,7 +1198,7 @@ fn codex_model_catalog_from_specs(
     json!({ "models": entries })
 }
 
-fn codex_model_catalog_from_settings(
+pub(crate) fn codex_model_catalog_from_settings(
     settings: &Value,
     config_text: &str,
     profile: CodexCatalogToolProfile,
@@ -1660,7 +1768,7 @@ fn table_matches_codex_unified_official_provider(table: &toml_edit::Table) -> bo
 /// 使开关开启后创建的官方会话与第三方会话共用同一个 resume 历史桶。
 ///
 /// 两种情况拒绝注入、原样返回：
-/// - 配置已有显式 `model_provider`：用户手工指定的路由不被覆盖；
+/// - 配置已有非内建 `openai` 的显式 `model_provider`：用户手工指定的路由不被覆盖；
 /// - 配置已有形态不同的 `[model_providers.custom]` 表：设置 `model_provider`
 ///   会激活这张我们不认识的表（可能带第三方 base_url/token，会把 ChatGPT
 ///   OAuth 流量路由到错误后端），宁可让开关对该配置不生效。
@@ -1669,8 +1777,14 @@ pub fn inject_codex_unified_session_bucket(config_text: &str) -> Result<String, 
         .parse::<DocumentMut>()
         .map_err(|e| AppError::Message(format!("Invalid Codex config.toml: {e}")))?;
 
-    if doc.get("model_provider").is_some() {
-        return Ok(config_text.to_string());
+    if let Some(explicit_provider) = doc.get("model_provider") {
+        if explicit_provider.as_str() != Some("openai") {
+            return Ok(config_text.to_string());
+        }
+        // `openai` is Codex's built-in official route. Replacing this explicit
+        // spelling is safe and is required for official and third-party
+        // sessions to land in the same `custom` history bucket.
+        doc.as_table_mut().remove("model_provider");
     }
 
     let existing_custom_conflicts = doc
@@ -2328,7 +2442,20 @@ mod tests {
         assert!(injected.contains("model_catalog_json"));
         assert!(injected.contains("model_provider = \"custom\""));
 
-        // 用户显式指定过 model_provider 的官方配置不被覆盖
+        let explicit_builtin = "model_provider = \"openai\"\nmodel = \"gpt-5.5\"\n";
+        let unified =
+            inject_codex_unified_session_bucket(explicit_builtin).expect("inject built-in");
+        let unified_doc: toml::Table = toml::from_str(&unified).expect("parse unified config");
+        assert_eq!(
+            unified_doc.get("model_provider").and_then(|v| v.as_str()),
+            Some(NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID)
+        );
+        assert_eq!(
+            unified_doc.get("model").and_then(|v| v.as_str()),
+            Some("gpt-5.5")
+        );
+
+        // Other explicit routes remain user-owned and must not be overwritten.
         let explicit = "model_provider = \"openai_https\"\n";
         let unchanged = inject_codex_unified_session_bucket(explicit).expect("inject");
         assert_eq!(unchanged, explicit);

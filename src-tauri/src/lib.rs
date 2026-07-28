@@ -410,6 +410,7 @@ pub fn run() {
             // 检查是否需要从 config.json 迁移到 SQLite
             let has_json = json_path.exists();
             let has_db = db_path.exists();
+            let had_nexus_state_at_startup = has_db || has_json;
 
             // 如果需要迁移，先验证 config.json 是否可以加载（在创建数据库之前）
             // 这样如果加载失败用户选择退出，数据库文件还没被创建，下次可以正常重试
@@ -676,9 +677,14 @@ pub fn run() {
             {
                 let db_for_codex_history_migration = app_state.db.clone();
                 tauri::async_runtime::spawn_blocking(move || {
-                    match crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
-                        &db_for_codex_history_migration,
-                    ) {
+                    let history_migration = if had_nexus_state_at_startup {
+                        crate::codex_history_migration::maybe_migrate_codex_third_party_history_provider_bucket(
+                            &db_for_codex_history_migration,
+                        )
+                    } else {
+                        crate::codex_history_migration::preserve_codex_history_for_fresh_install()
+                    };
+                    match history_migration {
                         Ok(outcome) => {
                             if let Some(reason) = outcome.skipped_reason {
                                 log::debug!("○ Codex history provider bucket migration skipped: {reason}");
@@ -1281,6 +1287,16 @@ pub fn run() {
             commands::delete_provider,
             commands::remove_provider_from_live_config,
             commands::switch_provider,
+            commands::get_ssh_config_hosts,
+            commands::apply_provider_to_remote,
+            commands::inspect_remote_provider,
+            commands::import_remote_provider,
+            commands::sync_remote_session_usage,
+            commands::get_remote_agent_status,
+            commands::deploy_remote_agent,
+            commands::switch_remote_agent_provider,
+            commands::stop_remote_agent,
+            commands::get_remote_agent_logs,
             commands::import_default_config,
             commands::get_claude_desktop_status,
             commands::get_claude_desktop_default_routes,
@@ -1484,6 +1500,7 @@ pub fn run() {
             // Session usage sync
             commands::sync_session_usage,
             commands::get_usage_data_sources,
+            commands::delete_remote_usage_data,
             // Stream health check
             commands::stream_check_provider,
             commands::stream_check_all_providers,

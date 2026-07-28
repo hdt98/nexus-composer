@@ -9,31 +9,25 @@ import {
 } from "@/components/ui/table";
 import { useModelStats } from "@/lib/query/usage";
 import { fmtUsd } from "./format";
-import type { UsageRangeSelection } from "@/types/usage";
+import type { UsageRangeSelection, UsageSourceFilter } from "@/types/usage";
 
 interface ModelStatsTableProps {
   range: UsageRangeSelection;
   appType?: string;
-  providerName?: string;
-  model?: string;
+  source?: UsageSourceFilter;
   refreshIntervalMs: number;
 }
 
 export function ModelStatsTable({
   range,
   appType,
-  providerName,
-  model,
+  source,
   refreshIntervalMs,
 }: ModelStatsTableProps) {
   const { t } = useTranslation();
-  const { data: stats, isLoading } = useModelStats(
-    range,
-    { appType, providerName, model },
-    {
-      refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
-    },
-  );
+  const { data: stats, isLoading } = useModelStats(range, appType, source, {
+    refetchInterval: refreshIntervalMs > 0 ? refreshIntervalMs : false,
+  });
 
   if (isLoading) {
     return <div className="h-[400px] animate-pulse rounded bg-gray-100" />;

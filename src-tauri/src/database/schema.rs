@@ -184,7 +184,7 @@ impl Database {
         // pricing_model = 写入时实际用于计价的模型名（pricing_model_source 解析结果），
         // 回填按它重算；NULL 表示 v11 之前的历史行，'' 表示未计价的错误行。
         conn.execute("CREATE TABLE IF NOT EXISTS proxy_request_logs (
-            request_id TEXT PRIMARY KEY, correlation_id TEXT, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
+            request_id TEXT PRIMARY KEY, correlation_id TEXT, message_id TEXT, provider_id TEXT NOT NULL, app_type TEXT NOT NULL, model TEXT NOT NULL,
             request_model TEXT,
             pricing_model TEXT,
             input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -266,6 +266,7 @@ impl Database {
                 date TEXT NOT NULL,
                 app_type TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
+                data_source TEXT NOT NULL DEFAULT 'proxy',
                 model TEXT NOT NULL,
                 request_model TEXT NOT NULL DEFAULT '',
                 pricing_model TEXT NOT NULL DEFAULT '',
@@ -277,7 +278,7 @@ impl Database {
                 cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+                PRIMARY KEY (date, app_type, provider_id, data_source, model, request_model, pricing_model)
             )",
             [],
         )
@@ -469,6 +470,11 @@ impl Database {
                         Self::migrate_v11_to_v12(conn)?;
                         Self::set_user_version(conn, 12)?;
                     }
+                    12 => {
+                        log::info!("迁移数据库从 v12 到 v13（SSH 远程使用量来源）");
+                        Self::migrate_v12_to_v13(conn)?;
+                        Self::set_user_version(conn, 13)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -480,6 +486,9 @@ impl Database {
             // Repair prerelease v12 databases that used the same version number
             // before the correlation column was added.
             Self::migrate_v11_to_v12(conn)?;
+            // Also repair prerelease v13 databases that were created before the
+            // message correlation and complete rollup dimensions were finalized.
+            Self::migrate_v12_to_v13(conn)?;
             Ok(())
         })();
 
@@ -1302,6 +1311,101 @@ impl Database {
         if Self::table_exists(conn, "proxy_request_logs")? {
             Self::add_column_if_missing(conn, "proxy_request_logs", "correlation_id", "TEXT")?;
         }
+        Ok(())
+    }
+
+    fn migrate_v12_to_v13(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(conn, "proxy_request_logs", "message_id", "TEXT")?;
+        }
+        Self::ensure_remote_source_rollup_schema(conn)
+    }
+
+    fn ensure_remote_source_rollup_schema(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "usage_daily_rollups")? {
+            return Ok(());
+        }
+
+        let has_data_source = Self::has_column(conn, "usage_daily_rollups", "data_source")?;
+        let has_request_model = Self::has_column(conn, "usage_daily_rollups", "request_model")?;
+        let has_pricing_model = Self::has_column(conn, "usage_daily_rollups", "pricing_model")?;
+        if has_data_source && has_request_model && has_pricing_model {
+            return Ok(());
+        }
+
+        conn.execute("DROP TABLE IF EXISTS usage_daily_rollups_v13", [])
+            .map_err(|e| AppError::Database(format!("清理 v13 聚合迁移临时表失败: {e}")))?;
+        conn.execute(
+            "CREATE TABLE usage_daily_rollups_v13 (
+                date TEXT NOT NULL,
+                app_type TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                data_source TEXT NOT NULL DEFAULT 'proxy',
+                model TEXT NOT NULL,
+                request_model TEXT NOT NULL DEFAULT '',
+                pricing_model TEXT NOT NULL DEFAULT '',
+                request_count INTEGER NOT NULL DEFAULT 0,
+                success_count INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+                total_cost_usd TEXT NOT NULL DEFAULT '0',
+                avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (
+                    date, app_type, provider_id, data_source, model,
+                    request_model, pricing_model
+                )
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 v13 聚合迁移临时表失败: {e}")))?;
+
+        let data_source = if has_data_source {
+            "COALESCE(data_source, 'proxy')"
+        } else {
+            "'proxy'"
+        };
+        let request_model = if has_request_model {
+            "COALESCE(request_model, '')"
+        } else {
+            "''"
+        };
+        let pricing_model = if has_pricing_model {
+            "COALESCE(pricing_model, '')"
+        } else {
+            "''"
+        };
+        let copy_sql = format!(
+            "INSERT INTO usage_daily_rollups_v13 (
+                date, app_type, provider_id, data_source, model,
+                request_model, pricing_model,
+                request_count, success_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens, total_cost_usd, avg_latency_ms
+             )
+             SELECT
+                date, app_type, provider_id, {data_source}, model,
+                {request_model}, {pricing_model},
+                SUM(request_count), SUM(success_count), SUM(input_tokens), SUM(output_tokens),
+                SUM(cache_read_tokens), SUM(cache_creation_tokens),
+                CAST(SUM(CAST(total_cost_usd AS REAL)) AS TEXT),
+                CASE WHEN SUM(request_count) > 0
+                    THEN SUM(avg_latency_ms * request_count) / SUM(request_count)
+                    ELSE 0
+                END
+             FROM usage_daily_rollups
+             GROUP BY date, app_type, provider_id, {data_source}, model,
+                      {request_model}, {pricing_model}"
+        );
+        conn.execute(&copy_sql, [])
+            .map_err(|e| AppError::Database(format!("复制 v13 聚合数据失败: {e}")))?;
+        conn.execute("DROP TABLE usage_daily_rollups", [])
+            .map_err(|e| AppError::Database(format!("删除旧聚合表失败: {e}")))?;
+        conn.execute(
+            "ALTER TABLE usage_daily_rollups_v13 RENAME TO usage_daily_rollups",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("重命名 v13 聚合表失败: {e}")))?;
         Ok(())
     }
 

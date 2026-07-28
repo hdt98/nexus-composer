@@ -293,6 +293,14 @@ fn schema_create_tables_include_pricing_model_columns() {
     let correlation_id = get_column_info(&conn, "proxy_request_logs", "correlation_id");
     assert_eq!(correlation_id.r#type, "TEXT");
     assert_eq!(correlation_id.notnull, 0);
+
+    let message_id = get_column_info(&conn, "proxy_request_logs", "message_id");
+    assert_eq!(message_id.r#type, "TEXT");
+    assert_eq!(message_id.notnull, 0);
+
+    let data_source = get_column_info(&conn, "usage_daily_rollups", "data_source");
+    assert_eq!(data_source.r#type, "TEXT");
+    assert_eq!(data_source.notnull, 1);
 }
 
 #[test]
@@ -359,6 +367,78 @@ fn prerelease_v12_without_correlation_column_is_repaired() {
             .expect("read preserved rows"),
         1
     );
+}
+
+#[test]
+fn migration_v12_to_v13_adds_remote_source_without_losing_rollup_dimensions() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            correlation_id TEXT,
+            model TEXT NOT NULL
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_model TEXT NOT NULL DEFAULT '',
+            pricing_model TEXT NOT NULL DEFAULT '',
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model, request_model, pricing_model)
+        );
+        INSERT INTO usage_daily_rollups (
+            date, app_type, provider_id, model, request_model, pricing_model,
+            request_count, success_count, input_tokens, output_tokens,
+            total_cost_usd, avg_latency_ms
+        ) VALUES
+            ('2026-07-23', 'codex', 'nexus', 'glm-5.2', 'alias-a', 'glm-5.2',
+             2, 2, 100, 20, '0.10', 100),
+            ('2026-07-23', 'codex', 'nexus', 'glm-5.2', 'alias-b', 'glm-5.2',
+             3, 2, 200, 30, '0.20', 200);
+        PRAGMA user_version = 12;
+        "#,
+    )
+    .expect("seed v12 usage schema");
+
+    Database::apply_schema_migrations_on_conn(&conn).expect("migrate v12 to v13");
+
+    assert_eq!(
+        Database::get_user_version(&conn).expect("read migrated version"),
+        SCHEMA_VERSION
+    );
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "message_id")
+            .expect("check message correlation")
+    );
+    assert!(
+        Database::has_column(&conn, "usage_daily_rollups", "data_source")
+            .expect("check remote source")
+    );
+
+    let migrated: (i64, i64, i64, f64) = conn
+        .query_row(
+            "SELECT COUNT(*), SUM(request_count), SUM(input_tokens),
+                    SUM(CAST(total_cost_usd AS REAL))
+             FROM usage_daily_rollups
+             WHERE data_source = 'proxy'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .expect("read migrated rollups");
+    assert_eq!(migrated.0, 2);
+    assert_eq!(migrated.1, 5);
+    assert_eq!(migrated.2, 300);
+    assert!((migrated.3 - 0.3).abs() < f64::EPSILON);
 }
 
 #[test]
