@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use crate::services::skill::SkillStore;
 
-/// MCP 服务器应用状态（标记应用到哪些客户端）
+/// MCP server app state tracking which clients use a server
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct McpApps {
     #[serde(default)]
@@ -20,7 +20,7 @@ pub struct McpApps {
 }
 
 impl McpApps {
-    /// 检查指定应用是否启用
+    /// Check whether the given app is enabled
     pub fn is_enabled_for(&self, app: &AppType) -> bool {
         match app {
             AppType::Claude => self.claude,
@@ -33,7 +33,7 @@ impl McpApps {
         }
     }
 
-    /// 设置指定应用的启用状态
+    /// Set the enabled state for the given app
     pub fn set_enabled_for(&mut self, app: &AppType, enabled: bool) {
         match app {
             AppType::Claude => self.claude = enabled,
@@ -46,7 +46,7 @@ impl McpApps {
         }
     }
 
-    /// 获取所有启用的应用列表
+    /// Return all enabled apps
     pub fn enabled_apps(&self) -> Vec<AppType> {
         let mut apps = Vec::new();
         if self.claude {
@@ -67,13 +67,13 @@ impl McpApps {
         apps
     }
 
-    /// 检查是否所有应用都未启用
+    /// Check whether all apps are disabled
     pub fn is_empty(&self) -> bool {
         !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
     }
 }
 
-/// Skill 应用启用状态（标记 Skill 应用到哪些客户端）
+/// Skill app state tracking which clients use a skill
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct SkillApps {
     #[serde(default)]
@@ -89,7 +89,7 @@ pub struct SkillApps {
 }
 
 impl SkillApps {
-    /// 检查指定应用是否启用
+    /// Check whether the given app is enabled
     pub fn is_enabled_for(&self, app: &AppType) -> bool {
         match app {
             AppType::Claude => self.claude,
@@ -102,7 +102,7 @@ impl SkillApps {
         }
     }
 
-    /// 设置指定应用的启用状态
+    /// Set the enabled state for the given app
     pub fn set_enabled_for(&mut self, app: &AppType, enabled: bool) {
         match app {
             AppType::Claude => self.claude = enabled,
@@ -115,7 +115,7 @@ impl SkillApps {
         }
     }
 
-    /// 获取所有启用的应用列表
+    /// Return all enabled apps
     pub fn enabled_apps(&self) -> Vec<AppType> {
         let mut apps = Vec::new();
         if self.claude {
@@ -136,22 +136,22 @@ impl SkillApps {
         apps
     }
 
-    /// 检查是否所有应用都未启用
+    /// Check whether all apps are disabled
     pub fn is_empty(&self) -> bool {
         !self.claude && !self.codex && !self.gemini && !self.opencode && !self.hermes
     }
 
-    /// 仅启用指定应用（其他应用设为禁用）
+    /// Enable only the given app and disable the rest
     pub fn only(app: &AppType) -> Self {
         let mut apps = Self::default();
         apps.set_enabled_for(app, true);
         apps
     }
 
-    /// 从来源标签列表构建启用状态
+    /// Build enabled state from source labels
     ///
-    /// 标签与 AppType::as_str() 一致时启用对应应用，
-    /// 其他标签（如 "agents", "nexus-composer"）忽略。
+    /// Enable the matching app when a label equals AppType::as_str().
+    /// Ignore other labels such as "agents" or "nexus-composer".
     pub fn from_labels(labels: &[String]) -> Self {
         let mut apps = Self::default();
         for label in labels {
@@ -163,61 +163,61 @@ impl SkillApps {
     }
 }
 
-/// 已安装的 Skill（v3.10.0+ 统一结构）
+/// Installed skill using the unified v3.10.0+ shape
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstalledSkill {
-    /// 唯一标识符（格式："owner/repo:directory" 或 "local:directory"）
+    /// Unique identifier in "owner/repo:directory" or "local:directory" format
     pub id: String,
-    /// 显示名称
+    /// Display name
     pub name: String,
-    /// 描述
+    /// Description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// 安装目录名（在 SSOT 目录中的子目录名）
+    /// Installed directory name under the SSOT root
     pub directory: String,
-    /// 仓库所有者（GitHub 用户/组织）
+    /// Repository owner such as a GitHub user or organization
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_owner: Option<String>,
-    /// 仓库名称
+    /// Repository name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_name: Option<String>,
-    /// 仓库分支
+    /// Repository branch
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repo_branch: Option<String>,
     /// README URL
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readme_url: Option<String>,
-    /// 应用启用状态
+    /// Per-app enabled state
     pub apps: SkillApps,
-    /// 安装时间（Unix 时间戳）
+    /// Install time as a Unix timestamp
     pub installed_at: i64,
-    /// 内容哈希（SHA-256，用于更新检测）
+    /// Content hash using SHA-256 for update detection
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-    /// 最近更新时间（Unix 时间戳，0 = 从未更新）
+    /// Last update time as a Unix timestamp. 0 means never updated
     #[serde(default)]
     pub updated_at: i64,
 }
 
-/// 未管理的 Skill（在应用目录中发现但未被 Nexus Composer 管理）
+/// Unmanaged skill found in app directories but not managed by Nexus Composer
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UnmanagedSkill {
-    /// 目录名
+    /// Directory name
     pub directory: String,
-    /// 显示名称（从 SKILL.md 解析）
+    /// Display name parsed from SKILL.md
     pub name: String,
-    /// 描述
+    /// Description
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// 在哪些应用目录中发现（如 ["claude", "codex"]）
+    /// App directories where this was found, for example ["claude", "codex"]
     pub found_in: Vec<String>,
-    /// 发现路径（首个匹配的完整路径）
+    /// Resolved path for the first matching entry
     pub path: String,
 }
 
-/// MCP 服务器定义（v3.7.0 统一结构）
+/// MCP server definition using the unified v3.7.0 shape
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServer {
     pub id: String,
@@ -234,29 +234,29 @@ pub struct McpServer {
     pub tags: Vec<String>,
 }
 
-/// MCP 配置：单客户端维度（v3.6.x 及以前，保留用于向后兼容）
+/// MCP config for a single client, retained for v3.6.x and earlier compatibility
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct McpConfig {
-    /// 以 id 为键的服务器定义（宽松 JSON 对象，包含 enabled/source 等 UI 辅助字段）
+    /// Server definitions keyed by id. Values are loose JSON objects with UI helper fields such as enabled and source
     #[serde(default)]
     pub servers: HashMap<String, serde_json::Value>,
 }
 
 impl McpConfig {
-    /// 检查配置是否为空
+    /// Check whether the config is empty
     pub fn is_empty(&self) -> bool {
         self.servers.is_empty()
     }
 }
 
-/// MCP 根配置（v3.7.0 新旧结构并存）
+/// MCP root config where legacy and unified shapes can coexist
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpRoot {
-    /// 统一的 MCP 服务器存储（v3.7.0+）
+    /// Unified MCP server storage for v3.7.0+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub servers: Option<HashMap<String, McpServer>>,
 
-    /// 旧的分应用存储（v3.6.x 及以前，保留用于迁移）
+    /// Legacy per-app storage for v3.6.x and earlier, retained for migration
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub claude: McpConfig,
     #[serde(
@@ -271,13 +271,13 @@ pub struct McpRoot {
     pub codex: McpConfig,
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub gemini: McpConfig,
-    /// OpenCode MCP 配置（v4.0.0+，实际使用 opencode.json）
+    /// OpenCode MCP config using opencode.json in practice
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub opencode: McpConfig,
-    /// OpenClaw MCP 配置（v4.1.0+，实际使用 openclaw.json）
+    /// OpenClaw MCP config using openclaw.json in practice
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub openclaw: McpConfig,
-    /// Hermes MCP 配置（实际使用 config.yaml）
+    /// Hermes MCP config using config.yaml in practice
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub hermes: McpConfig,
 }
@@ -285,9 +285,9 @@ pub struct McpRoot {
 impl Default for McpRoot {
     fn default() -> Self {
         Self {
-            // v3.7.0+ 默认使用新的统一结构（空 HashMap）
+            // v3.7.0+ defaults to the new unified shape with an empty HashMap.
             servers: Some(HashMap::new()),
-            // 旧结构保持空，仅用于反序列化旧配置时的迁移
+            // Keep the legacy shape empty and only use it while deserializing old configs for migration.
             claude: McpConfig::default(),
             claude_desktop: McpConfig::default(),
             codex: McpConfig::default(),
@@ -299,14 +299,14 @@ impl Default for McpRoot {
     }
 }
 
-/// Prompt 配置：单客户端维度
+/// Prompt config for a single client
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PromptConfig {
     #[serde(default)]
     pub prompts: HashMap<String, crate::prompt::Prompt>,
 }
 
-/// Prompt 根：按客户端分开维护
+/// Prompt root config stored separately per client
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PromptRoot {
     #[serde(default)]
@@ -335,7 +335,7 @@ use crate::error::AppError;
 use crate::prompt_files::prompt_file_path;
 use crate::provider::ProviderManager;
 
-/// 应用类型
+/// App type
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
@@ -407,14 +407,14 @@ impl FromStr for AppType {
             "hermes" => Ok(AppType::Hermes),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, claude-desktop, codex, gemini, opencode, openclaw, hermes。"),
+                format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, gemini, opencode, openclaw, hermes."),
                 format!("Unsupported app id: '{other}'. Allowed: claude, claude-desktop, codex, gemini, opencode, openclaw, hermes."),
             )),
         }
     }
 }
 
-/// 通用配置片段（按应用分治）
+/// Shared config snippets stored per app
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CommonConfigSnippets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -437,7 +437,7 @@ pub struct CommonConfigSnippets {
 }
 
 impl CommonConfigSnippets {
-    /// 获取指定应用的通用配置片段
+    /// Get the shared config snippet for the given app
     pub fn get(&self, app: &AppType) -> Option<&String> {
         match app {
             AppType::Claude => self.claude.as_ref(),
@@ -450,7 +450,7 @@ impl CommonConfigSnippets {
         }
     }
 
-    /// 设置指定应用的通用配置片段
+    /// Set the shared config snippet for the given app
     pub fn set(&mut self, app: &AppType, snippet: Option<String>) {
         match app {
             AppType::Claude => self.claude = snippet,
@@ -464,27 +464,27 @@ impl CommonConfigSnippets {
     }
 }
 
-/// 多应用配置结构（向后兼容）
+/// Multi-app config shape kept for backward compatibility
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MultiAppConfig {
     #[serde(default = "default_version")]
     pub version: u32,
-    /// 应用管理器（claude/codex）
+    /// App managers keyed by app id
     #[serde(flatten)]
     pub apps: HashMap<String, ProviderManager>,
-    /// MCP 配置（按客户端分治）
+    /// MCP config stored per client
     #[serde(default)]
     pub mcp: McpRoot,
-    /// Prompt 配置（按客户端分治）
+    /// Prompt config stored per client
     #[serde(default)]
     pub prompts: PromptRoot,
-    /// Claude Skills 配置
+    /// Claude Skills config
     #[serde(default)]
     pub skills: SkillStore,
-    /// 通用配置片段（按应用分治）
+    /// Shared config snippets stored per app
     #[serde(default)]
     pub common_config_snippets: CommonConfigSnippets,
-    /// Claude 通用配置片段（旧字段，用于向后兼容迁移）
+    /// Legacy Claude shared config snippet field retained for backward-compatible migration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_common_config_snippet: Option<String>,
 }
@@ -517,38 +517,38 @@ impl Default for MultiAppConfig {
 }
 
 impl MultiAppConfig {
-    /// 从文件加载配置（仅支持 v2 结构）
+    /// Load config from disk. Only the v2 shape is supported
     pub fn load() -> Result<Self, AppError> {
         let config_path = get_app_config_path();
 
         if !config_path.exists() {
-            log::info!("配置文件不存在，创建新的多应用配置并自动导入提示词");
-            // 使用新的方法，支持自动导入提示词
+            log::info!("Config file is missing. Creating a new multi-app config and auto-importing prompts");
+            // Use the new path so prompt auto-import is supported.
             let config = Self::default_with_auto_import()?;
-            // 立即保存到磁盘
+            // Persist it immediately.
             config.save()?;
             return Ok(config);
         }
 
-        // 尝试读取文件
+        // Try to read the file.
         let content =
             std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
 
-        // 先解析为 Value，以便严格判定是否为 v1 结构；
-        // 满足：顶层同时包含 providers(object) + current(string)，且不包含 version/apps/mcp 关键键，即视为 v1
+        // Parse as Value first so we can detect the v1 shape strictly.
+        // Treat it as v1 when the top level has providers(object) and current(string) and does not include apps.
         let value: serde_json::Value =
             serde_json::from_str(&content).map_err(|e| AppError::json(&config_path, e))?;
         let is_v1 = value.as_object().is_some_and(|map| {
             let has_providers = map.get("providers").map(|v| v.is_object()).unwrap_or(false);
             let has_current = map.get("current").map(|v| v.is_string()).unwrap_or(false);
-            // v1 的充分必要条件：有 providers 和 current，且 apps 不存在（version/mcp 可能存在但不作为 v2 判据）
+            // The v1 condition is providers plus current, with no apps key. version or mcp do not make it v2.
             let has_apps = map.contains_key("apps");
             has_providers && has_current && !has_apps
         });
         if is_v1 {
             return Err(AppError::localized(
                 "config.unsupported_v1",
-                "检测到旧版 v1 配置格式。当前版本已不再支持运行时自动迁移。\n\n解决方案：\n1. 安装 v3.2.x 版本进行一次性自动迁移\n2. 或手动编辑 ~/.nexus-composer/config.json，将顶层结构调整为：\n   {\"version\": 2, \"claude\": {...}, \"codex\": {...}, \"mcp\": {...}}\n\n",
+                "Detected legacy v1 config. Runtime auto-migration is no longer supported.\n\nSolutions:\n1. Install v3.2.x for one-time auto-migration\n2. Or manually edit ~/.nexus-composer/config.json to adjust the top-level structure:\n   {\"version\": 2, \"claude\": {...}, \"codex\": {...}, \"mcp\": {...}}\n\n",
                 "Detected legacy v1 config. Runtime auto-migration is no longer supported.\n\nSolutions:\n1. Install v3.2.x for one-time auto-migration\n2. Or manually edit ~/.nexus-composer/config.json to adjust the top-level structure:\n   {\"version\": 2, \"claude\": {...}, \"codex\": {...}, \"mcp\": {...}}\n\n",
             ));
         }
@@ -557,7 +557,7 @@ impl MultiAppConfig {
             .as_object()
             .is_some_and(|map| map.contains_key("skills"));
 
-        // 解析 v2 结构
+        // Parse the v2 shape.
         let mut config: Self =
             serde_json::from_value(value).map_err(|e| AppError::json(&config_path, e))?;
         let mut updated = false;
@@ -570,20 +570,20 @@ impl MultiAppConfig {
                         Ok(store) => {
                             config.skills = store;
                             updated = true;
-                            log::info!("已从旧版 skills.json 导入 Claude Skills 配置");
+                            log::info!("Imported Claude Skills config from legacy skills.json");
                         }
                         Err(e) => {
-                            log::warn!("解析旧版 skills.json 失败: {e}");
+                            log::warn!("Failed to parse legacy skills.json: {e}");
                         }
                     },
                     Err(e) => {
-                        log::warn!("读取旧版 skills.json 失败: {e}");
+                        log::warn!("Failed to read legacy skills.json: {e}");
                     }
                 }
             }
         }
 
-        // 确保 gemini 应用存在（兼容旧配置文件）
+        // Ensure the gemini app exists for older config files.
         if !config.apps.contains_key("gemini") {
             config
                 .apps
@@ -591,45 +591,47 @@ impl MultiAppConfig {
             updated = true;
         }
 
-        // 执行 MCP 迁移（v3.6.x → v3.7.0）
+        // Run the MCP migration from v3.6.x to v3.7.0.
         let migrated = config.migrate_mcp_to_unified()?;
         if migrated {
-            log::info!("MCP 配置已迁移到 v3.7.0 统一结构，保存配置...");
+            log::info!("Migrated MCP config to the unified v3.7.0 shape. Saving config");
             updated = true;
         }
 
-        // 对于已经存在的配置文件，如果此前版本还没有 Prompt 功能，
-        // 且 prompts 仍然是空的，则尝试自动导入现有提示词文件。
+        // For existing config files, if the older version had no Prompt feature
+        // and prompts are still empty, try to auto-import existing prompt files.
         let imported_prompts = config.maybe_auto_import_prompts_for_existing_config()?;
         if imported_prompts {
             updated = true;
         }
 
-        // 迁移通用配置片段：claude_common_config_snippet → common_config_snippets.claude
+        // Migrate the shared config snippet field to common_config_snippets.claude.
         if let Some(old_claude_snippet) = config.claude_common_config_snippet.take() {
             log::info!(
-                "迁移通用配置：claude_common_config_snippet → common_config_snippets.claude"
+                "Migrating shared config: claude_common_config_snippet -> common_config_snippets.claude"
             );
             config.common_config_snippets.claude = Some(old_claude_snippet);
             updated = true;
         }
 
         if updated {
-            log::info!("配置结构已更新（包括 MCP 迁移或 Prompt 自动导入），保存配置...");
+            log::info!(
+                "Config shape changed due to MCP migration or prompt auto-import. Saving config"
+            );
             config.save()?;
         }
 
         Ok(config)
     }
 
-    /// 保存配置到文件
+    /// Save config to disk
     pub fn save(&self) -> Result<(), AppError> {
         let config_path = get_app_config_path();
-        // 先备份旧版（若存在）到 ~/.nexus-composer/config.json.bak，再写入新内容
+        // Back up the existing file to ~/.nexus-composer/config.json.bak before writing new content.
         if config_path.exists() {
             let backup_path = get_app_config_dir().join("config.json.bak");
             if let Err(e) = copy_file(&config_path, &backup_path) {
-                log::warn!("备份 config.json 到 .bak 失败: {e}");
+                log::warn!("Failed to back up config.json to .bak: {e}");
             }
         }
 
@@ -637,17 +639,17 @@ impl MultiAppConfig {
         Ok(())
     }
 
-    /// 获取指定应用的管理器
+    /// Get the manager for the given app
     pub fn get_manager(&self, app: &AppType) -> Option<&ProviderManager> {
         self.apps.get(app.as_str())
     }
 
-    /// 获取指定应用的管理器（可变引用）
+    /// Get the mutable manager for the given app
     pub fn get_manager_mut(&mut self, app: &AppType) -> Option<&mut ProviderManager> {
         self.apps.get_mut(app.as_str())
     }
 
-    /// 确保应用存在
+    /// Ensure the app entry exists
     pub fn ensure_app(&mut self, app: &AppType) {
         if !self.apps.contains_key(app.as_str()) {
             self.apps
@@ -655,7 +657,7 @@ impl MultiAppConfig {
         }
     }
 
-    /// 获取指定客户端的 MCP 配置（不可变引用）
+    /// Get the MCP config for the given client
     pub fn mcp_for(&self, app: &AppType) -> &McpConfig {
         match app {
             AppType::Claude => &self.mcp.claude,
@@ -668,7 +670,7 @@ impl MultiAppConfig {
         }
     }
 
-    /// 获取指定客户端的 MCP 配置（可变引用）
+    /// Get the mutable MCP config for the given client
     pub fn mcp_for_mut(&mut self, app: &AppType) -> &mut McpConfig {
         match app {
             AppType::Claude => &mut self.mcp.claude,
@@ -681,13 +683,13 @@ impl MultiAppConfig {
         }
     }
 
-    /// 创建默认配置并自动导入已存在的提示词文件
+    /// Create the default config and auto-import existing prompt files
     fn default_with_auto_import() -> Result<Self, AppError> {
-        log::info!("首次启动，创建默认配置并检测提示词文件");
+        log::info!("First launch detected. Creating default config and checking for prompt files");
 
         let mut config = Self::default();
 
-        // 为每个应用尝试自动导入提示词
+        // Try to auto-import prompts for each app.
         Self::auto_import_prompt_if_exists(&mut config, AppType::Claude)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::Codex)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::Gemini)?;
@@ -698,18 +700,19 @@ impl MultiAppConfig {
         Ok(config)
     }
 
-    /// 已存在配置文件时的 Prompt 自动导入逻辑
+    /// Prompt auto-import logic for an existing config file
     ///
-    /// 适用于「老版本已经生成过 config.json，但当时还没有 Prompt 功能」的升级场景。
-    /// 判定规则：
-    /// - 仅当所有应用的 prompts 都为空时才尝试导入（避免打扰已经在使用 Prompt 功能的用户）
-    /// - 每个应用最多导入一次，对应各自的提示词文件（如 CLAUDE.md/AGENTS.md/GEMINI.md）
+    /// Used for upgrades where an older version already created config.json
+    /// before the Prompt feature existed.
+    /// Rules:
+    /// - Import only when prompts are empty for every app, so existing Prompt users are not interrupted.
+    /// - Import each app at most once from its own prompt file such as CLAUDE.md, AGENTS.md, or GEMINI.md.
     ///
-    /// 返回值：
-    /// - Ok(true)  表示至少有一个应用成功导入了提示词
-    /// - Ok(false) 表示无需导入或未导入任何内容
+    /// Returns:
+    /// - Ok(true) if at least one app imported prompts
+    /// - Ok(false) if nothing needed to be imported
     fn maybe_auto_import_prompts_for_existing_config(&mut self) -> Result<bool, AppError> {
-        // 如果任一应用已经有提示词配置，说明用户已经在使用 Prompt 功能，避免再次自动导入
+        // If any app already has prompts configured, avoid importing again.
         if !self.prompts.claude.prompts.is_empty()
             || !self.prompts.claude_desktop.prompts.is_empty()
             || !self.prompts.codex.prompts.is_empty()
@@ -721,7 +724,7 @@ impl MultiAppConfig {
             return Ok(false);
         }
 
-        log::info!("检测到已存在配置文件且 Prompt 列表为空，将尝试从现有提示词文件自动导入");
+        log::info!("Existing config detected with an empty Prompt list. Trying to auto-import from current prompt files");
 
         let mut imported = false;
         for app in [
@@ -732,7 +735,7 @@ impl MultiAppConfig {
             AppType::OpenClaw,
             AppType::Hermes,
         ] {
-            // 复用已有的单应用导入逻辑
+            // Reuse the existing single-app import path.
             if Self::auto_import_prompt_if_exists(self, app)? {
                 imported = true;
             }
@@ -741,38 +744,38 @@ impl MultiAppConfig {
         Ok(imported)
     }
 
-    /// 检查并自动导入单个应用的提示词文件
+    /// Check for and auto-import a single app prompt file
     ///
-    /// 返回值：
-    /// - Ok(true)  表示成功导入了非空文件
-    /// - Ok(false) 表示未导入（文件不存在、内容为空或读取失败）
+    /// Returns:
+    /// - Ok(true) if a non-empty file was imported
+    /// - Ok(false) if nothing was imported because the file was missing, empty, or unreadable
     fn auto_import_prompt_if_exists(config: &mut Self, app: AppType) -> Result<bool, AppError> {
         let file_path = prompt_file_path(&app)?;
 
-        // 检查文件是否存在
+        // Check whether the file exists.
         if !file_path.exists() {
-            log::debug!("提示词文件不存在，跳过自动导入: {file_path:?}");
+            log::debug!("Prompt file is missing. Skipping auto-import: {file_path:?}");
             return Ok(false);
         }
 
-        // 读取文件内容
+        // Read the file content.
         let content = match std::fs::read_to_string(&file_path) {
             Ok(c) => c,
             Err(e) => {
-                log::warn!("读取提示词文件失败: {file_path:?}, 错误: {e}");
-                return Ok(false); // 失败时不中断，继续处理其他应用
+                log::warn!("Failed to read prompt file: {file_path:?}, error: {e}");
+                return Ok(false); // Do not fail the whole flow. Continue with other apps.
             }
         };
 
-        // 检查内容是否为空
+        // Check whether the content is empty.
         if content.trim().is_empty() {
-            log::debug!("提示词文件内容为空，跳过导入: {file_path:?}");
+            log::debug!("Prompt file is empty. Skipping import: {file_path:?}");
             return Ok(false);
         }
 
-        log::info!("发现提示词文件，自动导入: {file_path:?}");
+        log::info!("Found prompt file. Auto-importing: {file_path:?}");
 
-        // 创建提示词对象
+        // Build the prompt object.
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -790,12 +793,12 @@ impl MultiAppConfig {
             ),
             content,
             description: Some("Automatically imported on first launch".to_string()),
-            enabled: true, // 自动启用
+            enabled: true, // Enable imported prompts by default.
             created_at: Some(timestamp),
             updated_at: Some(timestamp),
         };
 
-        // 插入到对应的应用配置中
+        // Insert it into the matching app config.
         let prompts = match app {
             AppType::Claude => &mut config.prompts.claude.prompts,
             AppType::ClaudeDesktop => &mut config.prompts.claude_desktop.prompts,
@@ -808,30 +811,30 @@ impl MultiAppConfig {
 
         prompts.insert(id, prompt);
 
-        log::info!("自动导入完成: {}", app.as_str());
+        log::info!("Auto-import completed: {}", app.as_str());
         Ok(true)
     }
 
-    /// 将 v3.6.x 的分应用 MCP 结构迁移到 v3.7.0 的统一结构
+    /// Migrate the per-app MCP shape from v3.6.x to the unified v3.7.0 shape
     ///
-    /// 迁移策略：
-    /// 1. 检查是否已经迁移（mcp.servers 是否存在）
-    /// 2. 收集所有应用的 MCP，按 ID 去重合并
-    /// 3. 生成统一的 McpServer 结构，标记应用到哪些客户端
-    /// 4. 清空旧的分应用配置
+    /// Migration strategy:
+    /// 1. Check whether migration already happened by looking for mcp.servers.
+    /// 2. Collect MCP entries from every app and merge duplicates by ID.
+    /// 3. Build unified McpServer entries and mark which clients use them.
+    /// 4. Clear the old per-app configs.
     pub fn migrate_mcp_to_unified(&mut self) -> Result<bool, AppError> {
-        // 检查是否已经是新结构
+        // Skip migration when the new shape is already present.
         if self.mcp.servers.is_some() {
-            log::debug!("MCP 配置已是统一结构，跳过迁移");
+            log::debug!("MCP config is already in the unified shape. Skipping migration");
             return Ok(false);
         }
 
-        log::info!("检测到旧版 MCP 配置格式，开始迁移到 v3.7.0 统一结构...");
+        log::info!("Detected legacy MCP config. Starting migration to the unified v3.7.0 shape");
 
         let mut unified_servers: HashMap<String, McpServer> = HashMap::new();
         let mut conflicts = Vec::new();
 
-        // 收集所有应用的 MCP
+        // Collect MCP entries from all supported legacy apps.
         for app in [
             AppType::Claude,
             AppType::Codex,
@@ -855,18 +858,18 @@ impl MultiAppConfig {
                     .unwrap_or(true);
 
                 if let Some(existing) = unified_servers.get_mut(id) {
-                    // 该 ID 已存在，合并 apps 字段
+                    // This ID already exists, so merge the apps field.
                     existing.apps.set_enabled_for(&app, enabled);
 
-                    // 检测配置冲突（同 ID 但配置不同）
+                    // Detect config conflicts where the same ID has different server payloads.
                     if existing.server != *entry.get("server").unwrap_or(&serde_json::json!({})) {
                         conflicts.push(format!(
-                            "MCP '{id}' 在 {} 和之前的应用中配置不同，将使用首次遇到的配置",
+                            "MCP '{id}' has different configs in {} and an earlier app. The first config will be kept",
                             app.as_str()
                         ));
                     }
                 } else {
-                    // 首次遇到该 MCP，创建新条目
+                    // First time seeing this MCP, create a new entry.
                     let name = entry
                         .get("name")
                         .and_then(|v| v.as_str())
@@ -923,28 +926,28 @@ impl MultiAppConfig {
             }
         }
 
-        // 记录冲突警告
+        // Log conflict warnings.
         if !conflicts.is_empty() {
-            log::warn!("MCP 迁移过程中检测到配置冲突：");
+            log::warn!("Detected config conflicts during MCP migration:");
             for conflict in &conflicts {
                 log::warn!("  - {conflict}");
             }
         }
 
         log::info!(
-            "MCP 迁移完成，共迁移 {} 个服务器{}",
+            "MCP migration finished. Migrated {} servers{}",
             unified_servers.len(),
             if !conflicts.is_empty() {
-                format!("（存在 {} 个冲突）", conflicts.len())
+                format!(" with {} conflicts", conflicts.len())
             } else {
                 String::new()
             }
         );
 
-        // 替换为新结构
+        // Replace the legacy shape with the unified one.
         self.mcp.servers = Some(unified_servers);
 
-        // 清空旧的分应用配置
+        // Clear the old per-app configs.
         self.mcp.claude = McpConfig::default();
         self.mcp.codex = McpConfig::default();
         self.mcp.gemini = McpConfig::default();
@@ -979,7 +982,7 @@ mod tests {
     }
 
     struct TempHome {
-        #[allow(dead_code)] // 字段通过 Drop trait 管理临时目录生命周期
+        #[allow(dead_code)] // Drop manages the temporary directory lifetime.
         dir: TempDir,
         original_home: Option<String>,
         original_userprofile: Option<String>,
@@ -1091,7 +1094,7 @@ mod tests {
             .clone();
         assert_eq!(claude_prompt, "first version");
 
-        // 覆盖文件内容，但保留 config.json
+        // Overwrite the prompt file while keeping config.json.
         write_prompt_file(AppType::Claude, "second version");
         let second = MultiAppConfig::load().expect("load config again");
 
@@ -1143,12 +1146,12 @@ mod tests {
 
         let config = MultiAppConfig::load().expect("load config");
 
-        // 验证所有三个应用的提示词都被导入
+        // Verify that prompts were imported for all three apps.
         assert_eq!(config.prompts.claude.prompts.len(), 1);
         assert_eq!(config.prompts.codex.prompts.len(), 1);
         assert_eq!(config.prompts.gemini.prompts.len(), 1);
 
-        // 验证所有提示词都被启用
+        // Verify that all imported prompts are enabled.
         assert!(
             config
                 .prompts

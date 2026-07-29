@@ -1,10 +1,10 @@
-// Provider 类型常量
+// Provider type constants.
 export const PROVIDER_TYPES = {
   GITHUB_COPILOT: "github_copilot",
   CODEX_OAUTH: "codex_oauth",
 } as const;
 
-// 用量脚本模板类型常量
+// Usage-script template type constants.
 export const TEMPLATE_TYPES = {
   CUSTOM: "custom",
   GENERAL: "general",

@@ -77,7 +77,7 @@ const DialogContent = React.forwardRef<
           ref={ref}
           className={cn(variantClass, zIndexMap[zIndex], className)}
           onInteractOutside={(e) => {
-            // 防止点击遮罩层关闭对话框
+            // Prevent backdrop clicks from closing the dialog.
             e.preventDefault();
           }}
           {...props}

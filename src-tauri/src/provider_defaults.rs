@@ -1,7 +1,7 @@
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
-/// 供应商图标信息
+/// Provider icon metadata.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct ProviderIcon {
@@ -9,12 +9,12 @@ pub struct ProviderIcon {
     pub color: &'static str,
 }
 
-/// 供应商名称到图标的默认映射
+/// Default mapping from provider names to icons.
 #[allow(dead_code)]
 pub static DEFAULT_PROVIDER_ICONS: Lazy<HashMap<&'static str, ProviderIcon>> = Lazy::new(|| {
     let mut m = HashMap::new();
 
-    // AI 服务商
+    // AI providers.
     m.insert(
         "openai",
         ProviderIcon {
@@ -149,7 +149,7 @@ pub static DEFAULT_PROVIDER_ICONS: Lazy<HashMap<&'static str, ProviderIcon>> = L
         },
     );
 
-    // 云平台
+    // Cloud platforms.
     m.insert(
         "aws",
         ProviderIcon {
@@ -182,17 +182,17 @@ pub static DEFAULT_PROVIDER_ICONS: Lazy<HashMap<&'static str, ProviderIcon>> = L
     m
 });
 
-/// 根据供应商名称智能推断图标
+/// Infers an icon from a provider name.
 #[allow(dead_code)]
 pub fn infer_provider_icon(provider_name: &str) -> Option<ProviderIcon> {
     let name_lower = provider_name.to_lowercase();
 
-    // 精确匹配
+    // Exact match.
     if let Some(icon) = DEFAULT_PROVIDER_ICONS.get(name_lower.as_str()) {
         return Some(icon.clone());
     }
 
-    // 模糊匹配（包含关键词）
+    // Partial match containing a known keyword.
     for (key, icon) in DEFAULT_PROVIDER_ICONS.iter() {
         if name_lower.contains(key) {
             return Some(icon.clone());

@@ -186,7 +186,7 @@ describe("useSettings hook", () => {
     syncCurrentProvidersLiveMock.mockResolvedValue({ ok: true });
     getCurrentMock.mockResolvedValue(null);
     getAllMock.mockResolvedValue({});
-    // 默认将 queryClient 缓存对齐到 serverSettings，既有断言的 "prev === data" 语义保持不变
+    // Keep the query client cache aligned with serverSettings by default so existing "prev === data" assertions retain their meaning.
     getQueryDataMock.mockImplementation(() => serverSettings);
   });
 
@@ -269,7 +269,7 @@ describe("useSettings hook", () => {
         codexConfigDir: "   ",
         openclawConfigDir: "  /custom/openclaw  ",
         language: "en",
-        enableClaudePluginIntegration: true, // 状态从 false 变为 true
+        enableClaudePluginIntegration: true, // State changes from false to true.
       },
       initialLanguage: "en",
     });
@@ -294,19 +294,19 @@ describe("useSettings hook", () => {
     expect(payload.openclawConfigDir).toBe("/custom/openclaw");
     expect(payload.language).toBe("en");
     expect(setAppConfigDirOverrideMock).toHaveBeenCalledWith("/override/app");
-    // 状态改变，应该调用 API
+    // The state changed, so the API should be called.
     expect(applyClaudePluginConfigMock).toHaveBeenCalledWith({
       official: false,
     });
     expect(metadataMock.setRequiresRestart).toHaveBeenCalledWith(true);
     expect(window.localStorage.getItem("language")).toBe("en");
     expect(toastErrorMock).not.toHaveBeenCalled();
-    // 插件同步已包含 syncCurrentProvidersLiveSafe，目录变更不再重复调用
+    // Plugin synchronization already includes syncCurrentProvidersLiveSafe, so the directory change must not call it again.
     expect(syncCurrentProvidersLiveMock).toHaveBeenCalledTimes(1);
   });
 
   it("saves settings without restart when directory unchanged", async () => {
-    // 确保服务器和本地状态一致，不触发 API 调用
+    // Keep server and local state aligned so no API call is triggered.
     serverSettings = {
       ...serverSettings,
       enableClaudePluginIntegration: false,
@@ -320,8 +320,8 @@ describe("useSettings hook", () => {
     settingsFormMock = createSettingsFormMock({
       settings: {
         ...serverSettings,
-        enableClaudePluginIntegration: false, // 状态未变
-        launchOnStartup: false, // 状态未变
+        enableClaudePluginIntegration: false, // State is unchanged.
+        launchOnStartup: false, // State is unchanged.
         language: "en",
       },
       initialLanguage: "en",
@@ -341,15 +341,15 @@ describe("useSettings hook", () => {
 
     expect(saveResult).toEqual({ requiresRestart: false });
     expect(setAppConfigDirOverrideMock).toHaveBeenCalledWith(null);
-    // 状态未改变，不应调用 API
+    // The state did not change, so the API should not be called.
     expect(applyClaudePluginConfigMock).not.toHaveBeenCalled();
     expect(metadataMock.setRequiresRestart).toHaveBeenCalledWith(false);
-    // 目录未变化，不应触发同步
+    // The directory did not change, so synchronization should not run.
     expect(syncCurrentProvidersLiveMock).not.toHaveBeenCalled();
   });
 
   it("shows toast when Claude plugin sync fails but continues flow", async () => {
-    // 设置服务器状态为 false,本地状态为 true,触发状态变化
+    // Set server state to false and local state to true to trigger a state change.
     serverSettings = {
       ...serverSettings,
       enableClaudePluginIntegration: false,
@@ -362,7 +362,7 @@ describe("useSettings hook", () => {
     settingsFormMock = createSettingsFormMock({
       settings: {
         ...serverSettings,
-        enableClaudePluginIntegration: true, // 状态改变
+        enableClaudePluginIntegration: true, // State changed.
         language: "en",
       },
     });
@@ -381,14 +381,15 @@ describe("useSettings hook", () => {
 
     expect(toastErrorMock).toHaveBeenCalled();
     const message = toastErrorMock.mock.calls.at(-1)?.[0] as string;
-    expect(message).toContain("同步 Claude 插件失败");
+    expect(message).toContain("Sync Claude plugin failed");
     expect(metadataMock.setRequiresRestart).toHaveBeenCalledWith(true);
   });
 
   it("detects plugin toggle via live cache even when closure data is stale", async () => {
-    // 模拟快速连切后的 race：useSettingsQueryMock 的 data 滞后停留在 false（closure 未更新），
-    // 但 queryClient 缓存（getQueryData）实时值已为 true（上次持久化到 enabled），
-    // form 里用户想切回 false。旧实现会因 data === form 而跳过副作用；新实现应读 prev=true 并执行。
+    // Simulate a rapid-toggle race: useSettingsQueryMock data remains stale at false because the closure has not updated,
+    // while the live query client cache is true after the previous enabled state was persisted.
+    // The user wants to switch the form back to false. The old implementation skipped the side effect because data === form;
+    // the current implementation must read prev=true and run it.
     serverSettings = {
       ...serverSettings,
       enableClaudePluginIntegration: false,
@@ -407,7 +408,7 @@ describe("useSettings hook", () => {
     });
     directorySettingsMock = createDirectorySettingsMock();
 
-    // 缓存里的"真实上次值"是 true（enabled），与 closure data(false) 有时序差
+    // The actual previous cached value is true, while closure data is still false.
     getQueryDataMock.mockImplementation(() => ({
       ...serverSettings,
       enableClaudePluginIntegration: true,
@@ -419,8 +420,10 @@ describe("useSettings hook", () => {
       await result.current.saveSettings(undefined, { silent: true });
     });
 
-    // 修复生效：读的是缓存实时值 true，payload=false，差异触发 clear_claude_config
-    expect(applyClaudePluginConfigMock).toHaveBeenCalledWith({ official: true });
+    // The live cached value is true and the payload is false, so the difference triggers clear_claude_config.
+    expect(applyClaudePluginConfigMock).toHaveBeenCalledWith({
+      official: true,
+    });
     expect(syncCurrentProvidersLiveMock).toHaveBeenCalled();
   });
 

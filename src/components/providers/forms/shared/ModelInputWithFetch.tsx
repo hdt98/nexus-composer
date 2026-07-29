@@ -19,7 +19,7 @@ interface ModelInputWithFetchProps {
   placeholder?: string;
   fetchedModels: FetchedModel[];
   isLoading: boolean;
-  /** 传入时显示获取按钮；不传时只在有数据后显示下拉 */
+  /** Shows a fetch button when provided; otherwise shows a dropdown only after data loads. */
   onFetch?: () => void;
 }
 
@@ -34,7 +34,7 @@ export function ModelInputWithFetch({
 }: ModelInputWithFetchProps) {
   const { t } = useTranslation();
 
-  // 有模型数据: Input + DropdownMenu
+  // Model data available: input and dropdown menu.
   if (fetchedModels.length > 0) {
     const grouped: Record<string, FetchedModel[]> = {};
     for (const model of fetchedModels) {
@@ -85,7 +85,7 @@ export function ModelInputWithFetch({
     );
   }
 
-  // 加载中: Input + Spinner
+  // Loading: input and spinner.
   if (isLoading) {
     return (
       <div className="flex gap-1">
@@ -105,7 +105,7 @@ export function ModelInputWithFetch({
     );
   }
 
-  // 有 onFetch: Input + 获取按钮
+  // onFetch available: input and fetch button.
   if (onFetch) {
     return (
       <div className="flex gap-1">
@@ -132,7 +132,7 @@ export function ModelInputWithFetch({
     );
   }
 
-  // 无 onFetch: 纯 Input
+  // No onFetch: plain input.
   return (
     <Input
       id={id}

@@ -42,7 +42,7 @@ pub fn add_custom_endpoint(
     if normalized.is_empty() {
         return Err(AppError::localized(
             "provider.endpoint.url_required",
-            "URL 不能为空",
+            "URL cannot be empty",
             "URL cannot be empty",
         ));
     }

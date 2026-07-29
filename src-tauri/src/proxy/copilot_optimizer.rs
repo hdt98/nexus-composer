@@ -1,12 +1,13 @@
-//! Copilot 请求优化器
+//! Copilot request optimizer.
 //!
-//! 解决 GitHub Copilot 代理消耗量异常问题（Issue #1813）。
+//! Corrects abnormal GitHub Copilot proxy consumption (issue #1813).
 //!
-//! Copilot 使用 `x-initiator` 请求头区分「用户发起」和「agent 续写」：
-//! - `user`：计为一次 premium interaction（扣额度）
-//! - `agent`：视为上一次交互的延续（不额外扣费）
+//! Copilot uses the `x-initiator` header to distinguish user initiation from agent
+//! continuation:
+//! - `user`: one premium interaction that consumes quota
+//! - `agent`: continuation of the previous interaction with no additional charge
 //!
-//! 参考实现: https://github.com/caozhiyuan/copilot-api
+//! Reference implementation: https://github.com/caozhiyuan/copilot-api
 
 use std::collections::HashSet;
 
@@ -14,38 +15,38 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// 请求分类结果
+/// Request classification result.
 #[derive(Debug, Clone)]
 pub struct CopilotClassification {
-    /// "user" 或 "agent" — 映射到 x-initiator 请求头
+    /// `user` or `agent`, mapped to the x-initiator header.
     pub initiator: &'static str,
-    /// 是否为 warmup/探针请求（可降级到小模型）
+    /// Whether this is a warmup/probe request that can use a smaller model.
     pub is_warmup: bool,
-    /// 是否为上下文压缩请求
+    /// Whether this is a context-compaction request.
     pub is_compact: bool,
-    /// 是否为 Claude Code 子代理请求（Agent tool 生成的 subagent）
-    /// 子代理请求应设置 x-interaction-type=conversation-subagent，不计 premium interaction
+    /// Whether Claude Code's Agent tool generated a subagent request.
+    /// Subagent requests use x-interaction-type=conversation-subagent and do not count
+    /// as premium interactions.
     pub is_subagent: bool,
 }
 
-/// 分类 Anthropic 格式的请求体，决定 Copilot 请求头。
+/// Classifies an Anthropic request body to select Copilot headers.
 ///
-/// 分类算法（只检查最后一条消息，与参考实现 caozhiyuan/copilot-api 对齐）：
-/// 1. 无消息 → "user"（安全默认，首次请求）
-/// 2. 最后消息 role=user：
-///    - content 中存在非 tool_result 类型 block → "user"
-///    - content 全部是 tool_result → "agent"
-///    - 匹配 compact 模式 → "agent"
-/// 3. 最后消息 role 非 user → "user"（安全默认）
+/// Classification checks only the last message, matching caozhiyuan/copilot-api:
+/// 1. No messages -> `user`, the safe first-request default.
+/// 2. Last role is user:
+///    - non-tool_result content -> `user`
+///    - only tool_result content -> `agent`
+///    - compact pattern -> `agent`
+/// 3. Last role is not user -> `user`, the safe default.
 ///
-/// Warmup 检测（与参考实现对齐）：
-/// - 请求头中有 `anthropic-beta` + 无 tools + 非 compact → warmup
+/// Warmup detection follows the reference: `anthropic-beta`, no tools, and not compact.
 ///
-/// `compact_detection`：是否启用 compact 检测。为 false 时跳过，
-/// 确保 `CopilotOptimizerConfig.compact_detection` 开关真正生效。
+/// `compact_detection` skips compact detection when false, honoring
+/// `CopilotOptimizerConfig.compact_detection`.
 ///
-/// `subagent_detection`：是否启用子代理检测。为 true 时，会扫描首条用户消息
-/// 中的 `__SUBAGENT_MARKER__` 标记，将子代理请求标记为不计费。
+/// `subagent_detection` scans user content for `__SUBAGENT_MARKER__` when enabled and
+/// marks subagent requests as non-billable.
 pub fn classify_request(
     body: &Value,
     has_anthropic_beta: bool,
@@ -70,7 +71,7 @@ pub fn classify_request(
     let last_msg = &messages[messages.len() - 1];
     let role = last_msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
 
-    // 只有 role=user 的消息需要细分
+    // Only role=user messages need finer classification.
     if role != "user" {
         return CopilotClassification {
             initiator: if is_subagent { "agent" } else { "user" },
@@ -80,15 +81,13 @@ pub fn classify_request(
         };
     }
 
-    // 判定逻辑（与 copilot-api 的 merge-then-classify 效果对齐）：
-    // 只要 content 数组中包含 tool_result → 视为工具续写 → agent
-    // 这覆盖了 skill/edit hook/plan follow-up 等常见场景，
-    // 它们的 content 通常是 [tool_result, text] 混合形态。
-    // copilot-api 通过先 merge（text 吸收进 tool_result）再 classify 实现同等效果；
-    // 直接在分类层处理更稳健，不依赖 merge 启用状态和执行顺序。
+    // Match copilot-api's merge-then-classify result: any tool_result in content means
+    // an agent tool continuation. This covers mixed [tool_result, text] messages from
+    // skills, edit hooks, and plan follow-ups. Handling it during classification avoids
+    // dependence on whether merging is enabled or when it runs.
     let is_user_initiated = match last_msg.get("content") {
         Some(Value::Array(blocks)) => {
-            // 含有 tool_result → 工具续写（agent），否则 → 用户发起（user）
+            // tool_result means agent continuation; otherwise the user initiated it.
             !blocks
                 .iter()
                 .any(|block| block.get("type").and_then(|t| t.as_str()) == Some("tool_result"))
@@ -97,7 +96,7 @@ pub fn classify_request(
         _ => false,
     };
 
-    // 子代理请求始终标记为 agent（即使首条消息包含用户文本）
+    // A subagent request is always agent-initiated, even with user text in its first message.
     let initiator = if is_subagent || !is_user_initiated || is_compact {
         "agent"
     } else {
@@ -112,34 +111,34 @@ pub fn classify_request(
     }
 }
 
-/// 检测是否为 warmup/探针请求（适合降级到小模型）。
+/// Detects a warmup/probe request suitable for a smaller model.
 ///
-/// 与参考实现对齐，三个条件同时满足：
-/// 1. 请求头有 `anthropic-beta`（Claude Code warmup 探针的标志）
-/// 2. 无 tools 定义
-/// 3. 非 compact 请求
+/// Matches the reference when all conditions hold:
+/// 1. `anthropic-beta` header marks a Claude Code warmup probe.
+/// 2. No tools are defined.
+/// 3. The request is not compact.
 fn is_warmup_request(body: &Value, has_anthropic_beta: bool, is_compact: bool) -> bool {
     if !has_anthropic_beta || is_compact {
         return false;
     }
-    // 无工具定义
+    // No tool definitions.
     body.get("tools")
         .and_then(|tools| tools.as_array())
         .is_none_or(|tools| tools.is_empty())
 }
 
-/// 检测是否为 Claude Code 上下文压缩/compact 请求。
+/// Detects a Claude Code context-compaction request.
 ///
-/// 只匹配 Claude Code **内部生成**的机器特征，不匹配用户可能手动输入的通用短语，
-/// 避免将真实用户请求误标为 agent。
+/// Matches only machine-generated Claude Code features, not generic phrases a user
+/// could type, to avoid marking real user requests as agent continuations.
 ///
-/// 强特征来源：
-/// 1. system prompt — Claude Code compact 模式会设置专用 system prompt，用户无法手动设置
-/// 2. "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools." — 机器指令
-/// 3. 同时包含 "Pending Tasks:" 和 "Current Work:" — Claude Code compact 的结构标记
+/// Strong signals:
+/// 1. A dedicated compact system prompt that users cannot set manually.
+/// 2. `CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.`
+/// 3. Both `Pending Tasks:` and `Current Work:` structural markers.
 fn is_compact_request(body: &Value) -> bool {
-    // 信号 1: system prompt 以 Claude Code compact 专用前缀开头
-    // 用户在 Claude Code 中无法直接控制 system prompt，这是最可靠的信号
+    // Signal 1: the system prompt begins with Claude Code's dedicated compact prefix.
+    // Users cannot directly control this prompt, making it the strongest signal.
     let system_text = extract_system_text(body);
     if system_text
         .starts_with("You are a helpful AI assistant tasked with summarizing conversations")
@@ -147,7 +146,7 @@ fn is_compact_request(body: &Value) -> bool {
         return true;
     }
 
-    // 信号 2 & 3: 检查最后一条用户消息中的机器生成特征
+    // Signals 2 and 3: inspect machine-generated features in the last user message.
     let messages = match body.get("messages").and_then(|m| m.as_array()) {
         Some(msgs) => msgs,
         None => return false,
@@ -160,12 +159,12 @@ fn is_compact_request(body: &Value) -> bool {
 
         let text = extract_text_from_message(last_msg);
 
-        // 信号 2: Claude Code compact 的机器指令（大小写敏感，精确匹配）
+        // Signal 2: exact case-sensitive Claude Code compact instruction.
         if text.contains("CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.") {
             return true;
         }
 
-        // 信号 3: Claude Code compact 的结构标记（两个同时出现才算）
+        // Signal 3: both Claude Code compact structural markers must appear.
         if text.contains("Pending Tasks:") && text.contains("Current Work:") {
             return true;
         }
@@ -174,24 +173,27 @@ fn is_compact_request(body: &Value) -> bool {
     false
 }
 
-/// 合并用户消息中的 tool_result 和 text block。
+/// Merges tool_result and text blocks in user messages.
 ///
-/// 与参考实现 `mergeToolResultForClaude` 对齐：
+/// Matches the reference `mergeToolResultForClaude` implementation.
 ///
-/// **消息内部合并**（核心）：在单条 user 消息内，将 text block 吸收进 tool_result block，
-/// 使整条消息只剩 tool_result 类型 block。这样 Copilot 不会将其视为用户发起的交互。
+/// **Intra-message merge** (core): absorb text blocks into tool_result blocks within a
+/// user message, leaving only tool_result blocks so Copilot does not count it as a
+/// user-initiated interaction.
 ///
-/// 场景：Claude Code 在 skill 调用、edit hook、plan 提醒等场景下，会发送混合了
-/// tool_result + text 的用户消息。text block 的存在让 Copilot 将其计为 premium request。
+/// Claude Code sends mixed tool_result + text user messages for skill calls, edit
+/// hooks, and plan reminders. The text block otherwise makes Copilot bill a premium
+/// request.
 ///
-/// **跨消息合并**（补充）：连续的 tool_result-only 用户消息合并为一条。
+/// **Cross-message merge** (supplemental): combine consecutive tool_result-only user
+/// messages.
 pub fn merge_tool_results(mut body: Value) -> Value {
     let messages = match body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(msgs) if !msgs.is_empty() => msgs,
         _ => return body,
     };
 
-    // Phase 1: 消息内部合并 — 将 text block 吸收进 tool_result block
+    // Phase 1: absorb text blocks into tool_result blocks within each message.
     for msg in messages.iter_mut() {
         if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
@@ -201,7 +203,7 @@ pub fn merge_tool_results(mut body: Value) -> Value {
             None => continue,
         };
 
-        // 分离 tool_result 和 text block
+        // Separate tool_result and text blocks.
         let mut tool_results: Vec<Value> = Vec::new();
         let mut text_blocks: Vec<Value> = Vec::new();
         let mut valid = true;
@@ -211,24 +213,24 @@ pub fn merge_tool_results(mut body: Value) -> Value {
                 Some("tool_result") => tool_results.push(block.clone()),
                 Some("text") => text_blocks.push(block.clone()),
                 _ => {
-                    // 存在其他类型 block → 跳过此消息
+                    // Skip a message containing any other block type.
                     valid = false;
                     break;
                 }
             }
         }
 
-        // 必须同时有 tool_result 和 text 才需要合并
+        // A merge requires both tool_result and text blocks.
         if !valid || tool_results.is_empty() || text_blocks.is_empty() {
             continue;
         }
 
-        // 合并策略（与参考实现对齐）
+        // Merge using the reference strategy.
         let merged = merge_blocks_into_tool_results(tool_results, text_blocks);
         msg["content"] = Value::Array(merged);
     }
 
-    // Phase 2: 跨消息合并 — 连续的 tool_result-only 用户消息合并
+    // Phase 2: combine consecutive tool_result-only user messages.
     let messages = match body.get("messages").and_then(|m| m.as_array()) {
         Some(messages) => messages.clone(),
         None => return body,
@@ -265,13 +267,13 @@ pub fn merge_tool_results(mut body: Value) -> Value {
     body
 }
 
-/// 基于最后一条用户消息内容生成确定性 Request ID。
+/// Generates a deterministic request ID from the last user message.
 ///
-/// Nexus Composer 额外策略（参考项目 copilot-api 使用随机 UUID）：
-/// - 哈希输入: sessionId + lastUserContent（排除 tool_result 和 cache_control）
-/// - 相同内容产生相同 ID，可能帮助 Copilot 去重
-/// - 找不到用户内容时退化为随机 UUID
-/// - 使用 UUID v4 格式
+/// Nexus Composer adds behavior beyond copilot-api's random UUID:
+/// - hash sessionId + lastUserContent, excluding tool_result and cache_control
+/// - identical content produces the same ID, which may help Copilot deduplicate
+/// - fall back to a random UUID when no user content exists
+/// - use UUID v4 format
 pub fn deterministic_request_id(body: &Value, session_id: &str) -> String {
     let last_user_content = find_last_user_content(body);
 
@@ -284,7 +286,7 @@ pub fn deterministic_request_id(body: &Value, session_id: &str) -> String {
 
             let mut bytes = [0u8; 16];
             bytes.copy_from_slice(&result[..16]);
-            // UUID v4 版本位和变体位（与参考实现一致）
+            // UUID v4 version and variant bits, matching the reference.
             bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
             bytes[8] = (bytes[8] & 0x3f) | 0x80; // variant 1
 
@@ -294,13 +296,13 @@ pub fn deterministic_request_id(body: &Value, session_id: &str) -> String {
     }
 }
 
-/// 基于 session ID 生成稳定的 Interaction ID。
+/// Generates a stable interaction ID from a session ID.
 ///
-/// 与参考实现（copilot-api session.ts）对齐：
-/// - 同一主对话的所有请求共享同一个 interaction ID
-/// - 哈希输入: 仅 session ID（不包含消息内容，与 request ID 不同）
-/// - Copilot 用此 ID 将请求聚合为同一个 "interaction"，影响 premium 计费归属
-/// - 空 session ID 时返回 None（不应注入随机值，避免 interaction 碎片化）
+/// Matches copilot-api session.ts:
+/// - all requests in a primary conversation share one interaction ID
+/// - hash only the session ID, unlike request IDs
+/// - Copilot groups requests into one premium-billing interaction with this ID
+/// - return None for an empty session instead of fragmenting interactions with random IDs
 pub fn deterministic_interaction_id(session_id: &str) -> Option<String> {
     if session_id.is_empty() {
         return None;
@@ -319,20 +321,20 @@ pub fn deterministic_interaction_id(session_id: &str) -> Option<String> {
     Some(Uuid::from_bytes(bytes).to_string())
 }
 
-/// 检测请求是否来自 Claude Code 子代理（Agent tool 生成的 subagent）。
+/// Detects a Claude Code subagent request generated by the Agent tool.
 ///
-/// Claude Code 的 Agent tool 会在子代理首条用户消息的 `<system-reminder>` 标签中
-/// 注入 `__SUBAGENT_MARKER__` JSON 标记，格式如：
+/// The Agent tool injects a `__SUBAGENT_MARKER__` JSON marker into a
+/// `<system-reminder>` in the subagent's first user message:
 /// ```json
 /// {"__SUBAGENT_MARKER__": {"session_id": "...", "agent_id": "...", "agent_type": "..."}}
 /// ```
 ///
-/// 扫描策略（与 copilot-api 的 subagent-marker.ts 对齐）：
-/// 1. 遍历所有 user 消息（不仅是第一条，因为 context 压缩可能重排消息）
-/// 2. 在消息文本中查找 `__SUBAGENT_MARKER__` 关键字
-/// 3. 找到即判定为子代理请求
+/// Scan strategy aligned with copilot-api subagent-marker.ts:
+/// 1. Inspect all user messages because context compaction may reorder them.
+/// 2. Search message text for `__SUBAGENT_MARKER__`.
+/// 3. Treat any match as a subagent request.
 fn detect_subagent(body: &Value) -> bool {
-    // 信号 1: 显式 __SUBAGENT_MARKER__（Claude Code 2.x+ 自动注入）
+    // Signal 1: explicit __SUBAGENT_MARKER__, injected by Claude Code 2.x+.
     if extract_system_text(body).contains("__SUBAGENT_MARKER__") {
         return true;
     }
@@ -349,46 +351,42 @@ fn detect_subagent(body: &Value) -> bool {
         }
     }
 
-    // 信号 2（fallback）: metadata.user_id 包含子代理标识
-    // Claude Code 的 Agent tool 会将 subagent session 标记为
-    // "parentSessionId_agent_agentId" 格式，检测 "_agent_" 后缀
+    // Signal 2 fallback: metadata.user_id contains the subagent marker. Claude Code's
+    // Agent tool uses `parentSessionId_agent_agentId`; detect `_agent_`.
     if let Some(user_id) = body.pointer("/metadata/user_id").and_then(|v| v.as_str()) {
-        // "_agent_" 是 Claude Code Agent tool 的内部标记
+        // `_agent_` is the Agent tool's internal marker.
         if user_id.contains("_agent_") {
             return true;
         }
     }
 
-    // 信号 3（fallback）: system prompt 包含 Claude Code 子代理的典型框架文本
-    // Agent tool 生成的子代理会在 system prompt 中包含由 Agent tool 注入的任务描述，
-    // 但主对话的 system prompt 由 Claude Code CLI 直接生成，两者格式不同
-    // 这个信号不够可靠（用户 prompt 也可能包含这些词），因此只作为辅助判据
-    // 暂不启用，预留接口
+    // Signal 3 fallback would inspect typical subagent system-prompt framing. Agent tool
+    // task descriptions differ from primary CLI prompts, but users may type the same
+    // words, so this weak signal remains disabled as a reserved extension point.
 
     false
 }
 
-/// 清理孤立的 tool_result — 没有对应 tool_use 的 tool_result 转为 text block。
+/// Converts orphaned tool_results without a matching tool_use into text blocks.
 ///
-/// 场景：上下文压缩、消息截断等可能导致 assistant 消息中的 tool_use 被删除，
-/// 但后续 user 消息中的 tool_result 仍在。上游 API 可能因不匹配而报错/重试。
+/// Context compaction or truncation may remove an assistant tool_use while leaving the
+/// later user tool_result, causing upstream mismatch errors and retries.
 ///
-/// 与 copilot-api 的 `sanitizeOrphanToolResults` 对齐。
+/// Matches copilot-api's `sanitizeOrphanToolResults`.
 pub fn sanitize_orphan_tool_results(mut body: Value) -> Value {
     let messages = match body.get_mut("messages").and_then(|m| m.as_array_mut()) {
         Some(msgs) if msgs.len() >= 2 => msgs,
         _ => return body,
     };
 
-    // Anthropic 协议要求 tool_result 紧跟其对应 tool_use 所在的 assistant turn。
-    // 只检查 messages[i-1]（紧邻上一条 assistant）来判定是否 orphan，
-    // 与参考实现 sanitizeOrphanToolResults 对齐。
+    // Anthropic requires tool_result immediately after the assistant turn containing
+    // its tool_use. Check only messages[i-1], matching sanitizeOrphanToolResults.
     for i in 1..messages.len() {
         if messages[i].get("role").and_then(|r| r.as_str()) != Some("user") {
             continue;
         }
 
-        // 收集紧邻上一条 assistant 的 tool_use id
+        // Collect tool_use IDs from the immediately preceding assistant message.
         let prev_tool_use_ids: HashSet<String> =
             if messages[i - 1].get("role").and_then(|r| r.as_str()) == Some("assistant") {
                 messages[i - 1]
@@ -403,7 +401,7 @@ pub fn sanitize_orphan_tool_results(mut body: Value) -> Value {
                     })
                     .unwrap_or_default()
             } else {
-                // 上一条不是 assistant → 这条 user 中的所有 tool_result 都是 orphan
+                // If the previous message is not assistant, every tool_result here is orphaned.
                 HashSet::new()
             };
 
@@ -423,7 +421,7 @@ pub fn sanitize_orphan_tool_results(mut body: Value) -> Value {
                 .get("tool_use_id")
                 .and_then(|id| id.as_str())
                 .unwrap_or("");
-            // 空 tool_use_id 或不在紧邻 assistant 的 tool_use 中 → orphan
+            // An empty ID or one absent from the adjacent assistant tool_uses is orphaned.
             if tool_use_id.is_empty() || !prev_tool_use_ids.contains(tool_use_id) {
                 let content_text = match block.get("content") {
                     Some(Value::String(text)) => text.clone(),
@@ -445,18 +443,18 @@ pub fn sanitize_orphan_tool_results(mut body: Value) -> Value {
     body
 }
 
-/// 请求前主动剥离所有 assistant 消息里的 thinking / redacted_thinking block
+/// Proactively strips thinking and redacted_thinking blocks from assistant messages.
 ///
-/// Copilot 的三条目标端点（`/chat/completions`、`/v1/responses`、`/v1/chat/completions`）
-/// 均为 OpenAI 兼容格式，不识别 Anthropic 的 thinking block。若原样转发，上游会
-/// 拒绝并返回 invalid_request_error —— 届时 `thinking_rectifier` 才做反应式清理并
-/// 重试。那次已经失败的请求依旧消耗一次 premium quota，所以此处提前剥离。
+/// Copilot's `/chat/completions`, `/v1/responses`, and `/v1/chat/completions` endpoints
+/// are OpenAI-compatible and reject Anthropic thinking blocks with
+/// invalid_request_error. Reactive cleanup by thinking_rectifier would retry only after
+/// the failed request consumed premium quota, so strip these blocks before sending.
 ///
-/// 与 `thinking_rectifier::rectify_anthropic_request` 的区别：
-/// - 本函数只剥 thinking / redacted_thinking 两类 block，不触碰 signature，也不
-///   移除顶层 thinking 字段——那些是错误路径上的激进整流，常规路径不需要。
-/// - 保持与 `merge_tool_results` / `sanitize_orphan_tool_results` 一致的"消费 body、
-///   返回新 body"签名，便于接入 forwarder 管道。
+/// Unlike `thinking_rectifier::rectify_anthropic_request`:
+/// - This removes only thinking and redacted_thinking blocks, leaving signatures and
+///   the top-level thinking field for aggressive error-path rectification.
+/// - It consumes and returns a body like `merge_tool_results` and
+///   `sanitize_orphan_tool_results`, fitting the forwarder pipeline.
 pub fn strip_thinking_blocks(mut body: Value) -> Value {
     let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
         return body;
@@ -480,9 +478,9 @@ pub fn strip_thinking_blocks(mut body: Value) -> Value {
     body
 }
 
-// ─── 内部辅助 ─────────────────────────────────
+// ─── Internal helpers ─────────────────────────────
 
-/// 从请求体的 `system` 字段提取文本（处理 string/array 两种格式）。
+/// Extracts text from a string- or array-valued `system` field.
 fn extract_system_text(body: &Value) -> String {
     match body.get("system") {
         Some(Value::String(text)) => text.clone(),
@@ -495,12 +493,10 @@ fn extract_system_text(body: &Value) -> String {
     }
 }
 
-/// 查找最后一条 user 消息的非 tool_result 文本内容。
+/// Finds non-tool_result text in the last user message.
 ///
-/// 与参考实现的 `findLastUserContent` 对齐：
-/// - 从后往前遍历消息
-/// - 排除 tool_result block
-/// - 排除 cache_control 字段
+/// Matches `findLastUserContent`: scan backward, exclude tool_result blocks, and remove
+/// cache_control fields.
 fn find_last_user_content(body: &Value) -> Option<String> {
     let messages = body.get("messages").and_then(|m| m.as_array())?;
 
@@ -515,7 +511,7 @@ fn find_last_user_content(body: &Value) -> Option<String> {
         }
 
         if let Some(blocks) = content.as_array() {
-            // 过滤 tool_result，保留其他 block（去掉 cache_control）
+            // Exclude tool_result, preserve other blocks, and remove cache_control.
             let filtered: Vec<Value> = blocks
                 .iter()
                 .filter(|b| b.get("type").and_then(|t| t.as_str()) != Some("tool_result"))
@@ -537,22 +533,22 @@ fn find_last_user_content(body: &Value) -> Option<String> {
     None
 }
 
-/// 将 text block 合并进 tool_result block。
+/// Merges text blocks into tool_result blocks.
 ///
-/// 两种合并策略（与参考实现对齐）：
-/// - 数量相等：一一对应，text 追加到对应 tool_result 的 content 中
-/// - 数量不等：所有 text 追加到最后一个 tool_result 的 content 中
+/// Reference merge strategies:
+/// - Equal counts: append each text to its corresponding tool_result content.
+/// - Unequal counts: append all text to the last tool_result content.
 fn merge_blocks_into_tool_results(
     mut tool_results: Vec<Value>,
     text_blocks: Vec<Value>,
 ) -> Vec<Value> {
     if tool_results.len() == text_blocks.len() {
-        // 一一对应合并
+        // Merge one-to-one.
         for (tr, tb) in tool_results.iter_mut().zip(text_blocks.iter()) {
             append_text_to_tool_result(tr, tb);
         }
     } else {
-        // 所有 text 追加到最后一个 tool_result
+        // Append all text to the final tool_result.
         if let Some(last_tr) = tool_results.last_mut() {
             for tb in &text_blocks {
                 append_text_to_tool_result(last_tr, tb);
@@ -562,7 +558,7 @@ fn merge_blocks_into_tool_results(
     tool_results
 }
 
-/// 将 text block 的内容追加到 tool_result 的 content 中
+/// Appends a text block to tool_result content.
 fn append_text_to_tool_result(tool_result: &mut Value, text_block: &Value) {
     let text = text_block
         .get("text")
@@ -572,7 +568,7 @@ fn append_text_to_tool_result(tool_result: &mut Value, text_block: &Value) {
         return;
     }
 
-    // tool_result 的 content 可以是字符串或数组
+    // tool_result content may be a string or an array.
     match tool_result.get_mut("content") {
         Some(Value::String(existing)) => {
             existing.push('\n');
@@ -582,13 +578,13 @@ fn append_text_to_tool_result(tool_result: &mut Value, text_block: &Value) {
             arr.push(serde_json::json!({"type": "text", "text": text}));
         }
         _ => {
-            // content 缺失或 null — 直接设置
+            // Set content directly when missing or null.
             tool_result["content"] = Value::String(text.to_string());
         }
     }
 }
 
-/// 从消息中提取文本内容
+/// Extracts text from a message.
 fn extract_text_from_message(msg: &Value) -> String {
     match msg.get("content") {
         Some(Value::String(text)) => text.clone(),
@@ -607,7 +603,7 @@ fn extract_text_from_message(msg: &Value) -> String {
     }
 }
 
-/// 判断消息是否为 tool_result-only 的用户消息
+/// Returns whether a user message contains only tool_result blocks.
 fn is_tool_result_only_message(msg: &Value) -> bool {
     if msg.get("role").and_then(|r| r.as_str()) != Some("user") {
         return false;
@@ -620,14 +616,14 @@ fn is_tool_result_only_message(msg: &Value) -> bool {
     }
 }
 
-// ─── 测试 ─────────────────────────────────────
+// ─── Tests ─────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    // === classify_request 测试 ===
+    // === classify_request tests ===
 
     #[test]
     fn test_classify_user_text_message() {
@@ -679,9 +675,9 @@ mod tests {
 
     #[test]
     fn test_classify_tool_result_with_text_block() {
-        // tool_result + text block（skill/edit hook/plan follow-up 的常见形态）
-        // 含有 tool_result → 视为工具续写 → agent
-        // 与 copilot-api 的 merge-then-classify 效果对齐
+        // A tool_result + text block is common in skill/edit-hook/plan follow-ups.
+        // Any tool_result marks a tool continuation, so classify it as agent.
+        // This matches the copilot-api merge-then-classify behavior.
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -714,7 +710,7 @@ mod tests {
 
     #[test]
     fn test_classify_compact_request_system_prompt() {
-        // compact 通过 system prompt 强特征检测
+        // Detect compact requests through a strong system-prompt signal.
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "system": "You are a helpful AI assistant tasked with summarizing conversations. Please create a summary.",
@@ -729,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_classify_compact_request_critical_marker() {
-        // compact 通过 CRITICAL 机器指令检测
+        // Detect compact requests through the machine-generated CRITICAL instruction.
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -745,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_classify_compact_disabled_by_config() {
-        // compact_detection=false 时，即使内容匹配也不标记为 compact
+        // compact_detection=false suppresses compact classification even on a match.
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "system": "You are a helpful AI assistant tasked with summarizing conversations.",
@@ -754,13 +750,13 @@ mod tests {
             ]
         });
         let result = classify_request(&body, false, false, false); // compact_detection=false
-        assert_eq!(result.initiator, "user"); // 不被标记为 agent
+        assert_eq!(result.initiator, "user"); // Not classified as agent.
         assert!(!result.is_compact);
     }
 
     #[test]
     fn test_no_false_positive_on_user_summarize_request() {
-        // P1 修复验证：用户手动输入 "summarize the conversation" 不应被误判为 compact
+        // P1 regression: user-entered "summarize the conversation" is not compact.
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -768,12 +764,12 @@ mod tests {
             ]
         });
         let result = classify_request(&body, false, true, false);
-        // 没有 system prompt 强特征，也没有 CRITICAL 指令 → 不是 compact → user
+        // Without a strong system-prompt signal or CRITICAL instruction, this is user input.
         assert_eq!(result.initiator, "user");
         assert!(!result.is_compact);
     }
 
-    // === warmup 测试（与参考实现对齐） ===
+    // === warmup tests aligned with the reference implementation ===
 
     #[test]
     fn test_warmup_with_anthropic_beta_no_tools() {
@@ -783,7 +779,7 @@ mod tests {
                 {"role": "user", "content": "Hello"}
             ]
         });
-        // has_anthropic_beta=true, 无 tools → warmup
+        // has_anthropic_beta=true with no tools indicates a warmup request.
         let result = classify_request(&body, true, true, false);
         assert!(result.is_warmup);
     }
@@ -796,7 +792,7 @@ mod tests {
                 {"role": "user", "content": "Hello"}
             ]
         });
-        // has_anthropic_beta=false → 不是 warmup
+        // has_anthropic_beta=false means this is not a warmup request.
         let result = classify_request(&body, false, true, false);
         assert!(!result.is_warmup);
     }
@@ -810,14 +806,14 @@ mod tests {
                 {"role": "user", "content": "Hello"}
             ]
         });
-        // 有 tools → 不是 warmup（即使有 anthropic-beta）
+        // Tools prevent warmup classification even with anthropic-beta.
         let result = classify_request(&body, true, true, false);
         assert!(!result.is_warmup);
     }
 
     #[test]
     fn test_not_warmup_when_agent() {
-        // tool_result → agent → 不判定 warmup
+        // A tool_result means agent, so this is not a warmup request.
         let body = json!({
             "model": "claude-sonnet-4-20250514",
             "messages": [
@@ -831,11 +827,11 @@ mod tests {
         assert!(!result.is_warmup);
     }
 
-    // === merge_tool_results 测试 ===
+    // === merge_tool_results tests ===
 
     #[test]
     fn test_merge_intra_message_tool_result_text() {
-        // 核心场景：消息内部 tool_result + text → text 被吸收进 tool_result
+        // Core case: absorb text into tool_result within one message.
         let body = json!({
             "messages": [
                 {"role": "user", "content": [
@@ -846,10 +842,10 @@ mod tests {
         });
         let result = merge_tool_results(body);
         let content = result["messages"][0]["content"].as_array().unwrap();
-        // 应只剩 1 个 tool_result block（text 被吸收）
+        // Only one tool_result block remains after absorbing the text.
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "tool_result");
-        // tool_result 的 content 应包含原始内容 + 吸收的 text
+        // tool_result content includes both the original content and absorbed text.
         let tr_content = content[0]["content"].as_str().unwrap();
         assert!(tr_content.contains("file contents"));
         assert!(tr_content.contains("skill output here"));
@@ -857,7 +853,7 @@ mod tests {
 
     #[test]
     fn test_merge_intra_message_equal_count() {
-        // 数量相等：一一对应合并
+        // Equal counts merge one-to-one.
         let body = json!({
             "messages": [
                 {"role": "user", "content": [
@@ -877,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_merge_intra_message_empty_text_ignored() {
-        // 空 text block 不追加内容
+        // Ignore an empty text block.
         let body = json!({
             "messages": [
                 {"role": "user", "content": [
@@ -889,13 +885,13 @@ mod tests {
         let result = merge_tool_results(body);
         let content = result["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
-        // 空 text 不改变原始 content
+        // Empty text does not change the original content.
         assert_eq!(content[0]["content"], "result");
     }
 
     #[test]
     fn test_merge_intra_skips_other_block_types() {
-        // 有非 tool_result/text 的 block → 跳过整条消息
+        // Skip a message containing a block other than tool_result or text.
         let body = json!({
             "messages": [
                 {"role": "user", "content": [
@@ -907,13 +903,13 @@ mod tests {
         });
         let result = merge_tool_results(body);
         let content = result["messages"][0]["content"].as_array().unwrap();
-        // 未合并，保持原样 3 个 block
+        // No merge occurs; preserve all three original blocks.
         assert_eq!(content.len(), 3);
     }
 
     #[test]
     fn test_merge_cross_message_consecutive() {
-        // 跨消息合并：连续 tool_result-only 用户消息
+        // Merge consecutive tool_result-only user messages across messages.
         let body = json!({
             "messages": [
                 {"role": "user", "content": "Read files"},
@@ -949,7 +945,7 @@ mod tests {
         assert_eq!(result["messages"], body["messages"]);
     }
 
-    // === deterministic_request_id 测试 ===
+    // === deterministic_request_id tests ===
 
     #[test]
     fn test_deterministic_id_stable() {
@@ -987,7 +983,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_id_ignores_tool_result() {
-        // tool_result 内容不同，但 user text 相同 → 相同 ID
+        // Different tool_result content with the same user text produces the same ID.
         let body1 = json!({
             "messages": [
                 {"role": "user", "content": "Hello"},
@@ -1015,7 +1011,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_id_fallback_when_no_user_content() {
-        // 无用户消息 → 退化为随机 UUID（每次不同）
+        // With no user message, fall back to a fresh random UUID.
         let body = json!({
             "messages": [
                 {"role": "assistant", "content": "Hi"}
@@ -1023,7 +1019,7 @@ mod tests {
         });
         let id1 = deterministic_request_id(&body, "s");
         let id2 = deterministic_request_id(&body, "s");
-        // 随机 UUID，每次应不同
+        // A random UUID should differ on each call.
         assert_ne!(id1, id2);
     }
 
@@ -1036,7 +1032,7 @@ mod tests {
         assert!(Uuid::parse_str(&id).is_ok());
     }
 
-    // === deterministic_interaction_id 测试 ===
+    // === deterministic_interaction_id tests ===
 
     #[test]
     fn test_interaction_id_stable_for_same_session() {
@@ -1064,7 +1060,7 @@ mod tests {
 
     #[test]
     fn test_interaction_id_empty_session_is_none() {
-        // 无 session 时不应生成 interaction ID（避免碎片化）
+        // Without a session, omit the interaction ID to avoid fragmentation.
         assert!(deterministic_interaction_id("").is_none());
     }
 
@@ -1074,7 +1070,7 @@ mod tests {
         assert!(Uuid::parse_str(&id).is_ok());
     }
 
-    // === compact 检测增强测试 ===
+    // === extended compact-detection tests ===
 
     #[test]
     fn test_compact_detection_system_prompt() {
@@ -1099,7 +1095,7 @@ mod tests {
 
     #[test]
     fn test_compact_detection_structural_markers() {
-        // Claude Code compact 特有的结构标记
+        // Structural markers specific to Claude Code compact requests.
         let body = json!({
             "messages": [
                 {"role": "user", "content": "Summary of conversation:\n\nPending Tasks:\n- Fix bug\n\nCurrent Work:\n- Implementing feature"}
@@ -1110,7 +1106,7 @@ mod tests {
 
     #[test]
     fn test_compact_no_false_positive_on_generic_summary() {
-        // 通用短语不应触发 compact 检测
+        // A generic phrase must not trigger compact detection.
         let body = json!({
             "messages": [
                 {"role": "user", "content": "Your task is to create a detailed summary of the conversation so far."}
@@ -1142,7 +1138,7 @@ mod tests {
         assert!(is_compact_request(&body));
     }
 
-    // === detect_subagent 测试 ===
+    // === detect_subagent tests ===
 
     #[test]
     fn test_detect_subagent_with_marker_in_user_message() {
@@ -1179,7 +1175,7 @@ mod tests {
 
     #[test]
     fn test_detect_subagent_via_metadata_user_id() {
-        // fallback 信号: metadata.user_id 包含 "_agent_" 标记
+        // Fallback signal: metadata.user_id contains the "_agent_" marker.
         let body = json!({
             "metadata": {
                 "user_id": "session_abc123_agent_explore-1"
@@ -1193,7 +1189,7 @@ mod tests {
 
     #[test]
     fn test_detect_subagent_normal_user_id_not_matched() {
-        // 普通 session ID 不应被误判
+        // A normal session ID must not be classified as a subagent.
         let body = json!({
             "metadata": {
                 "user_id": "session_abc123"
@@ -1228,13 +1224,13 @@ mod tests {
                 ]}
             ]
         });
-        // subagent_detection=false → 不检测子代理
+        // subagent_detection=false disables subagent detection.
         let result = classify_request(&body, false, true, false);
         assert_eq!(result.initiator, "user");
         assert!(!result.is_subagent);
     }
 
-    // === sanitize_orphan_tool_results 测试 ===
+    // === sanitize_orphan_tool_results tests ===
 
     #[test]
     fn test_sanitize_orphan_tool_results_converts_orphans() {
@@ -1253,9 +1249,9 @@ mod tests {
         let result = sanitize_orphan_tool_results(body);
         let msgs = result["messages"].as_array().unwrap();
         let last_content = msgs[2]["content"].as_array().unwrap();
-        // tool_1 保留为 tool_result
+        // Preserve tool_1 as a tool_result.
         assert_eq!(last_content[0]["type"], "tool_result");
-        // tool_orphan 转为 text
+        // Convert tool_orphan to text.
         assert_eq!(last_content[1]["type"], "text");
         assert!(last_content[1]["text"]
             .as_str()
@@ -1276,14 +1272,14 @@ mod tests {
             ]
         });
         let result = sanitize_orphan_tool_results(body.clone());
-        // 无孤立 tool_result，不应有变化
+        // With no orphaned tool_result, the message remains unchanged.
         assert_eq!(result["messages"][1]["content"][0]["type"], "tool_result");
     }
 
     #[test]
     fn test_sanitize_orphan_non_adjacent_assistant_tool_use_is_orphan() {
-        // tool_use 在更早的 assistant 中，但 tool_result 的紧邻上一条是另一个 assistant
-        // → 对 Anthropic 协议来说这个 tool_result 是 orphan
+        // The tool_use is in an earlier assistant message, but another assistant message
+        // immediately precedes the tool_result, making it orphaned under Anthropic semantics.
         let body = json!({
             "messages": [
                 {"role": "user", "content": "step 1"},
@@ -1303,15 +1299,15 @@ mod tests {
         });
         let result = sanitize_orphan_tool_results(body);
         let msgs = result["messages"].as_array().unwrap();
-        // messages[2]: 紧邻 assistant 有 old_tool → 保留
+        // messages[2]: the preceding assistant has old_tool, so preserve it.
         assert_eq!(msgs[2]["content"][0]["type"], "tool_result");
-        // messages[4]: 紧邻 assistant 无 tool_use → orphan → text
+        // messages[4]: the preceding assistant has no tool_use, so convert it to text.
         assert_eq!(msgs[4]["content"][0]["type"], "text");
     }
 
     #[test]
     fn test_sanitize_orphan_prev_not_assistant() {
-        // tool_result 紧邻上一条是 user（非 assistant）→ 全部 orphan
+        // A preceding user message makes all adjacent tool_results orphaned.
         let body = json!({
             "messages": [
                 {"role": "user", "content": "first"},
@@ -1324,16 +1320,16 @@ mod tests {
         assert_eq!(result["messages"][1]["content"][0]["type"], "text");
     }
 
-    /// 关键场景：orphan tool_result（上下文压缩丢失了紧邻 tool_use）
-    /// 在分类时仍应被视为 agent continuation，不能因为后续的 sanitize
-    /// 将其转为 text 而变成 user 请求。
+    /// Key case: an orphaned tool_result whose adjacent tool_use was lost during compaction.
+    /// Classification must still treat it as an agent continuation before sanitization
+    /// converts it to text.
     ///
-    /// 这个测试验证 classify_request 在原始（未 sanitize）的 body 上
-    /// 正确识别 orphan tool_result 为 agent。
+    /// This verifies that classify_request identifies the orphaned tool_result as agent
+    /// from the original, unsanitized body.
     #[test]
     fn test_orphan_tool_result_classified_as_agent_before_sanitize() {
-        // 场景：最后一条 user 消息全是 tool_result，但紧邻的 assistant
-        // 消息里没有对应的 tool_use（因上下文压缩丢失了）
+        // The final user message contains only tool_results, but the immediately preceding
+        // assistant message lacks the matching tool_use because compaction removed it.
         let body = json!({
             "messages": [
                 {"role": "assistant", "content": "I'll help you with that."},
@@ -1343,24 +1339,24 @@ mod tests {
                 ]}
             ]
         });
-        // 在原始 body 上分类 → 全是 tool_result → agent
+        // Classify the original body as agent because it contains only tool_results.
         let classification = classify_request(&body, false, false, false);
         assert_eq!(classification.initiator, "agent");
 
-        // sanitize 后 → tool_result 变为 text → 如果再分类就会变成 user
+        // After sanitization, tool_result becomes text and reclassification yields user.
         let sanitized = sanitize_orphan_tool_results(body);
         let classification_after = classify_request(&sanitized, false, false, false);
         assert_eq!(
             classification_after.initiator, "user",
-            "sanitize 后 orphan tool_result 变为 text，分类变成 user — \
-             这就是为什么分类必须在 sanitize 之前执行"
+            "After sanitization, orphaned tool_result becomes text and classifies as user; \
+             classification must run before sanitization"
         );
     }
 
-    /// orphan tool_result + text 混合场景：
-    /// 分类器直接识别含 tool_result 的消息为 agent（无论是否有 text block），
-    /// 不依赖 merge 的执行顺序。即使 orphan tool_result 后续被 sanitize 转为 text，
-    /// 分类结果在此之前已经确定为 agent。
+    /// Mixed orphaned tool_result + text case:
+    /// The classifier identifies any message containing tool_result as agent, regardless
+    /// of text blocks or merge order. Classification occurs before sanitization can convert
+    /// the orphaned tool_result to text.
     #[test]
     fn test_orphan_tool_result_with_text_classified_as_agent() {
         let body = json!({
@@ -1372,12 +1368,12 @@ mod tests {
                 ]}
             ]
         });
-        // 含有 tool_result → agent（无论是否有 text block）
+        // Any tool_result classifies as agent, regardless of accompanying text blocks.
         let classification = classify_request(&body, false, false, false);
         assert_eq!(classification.initiator, "agent");
 
-        // sanitize 后 orphan tool_result 变为 text → 纯 text → 分类会变成 user
-        // 但正确的执行顺序是先分类再 sanitize，所以这不是问题
+        // Sanitization converts the orphaned tool_result to text, which would classify as user.
+        // The intended order classifies first, so this does not affect behavior.
         let sanitized = sanitize_orphan_tool_results(body);
         let classification_after = classify_request(&sanitized, false, false, false);
         assert_eq!(classification_after.initiator, "user");
@@ -1385,7 +1381,7 @@ mod tests {
 
     #[test]
     fn test_sanitize_orphan_empty_tool_use_id_is_orphan() {
-        // tool_use_id 为空或缺失 → 无法匹配任何 tool_use → orphan
+        // An empty or missing tool_use_id cannot match a tool_use and is therefore orphaned.
         let body = json!({
             "messages": [
                 {"role": "assistant", "content": [
@@ -1403,7 +1399,7 @@ mod tests {
         assert_eq!(content[1]["type"], "text");
     }
 
-    // === strip_thinking_blocks 测试 ===
+    // === strip_thinking_blocks tests ===
 
     #[test]
     fn test_strip_thinking_removes_assistant_thinking_blocks() {
@@ -1427,7 +1423,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_leaves_user_messages_untouched() {
-        // 仅处理 assistant，user 的 thinking 块（极少见，但可能）不动
+        // Only assistant messages are processed; preserve rare user thinking blocks.
         let body = serde_json::json!({
             "messages": [
                 {"role": "user", "content": [
@@ -1450,7 +1446,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_leaves_empty_content_array() {
-        // 仅含 thinking 的 assistant 消息剥完后 content 为空——保留上游自处理
+        // Stripping a thinking-only assistant message leaves empty content for upstream handling.
         let body = serde_json::json!({
             "messages": [
                 {"role": "assistant", "content": [
@@ -1465,7 +1461,7 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_preserves_signature_on_non_thinking_blocks() {
-        // signature 留给 thinking_rectifier 在错误路径处理，此处不动
+        // Preserve signatures for thinking_rectifier to handle on the error path.
         let body = serde_json::json!({
             "messages": [
                 {"role": "assistant", "content": [
@@ -1505,8 +1501,8 @@ mod tests {
 
     #[test]
     fn test_strip_thinking_ignores_string_content() {
-        // assistant.content 是字符串而非 block 数组 — 历史请求或极简客户端会这样
-        // 不应崩溃，也不应转换结构
+        // Historical requests or minimal clients may use string assistant.content.
+        // Do not panic or alter its structure.
         let body = serde_json::json!({
             "messages": [
                 {"role": "assistant", "content": "plain text response"}

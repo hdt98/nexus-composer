@@ -1,7 +1,7 @@
 /**
- * 全局出站代理设置组件
+ * Global outbound proxy settings.
  *
- * 提供配置全局代理的输入界面，支持用户名密码认证。
+ * Provides inputs for configuring a global proxy with optional credentials.
  */
 
 import { useState, useEffect, useMemo } from "react";
@@ -17,7 +17,7 @@ import {
   type DetectedProxy,
 } from "@/hooks/useGlobalProxy";
 
-/** 从完整 URL 提取认证信息 */
+/** Extracts credentials from a complete URL. */
 function extractAuth(url: string): {
   baseUrl: string;
   username: string;
@@ -29,7 +29,7 @@ function extractAuth(url: string): {
     const parsed = new URL(url);
     const username = decodeURIComponent(parsed.username || "");
     const password = decodeURIComponent(parsed.password || "");
-    // 移除认证信息，获取基础 URL
+    // Remove credentials to obtain the base URL.
     parsed.username = "";
     parsed.password = "";
     return { baseUrl: parsed.toString(), username, password };
@@ -38,7 +38,7 @@ function extractAuth(url: string): {
   }
 }
 
-/** 将认证信息合并到 URL */
+/** Merges credentials into a URL. */
 function mergeAuth(
   baseUrl: string,
   username: string,
@@ -49,15 +49,15 @@ function mergeAuth(
 
   try {
     const parsed = new URL(baseUrl);
-    // URL 对象的 username/password setter 会自动进行 percent-encoding
-    // 不要使用 encodeURIComponent，否则会导致双重编码
+    // URL username/password setters apply percent-encoding automatically.
+    // Do not use encodeURIComponent here because it would double-encode them.
     parsed.username = username.trim();
     if (password) {
       parsed.password = password;
     }
     return parsed.toString();
   } catch {
-    // URL 解析失败，尝试手动插入（此时需要手动编码）
+    // If URL parsing fails, insert manually and encode the credentials here.
     const match = baseUrl.match(/^(\w+:\/\/)(.+)$/);
     if (match) {
       const auth = password
@@ -83,13 +83,13 @@ export function GlobalProxySettings() {
   const [dirty, setDirty] = useState(false);
   const [detected, setDetected] = useState<DetectedProxy[]>([]);
 
-  // 计算完整 URL（含认证信息）
+  // Build the complete URL, including credentials.
   const fullUrl = useMemo(
     () => mergeAuth(url, username, password),
     [url, username, password],
   );
 
-  // 同步远程配置
+  // Synchronize remote configuration.
   useEffect(() => {
     if (savedUrl !== undefined) {
       const { baseUrl, username: u, password: p } = extractAuth(savedUrl || "");
@@ -138,7 +138,7 @@ export function GlobalProxySettings() {
     }
   };
 
-  // 只在首次加载且无数据时显示加载状态
+  // Show loading only during the initial load when no data is available.
   if (isLoading && savedUrl === undefined) {
     return (
       <div className="flex items-center justify-center p-4">
@@ -149,12 +149,12 @@ export function GlobalProxySettings() {
 
   return (
     <div className="space-y-3">
-      {/* 描述 */}
+      {/* Description */}
       <p className="text-sm text-muted-foreground">
         {t("settings.globalProxy.hint")}
       </p>
 
-      {/* 代理地址输入框和按钮 */}
+      {/* Proxy address input and actions */}
       <div className="flex gap-2">
         <Input
           placeholder="http://127.0.0.1:7890 / socks5://127.0.0.1:1080"
@@ -213,7 +213,7 @@ export function GlobalProxySettings() {
         </Button>
       </div>
 
-      {/* 认证信息：用户名 + 密码（可选） */}
+      {/* Optional credentials: username and password */}
       <div className="flex gap-2">
         <Input
           placeholder={t("settings.globalProxy.username")}
@@ -254,7 +254,7 @@ export function GlobalProxySettings() {
         </div>
       </div>
 
-      {/* 扫描结果 */}
+      {/* Scan results */}
       {detected.length > 0 && (
         <div className="flex flex-wrap gap-2">
           {detected.map((p) => (

@@ -52,7 +52,7 @@ export function PricingConfigPanel() {
   const [isAddingNew, setIsAddingNew] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
 
-  // 三个应用的配置状态
+  // Configuration state for all three applications.
   const [appConfigs, setAppConfigs] = useState<AppConfigState>({
     claude: { multiplier: "1", source: "response" },
     codex: { multiplier: "1", source: "response" },
@@ -64,7 +64,7 @@ export function PricingConfigPanel() {
   const [isConfigLoading, setIsConfigLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
 
-  // 检查是否有改动
+  // Check for unsaved changes.
   const isDirty =
     originalConfigs !== null &&
     PRICING_APPS.some(
@@ -73,7 +73,7 @@ export function PricingConfigPanel() {
         appConfigs[app].source !== originalConfigs[app].source,
     );
 
-  // 加载所有应用的配置
+  // Load configuration for all applications.
   useEffect(() => {
     let isMounted = true;
 
@@ -132,9 +132,9 @@ export function PricingConfigPanel() {
     };
   }, [t]);
 
-  // 保存所有配置
+  // Save all configuration.
   const handleSaveAll = async () => {
-    // 验证所有倍率
+    // Validate every multiplier.
     for (const app of PRICING_APPS) {
       const trimmed = appConfigs[app].multiplier.trim();
       if (!trimmed) {
@@ -217,7 +217,7 @@ export function PricingConfigPanel() {
 
   return (
     <div className="space-y-6">
-      {/* 全局计费默认配置 - 紧凑表格布局 */}
+      {/* Global pricing defaults in a compact table */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
           <div>
@@ -334,10 +334,10 @@ export function PricingConfigPanel() {
         )}
       </div>
 
-      {/* 分隔线 */}
+      {/* Divider */}
       <div className="border-t border-border/50" />
 
-      {/* 模型定价配置 */}
+      {/* Model pricing configuration */}
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <h4 className="text-sm font-medium text-muted-foreground">

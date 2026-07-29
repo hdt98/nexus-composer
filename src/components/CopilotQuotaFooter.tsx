@@ -13,11 +13,11 @@ import {
 interface CopilotQuotaFooterProps {
   meta?: ProviderMeta;
   inline?: boolean;
-  /** 是否为当前激活的供应商 */
+  /** Whether this is the active provider. */
   isCurrent?: boolean;
 }
 
-/** 格式化相对时间 */
+/** Formats relative time. */
 function formatRelativeTime(
   timestamp: number,
   now: number,
@@ -58,7 +58,7 @@ const CopilotQuotaFooter: React.FC<CopilotQuotaFooterProps> = ({
 
   if (!quota) return null;
 
-  // API 调用失败
+  // API call failed.
   if (!quota.success) {
     if (inline) {
       return (
@@ -121,7 +121,7 @@ const CopilotQuotaFooter: React.FC<CopilotQuotaFooterProps> = ({
     );
   }
 
-  // 展开模式
+  // Expanded mode.
   return (
     <div className="mt-3 rounded-xl border border-border-default bg-card px-4 py-3 shadow-sm">
       <div className="flex items-center justify-between mb-2">

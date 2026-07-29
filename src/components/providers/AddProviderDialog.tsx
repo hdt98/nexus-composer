@@ -67,7 +67,7 @@ export function AddProviderDialog({
         );
         toast.error(
           t("universalProvider.addFailed", {
-            defaultValue: "统一供应商添加失败",
+            defaultValue: "Failed to add universal provider",
           }),
         );
         return;
@@ -77,7 +77,7 @@ export function AddProviderDialog({
         await universalProvidersApi.sync(provider.id);
         toast.success(
           t("universalProvider.addedAndSynced", {
-            defaultValue: "统一供应商已添加并同步",
+            defaultValue: "Universal provider added and synced",
           }),
         );
       } catch (error) {
@@ -87,7 +87,7 @@ export function AddProviderDialog({
         );
         toast.warning(
           t("universalProvider.addedButSyncFailed", {
-            defaultValue: "统一供应商已添加，但同步失败",
+            defaultValue: "Universal provider added, but sync failed",
           }),
         );
       }
@@ -111,7 +111,7 @@ export function AddProviderDialog({
         unknown
       >;
 
-      // 构造基础提交数据
+      // Build the base submission data.
       const providerData: Omit<Provider, "id"> & {
         providerKey?: string;
         suggestedDefaults?: OpenClawSuggestedDefaults;

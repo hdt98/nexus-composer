@@ -19,8 +19,9 @@ interface FullScreenPanelProps {
   children: React.ReactNode;
   footer?: React.ReactNode;
   /**
-   * 覆盖内容区滚动容器的内边距/间距类。默认 `px-6 py-6 space-y-6`。
-   * 通过 `cn`(twMerge) 合并，传入如 `pt-3` 只覆盖顶部内边距，其余保持默认。
+   * Overrides padding and spacing classes on the content scroll container.
+   * Defaults to `px-6 py-6 space-y-6`. Classes merge through `cn` (twMerge), so
+   * a value such as `pt-3` overrides only top padding while retaining defaults.
    */
   contentClassName?: string;
 }
@@ -50,7 +51,7 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
     };
   }, [isOpen]);
 
-  // ESC 键关闭面板
+  // Close the panel with Escape.
   const onCloseRef = React.useRef(onClose);
 
   React.useEffect(() => {
@@ -62,21 +63,22 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        // 子组件（例如 Radix 的 Select/Dialog/Dropdown）如果已经消费了 ESC，就不要再关闭整个面板
+        // Do not close the panel if a child such as a Radix Select, Dialog, or
+        // Dropdown has already handled Escape.
         if (event.defaultPrevented) {
           return;
         }
 
         if (isTextEditableTarget(event.target)) {
-          return; // 让输入框自己处理 ESC（比如清空、失焦等）
+          return; // Let editable fields handle Escape, such as clearing or blurring.
         }
 
-        event.stopPropagation(); // 阻止事件继续冒泡到 window，避免触发 App.tsx 的全局监听
+        event.stopPropagation(); // Avoid triggering the global listener in App.tsx.
         onCloseRef.current();
       }
     };
 
-    // 使用冒泡阶段监听，让子组件（如 Radix UI）优先处理 ESC
+    // Listen during bubbling so child components such as Radix UI handle Escape first.
     window.addEventListener("keydown", handleKeyDown, false);
     return () => {
       window.removeEventListener("keydown", handleKeyDown, false);
@@ -94,8 +96,8 @@ export const FullScreenPanel: React.FC<FullScreenPanelProps> = ({
           className="fixed inset-0 z-[60] flex flex-col"
           style={{ backgroundColor: "hsl(var(--background))" }}
         >
-          {/* Drag region - match App.tsx. Linux 上 DRAG_BAR_HEIGHT=0，
-              直接跳过整个元素；macOS 保留 28px 拖拽占位。 */}
+          {/* Drag region matching App.tsx. Linux uses DRAG_BAR_HEIGHT=0 and
+              omits the element; macOS retains a 28px draggable spacer. */}
           {DRAG_BAR_HEIGHT > 0 && (
             <div
               data-tauri-drag-region

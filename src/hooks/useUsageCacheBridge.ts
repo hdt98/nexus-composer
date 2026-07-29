@@ -20,9 +20,10 @@ type UsageCacheUpdatedPayload =
     };
 
 /**
- * 后端 `UsageCache` 写入后会 emit `usage-cache-updated`，本 hook 把 payload 同步到
- * React Query 缓存，让托盘触发的刷新（不经前端）也能立刻反映到主界面，避免
- * React Query 与 Rust 侧两份缓存各自为战。
+ * Backend UsageCache emits `usage-cache-updated` after writes. This hook
+ * synchronizes the payload into React Query so tray-triggered refreshes that
+ * bypass the frontend appear immediately, keeping React Query and Rust caches
+ * consistent.
  */
 export function useUsageCacheBridge() {
   const queryClient = useQueryClient();

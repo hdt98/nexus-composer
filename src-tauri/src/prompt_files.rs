@@ -8,12 +8,12 @@ use crate::gemini_config::get_gemini_dir;
 use crate::openclaw_config::get_openclaw_dir;
 use crate::opencode_config::get_opencode_dir;
 
-/// 返回指定应用所使用的提示词文件路径。
+/// Returns the prompt file path used by the specified application.
 pub fn prompt_file_path(app: &AppType) -> Result<PathBuf, AppError> {
     if matches!(app, AppType::ClaudeDesktop) {
         return Err(AppError::localized(
             "claude_desktop.prompts_unsupported",
-            "Claude Desktop 暂不支持 Prompts",
+            "Claude Desktop does not support prompts yet",
             "Claude Desktop does not support Prompts",
         ));
     }
@@ -50,7 +50,7 @@ fn get_base_dir_with_fallback(
         .ok_or_else(|| {
             AppError::localized(
                 "home_dir_not_found",
-                format!("无法确定 {fallback_dir} 配置目录：用户主目录不存在"),
+                format!("Cannot determine the {fallback_dir} configuration directory: the user home directory is unavailable"),
                 format!("Cannot determine {fallback_dir} config directory: user home not found"),
             )
         })

@@ -7,7 +7,7 @@ const mcpServerSpecSchema = z
     args: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
     cwd: z.string().optional(),
-    url: z.string().trim().url("请输入有效的 URL").optional(),
+    url: z.string().trim().url("Enter a valid URL").optional(),
     headers: z.record(z.string(), z.string()).optional(),
   })
   .superRefine((server, ctx) => {
@@ -15,21 +15,21 @@ const mcpServerSpecSchema = z
     if (type === "stdio" && !server.command?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "stdio 类型需填写 command",
+        message: "stdio servers require a command",
         path: ["command"],
       });
     }
     if ((type === "http" || type === "sse") && !server.url?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `${type} 类型需填写 url`,
+        message: `${type} servers require a URL`,
         path: ["url"],
       });
     }
   });
 
 export const mcpServerSchema = z.object({
-  id: z.string().min(1, "请输入服务器 ID"),
+  id: z.string().min(1, "Enter a server ID"),
   name: z.string().optional(),
   description: z.string().optional(),
   tags: z.array(z.string()).optional(),

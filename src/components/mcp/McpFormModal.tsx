@@ -436,9 +436,9 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
         }
       >
         <div className="flex flex-col h-full gap-6">
-          {/* 上半部分：表单字段 */}
+          {/* Upper section: form fields */}
           <div className="glass rounded-xl p-6 border border-white/10 space-y-6 flex-shrink-0">
-            {/* 预设选择（仅新增时展示） */}
+            {/* Preset selection, shown only when adding */}
             {!isEditing && (
               <div>
                 <label className="block text-sm font-medium text-foreground mb-3">
@@ -478,7 +478,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
               </div>
             )}
 
-            {/* ID (标题) */}
+            {/* ID (title) */}
             <div>
               <div className="flex items-center justify-between mb-2">
                 <label className="block text-sm font-medium text-foreground">
@@ -512,7 +512,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
               />
             </div>
 
-            {/* 启用到哪些应用 */}
+            {/* Applications where this server is enabled */}
             <div>
               <label className="block text-sm font-medium text-foreground mb-3">
                 {t("mcp.form.enabledApps")}
@@ -600,7 +600,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
               </div>
             </div>
 
-            {/* 可折叠的附加信息按钮 */}
+            {/* Collapsible additional-information button */}
             <div>
               <button
                 type="button"
@@ -616,7 +616,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
               </button>
             </div>
 
-            {/* 附加信息区域（可折叠） */}
+            {/* Collapsible additional-information section */}
             {showMetadata && (
               <>
                 <div>
@@ -670,7 +670,7 @@ const McpFormModal: React.FC<McpFormModalProps> = ({
             )}
           </div>
 
-          {/* 下半部分：JSON 配置编辑器 - 自适应剩余高度 */}
+          {/* Lower section: JSON editor filling the remaining height */}
           <div className="glass rounded-xl p-6 border border-white/10 flex flex-col flex-1 min-h-0">
             <div className="flex items-center justify-between mb-4 flex-shrink-0">
               <label className="text-sm font-medium text-foreground">

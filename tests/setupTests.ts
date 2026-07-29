@@ -13,8 +13,8 @@ beforeAll(async () => {
     lng: "en",
     fallbackLng: "en",
     resources: {
-      zh: { translation: {} },
       en: { translation: {} },
+      vi: { translation: {} },
     },
     interpolation: {
       escapeValue: false,

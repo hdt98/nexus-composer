@@ -1,25 +1,25 @@
-## Summary / 概述
+## Summary
 
-<!-- Briefly describe what this PR does and why. / 简要描述这个 PR 做了什么以及为什么。 -->
+<!-- Briefly describe what this PR does and why. -->
 
-## Related Issue / 关联 Issue
+## Related Issue
 
 <!-- Link the related issue. Use "Fixes #123" to auto-close it when merged. -->
-<!-- 关联相关 Issue。使用 "Fixes #123" 可在合并时自动关闭。 -->
 
 Fixes #
 
-## Screenshots / 截图
+## Screenshots
 
-<!-- If applicable, add before/after screenshots. / 如有需要，请添加修改前后的截图。 -->
+<!-- If applicable, add before/after screenshots. -->
 
-| Before / 修改前 | After / 修改后 |
-|-----------------|---------------|
-|                 |               |
+| Before | After |
+| ------ | ----- |
+|        |       |
 
-## Checklist / 检查清单
+## Checklist
 
-- [ ] `pnpm typecheck` passes / 通过 TypeScript 类型检查
-- [ ] `pnpm format:check` passes / 通过代码格式检查
-- [ ] `cargo clippy` passes (if Rust code changed) / 通过 Clippy 检查（如修改了 Rust 代码）
-- [ ] Updated i18n files if user-facing text changed / 如修改了用户可见文本，已更新国际化文件
+- [ ] `pnpm typecheck` passes
+- [ ] `pnpm format:check` passes
+- [ ] `pnpm language:check` passes
+- [ ] `cargo clippy` passes (if Rust code changed)
+- [ ] Updated both English and Vietnamese catalogs if user-facing text changed

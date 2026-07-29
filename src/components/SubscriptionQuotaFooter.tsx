@@ -16,39 +16,39 @@ interface SubscriptionQuotaViewProps {
   quota: SubscriptionQuota | undefined;
   loading: boolean;
   refetch: () => void;
-  /** 用于 `subscription.expiredHint` 的 {tool} 插值；解耦了 hook 的 appId */
+  /** Supplies the {tool} interpolation for `subscription.expiredHint` without coupling the view to the hook's appId. */
   appIdForExpiredHint: string;
   inline?: boolean;
 }
 
-/** 已知 tier 名称的显示映射（官方订阅 + Token Plan 共用） */
+/** Display-key mapping for known tier names, shared by official subscriptions and token plans. */
 export const TIER_I18N_KEYS: Record<string, string> = {
   five_hour: "subscription.fiveHour",
   seven_day: "subscription.sevenDay",
   seven_day_opus: "subscription.sevenDayOpus",
   seven_day_sonnet: "subscription.sevenDaySonnet",
-  // Codex 免费方案的次要窗口是 30 天（付费方案为 7 天）
+  // The Codex free plan uses a 30-day secondary window; paid plans use 7 days.
   "30_day": "subscription.thirtyDay",
-  // Gemini 模型分类
+  // Gemini model categories.
   gemini_pro: "subscription.geminiPro",
   gemini_flash: "subscription.geminiFlash",
   gemini_flash_lite: "subscription.geminiFlashLite",
-  // Token Plan（five_hour 已在上方官方映射中）
+  // Token plans; five_hour already uses the official mapping above.
   weekly_limit: "subscription.sevenDay",
-  // 火山方舟 Agent Plan / Coding Plan 的月窗口
+  // Monthly window for Volcano Ark Agent and Coding plans.
   monthly: "subscription.monthly",
   // GitHub Copilot
   premium: "subscription.copilotPremium",
 };
 
-/** 根据使用百分比返回颜色 class */
+/** Return a color class for the utilization percentage. */
 export function utilizationColor(utilization: number): string {
   if (utilization >= 90) return "text-red-500 dark:text-red-400";
   if (utilization >= 70) return "text-orange-500 dark:text-orange-400";
   return "text-green-600 dark:text-green-400";
 }
 
-/** 计算倒计时的纯时间字符串，如 "2h30m"、"3d12h" */
+/** Return a plain countdown string such as "2h30m" or "3d12h". */
 export function countdownStr(resetsAt: string | null): string | null {
   if (!resetsAt) return null;
   const diffMs = new Date(resetsAt).getTime() - Date.now();
@@ -65,7 +65,7 @@ export function countdownStr(resetsAt: string | null): string | null {
   return `${minutes}m`;
 }
 
-/** 格式化重置时间为倒计时文本（带 i18n 模板） */
+/** Format the reset time as a localized countdown. */
 function formatResetTime(
   resetsAt: string | null,
   t: (key: string, options?: Record<string, string>) => string,
@@ -75,10 +75,10 @@ function formatResetTime(
   return t("subscription.resetsIn", { time });
 }
 
-/** 不需要在 inline 模式显示的 tier */
+/** Tiers hidden from the inline layout. */
 const HIDDEN_INLINE_TIERS = new Set(["seven_day_sonnet"]);
 
-/** 格式化相对时间（与 UsageFooter 一致） */
+/** Format relative time consistently with UsageFooter. */
 function formatRelativeTime(
   timestamp: number,
   now: number,
@@ -94,12 +94,14 @@ function formatRelativeTime(
 }
 
 /**
- * 纯展示组件：渲染 SubscriptionQuota 的 5 种状态（not_found / parse_error /
- * expired / API 失败 / 成功），支持 inline / expanded 两种布局。
+ * Presentation-only component for the five SubscriptionQuota states
+ * (not_found, parse_error, expired, API failure, and success) in inline or
+ * expanded layouts.
  *
- * 数据源由调用方 hook 注入，方便不同的额度后端复用同一套渲染逻辑：
- * - `SubscriptionQuotaFooter`（CLI 凭据路径，by appId）
- * - `CodexOauthQuotaFooter`（nexus-composer 自管 OAuth 路径，by ChatGPT account）
+ * The caller injects data from its hook so different quota backends can reuse
+ * the same rendering logic:
+ * - `SubscriptionQuotaFooter`: CLI credential path, keyed by appId.
+ * - `CodexOauthQuotaFooter`: Nexus Composer-managed OAuth path, keyed by ChatGPT account.
  */
 export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
   quota,
@@ -110,7 +112,7 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
 }) => {
   const { t } = useTranslation();
 
-  // 定期更新相对时间显示
+  // Update relative timestamps periodically.
   const [now, setNow] = React.useState(Date.now());
   React.useEffect(() => {
     if (!quota?.queriedAt) return;
@@ -118,13 +120,13 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
     return () => clearInterval(interval);
   }, [quota?.queriedAt]);
 
-  // 无凭据 → 不显示
+  // Render nothing when credentials are unavailable.
   if (!quota || quota.credentialStatus === "not_found") return null;
 
-  // 凭据解析错误 → 不显示（静默）
+  // Silently render nothing when credentials cannot be parsed.
   if (quota.credentialStatus === "parse_error") return null;
 
-  // 凭据过期
+  // Expired credentials.
   if (quota.credentialStatus === "expired" && !quota.success) {
     if (inline) {
       return (
@@ -169,7 +171,7 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
     );
   }
 
-  // API 调用失败
+  // API request failure.
   if (!quota.success) {
     if (inline) {
       return (
@@ -209,23 +211,23 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
     );
   }
 
-  // 成功获取数据
+  // Successful response.
   const tiers = (quota.tiers || []).filter(
     (tier) => tier.name in TIER_I18N_KEYS,
   );
   if (tiers.length === 0) return null;
 
-  // ── inline 模式：紧凑两行显示 ──
+  // Compact two-row inline layout.
   if (inline) {
     return (
       <div className="flex flex-col items-end gap-1 text-xs whitespace-nowrap flex-shrink-0">
-        {/* 第一行：查询时间 + 刷新 */}
+        {/* First row: query time and refresh */}
         <div className="flex items-center gap-2 justify-end">
           <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
             <Clock size={10} />
             {quota.queriedAt
               ? formatRelativeTime(quota.queriedAt, now, t)
-              : t("usage.never", { defaultValue: "从未更新" })}
+              : t("usage.never", { defaultValue: "Never" })}
           </span>
           <button
             onClick={(e) => {
@@ -240,7 +242,7 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
           </button>
         </div>
 
-        {/* 第二行：各 tier 使用百分比 */}
+        {/* Second row: utilization percentage for each tier */}
         <div className="flex items-center gap-2">
           {tiers
             .filter((tier) => !HIDDEN_INLINE_TIERS.has(tier.name))
@@ -252,7 +254,7 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
     );
   }
 
-  // ── 展开模式：详细信息 ──
+  // Expanded layout with detailed information.
   return (
     <div className="mt-3 rounded-xl border border-border-default bg-card px-4 py-3 shadow-sm">
       <div className="flex items-center justify-between mb-2">
@@ -283,7 +285,7 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
         ))}
       </div>
 
-      {/* 超额使用 */}
+      {/* Extra usage */}
       {quota.extraUsage?.isEnabled && (
         <div className="mt-2 pt-2 border-t border-border-default text-xs text-gray-500 dark:text-gray-400">
           <span className="font-medium">{t("subscription.extraUsage")}: </span>
@@ -304,7 +306,7 @@ export const SubscriptionQuotaView: React.FC<SubscriptionQuotaViewProps> = ({
   );
 };
 
-/** inline 模式下的单个 tier 显示 */
+/** Render a single tier in the inline layout. */
 export const TierBadge: React.FC<{
   tier: QuotaTier;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -339,7 +341,7 @@ export const TierBadge: React.FC<{
   );
 };
 
-/** 展开模式下的单个 tier 进度条 */
+/** Render a single tier's progress bar in the expanded layout. */
 const TierBar: React.FC<{
   tier: QuotaTier;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -358,7 +360,7 @@ const TierBar: React.FC<{
         {label}
       </span>
 
-      {/* 进度条 */}
+      {/* Progress bar */}
       <div className="flex-1 h-2 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
         <div
           className={`h-full rounded-full transition-all ${
@@ -395,8 +397,9 @@ const TierBar: React.FC<{
 };
 
 /**
- * CLI 凭据路径下的薄 wrapper：通过 useSubscriptionQuota(appId) 自取数据
- * 后转发到 SubscriptionQuotaView。对外 props/行为与重构前完全一致。
+ * Thin wrapper for the CLI credential path. It loads data through
+ * useSubscriptionQuota(appId) and forwards it to SubscriptionQuotaView while
+ * preserving the public props and behavior.
  */
 const SubscriptionQuotaFooter: React.FC<SubscriptionQuotaFooterProps> = ({
   appId,

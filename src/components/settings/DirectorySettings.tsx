@@ -45,7 +45,7 @@ export function DirectorySettings({
 
   return (
     <div className="space-y-6">
-      {/* Nexus Composer 配置目录 - 独立区块 */}
+      {/* Nexus Composer configuration directory */}
       <section className="space-y-4">
         <header className="space-y-1">
           <h3 className="text-sm font-medium">{t("settings.appConfigDir")}</h3>
@@ -82,7 +82,7 @@ export function DirectorySettings({
         </div>
       </section>
 
-      {/* Claude/Codex 配置目录 - 独立区块 */}
+      {/* Claude and Codex configuration directories */}
       <section className="space-y-4">
         <header className="space-y-1">
           <h3 className="text-sm font-medium">

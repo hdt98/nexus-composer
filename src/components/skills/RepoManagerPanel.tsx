@@ -89,7 +89,7 @@ export function RepoManagerPanel({
       title={t("skills.repo.title")}
       onClose={onClose}
     >
-      {/* 添加仓库表单 */}
+      {/* Add-repository form */}
       <div className="space-y-4 glass-card rounded-xl p-6">
         <h3 className="text-base font-semibold text-foreground">
           {t("skills.addRepo")}
@@ -133,7 +133,7 @@ export function RepoManagerPanel({
         </div>
       </div>
 
-      {/* 仓库列表 */}
+      {/* Repository list */}
       <div className="space-y-4">
         <h3 className="text-base font-semibold text-foreground">
           {t("skills.repo.list")}
@@ -170,7 +170,7 @@ export function RepoManagerPanel({
                     size="icon"
                     type="button"
                     onClick={() => handleOpenRepo(repo.owner, repo.name)}
-                    title={t("common.view", { defaultValue: "查看" })}
+                    title={t("common.view", { defaultValue: "View" })}
                     className="hover:bg-black/5 dark:hover:bg-white/5"
                   >
                     <ExternalLink className="h-4 w-4" />

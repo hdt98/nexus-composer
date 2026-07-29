@@ -1,10 +1,10 @@
-//! OpenCode MCP 同步和导入模块
+//! OpenCode MCP synchronization and import module.
 //!
-//! 本模块处理 Nexus Composer 统一 MCP 格式与 OpenCode 格式之间的转换。
+//! Converts between the Nexus Composer unified MCP format and the OpenCode format.
 //!
-//! ## 格式差异
+//! ## Format differences
 //!
-//! | Nexus Composer 统一格式    | OpenCode 格式       |
+//! | Nexus Composer unified format | OpenCode format |
 //! |----------------------|---------------------|
 //! | `type: "stdio"`      | `type: "local"`     |
 //! | `command` + `args`   | `command: [cmd, ...args]` |

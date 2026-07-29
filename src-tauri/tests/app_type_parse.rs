@@ -17,6 +17,6 @@ fn parse_known_apps_case_insensitive_and_trim() {
 fn parse_unknown_app_returns_localized_error_message() {
     let err = AppType::from_str("unknown").unwrap_err();
     let msg = err.to_string();
-    assert!(msg.contains("可选值") || msg.contains("Allowed"));
+    assert!(msg.contains("Allowed"));
     assert!(msg.contains("unknown"));
 }

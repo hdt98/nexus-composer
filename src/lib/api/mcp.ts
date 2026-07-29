@@ -33,14 +33,14 @@ export const mcpApi = {
   },
 
   /**
-   * @deprecated 使用 getAllServers() 代替（v3.7.0+）
+   * @deprecated Use getAllServers() instead (v3.7.0+).
    */
   async getConfig(app: AppId = "claude"): Promise<McpConfigResponse> {
     return await invoke("get_mcp_config", { app });
   },
 
   /**
-   * @deprecated 使用 upsertUnifiedServer() 代替（v3.7.0+）
+   * @deprecated Use upsertUnifiedServer() instead (v3.7.0+).
    */
   async upsertServerInConfig(
     app: AppId,
@@ -60,7 +60,7 @@ export const mcpApi = {
   },
 
   /**
-   * @deprecated 使用 deleteUnifiedServer() 代替（v3.7.0+）
+   * @deprecated Use deleteUnifiedServer() instead (v3.7.0+).
    */
   async deleteServerInConfig(
     app: AppId,
@@ -78,39 +78,39 @@ export const mcpApi = {
   },
 
   /**
-   * @deprecated 使用 toggleApp() 代替（v3.7.0+）
+   * @deprecated Use toggleApp() instead (v3.7.0+).
    */
   async setEnabled(app: AppId, id: string, enabled: boolean): Promise<boolean> {
     return await invoke("set_mcp_enabled", { app, id, enabled });
   },
 
   // ========================================================================
-  // v3.7.0 新增：统一 MCP 管理 API
+  // Unified MCP management API added in v3.7.0.
   // ========================================================================
 
   /**
-   * 获取所有 MCP 服务器（统一结构）
+   * Gets all MCP servers in the unified structure.
    */
   async getAllServers(): Promise<McpServersMap> {
     return await invoke("get_mcp_servers");
   },
 
   /**
-   * 添加或更新 MCP 服务器（统一结构）
+   * Adds or updates an MCP server in the unified structure.
    */
   async upsertUnifiedServer(server: McpServer): Promise<void> {
     return await invoke("upsert_mcp_server", { server });
   },
 
   /**
-   * 删除 MCP 服务器
+   * Deletes an MCP server.
    */
   async deleteUnifiedServer(id: string): Promise<boolean> {
     return await invoke("delete_mcp_server", { id });
   },
 
   /**
-   * 切换 MCP 服务器在指定应用的启用状态
+   * Toggles an MCP server for a specified application.
    */
   async toggleApp(
     serverId: string,
@@ -121,7 +121,7 @@ export const mcpApi = {
   },
 
   /**
-   * 从所有应用导入 MCP 服务器
+   * Imports MCP servers from all applications.
    */
   async importFromApps(): Promise<number> {
     return await invoke("import_mcp_from_apps");

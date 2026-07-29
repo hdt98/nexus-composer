@@ -1,14 +1,14 @@
-//! Thinking 优化器
+//! Thinking optimizer.
 
 use super::types::OptimizerConfig;
 use serde_json::{json, Value};
 
-/// 根据模型类型自动优化 thinking 配置
+/// Optimizes the thinking configuration for the selected model family.
 ///
-/// 三路径分发：
-/// - skip: haiku 模型直接跳过
-/// - adaptive: opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6 使用 adaptive thinking
-/// - legacy: 其他模型注入 enabled thinking + budget_tokens
+/// Dispatches along three paths:
+/// - skip: Haiku models are left unchanged
+/// - adaptive: opus-4-8 / opus-4-7 / opus-4-6 / sonnet-4-6 use adaptive thinking
+/// - legacy: other models receive enabled thinking plus `budget_tokens`
 pub fn optimize(body: &mut Value, config: &OptimizerConfig) {
     if !config.thinking_optimizer {
         return;
@@ -80,7 +80,7 @@ fn uses_adaptive_thinking(model: &str) -> bool {
         .any(|needle| normalized.contains(needle))
 }
 
-/// 追加 beta 标识到 anthropic_beta 数组（去重）
+/// Appends a beta identifier to `anthropic_beta`, avoiding duplicates.
 fn append_beta(body: &mut Value, beta: &str) {
     match body.get_mut("anthropic_beta") {
         Some(Value::Array(arr)) => {

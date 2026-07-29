@@ -1,6 +1,6 @@
-//! API 数据模型
+//! API data models.
 //!
-//! 定义 Anthropic 和 OpenAI API 的请求/响应结构
+//! Defines request and response structures for the Anthropic and OpenAI APIs.
 
 pub mod anthropic;
 pub mod openai;

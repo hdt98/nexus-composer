@@ -1,7 +1,8 @@
-//! 托盘展示用的用量缓存（进程内、写穿式）。
+//! In-process, write-through usage cache for the system tray.
 //!
-//! 各 usage 查询命令成功时写入；系统托盘构建菜单时读取。不持久化，
-//! 进程重启即空，由下一次自动查询或托盘悬停触发的刷新重新填充。
+//! Successful usage queries write to it, and the system tray reads it when building
+//! menus. It is not persisted; after a process restart, the next automatic query or
+//! tray-hover refresh repopulates it.
 
 use std::collections::HashMap;
 use std::sync::RwLock;
@@ -33,7 +34,8 @@ impl UsageCache {
         }
     }
 
-    /// 以借用形式暴露订阅快照，避免托盘每次重建时深拷贝整个 `SubscriptionQuota`。
+    /// Borrows the subscription snapshot to avoid cloning the entire `SubscriptionQuota`
+    /// whenever the tray is rebuilt.
     pub fn with_subscription<R>(
         &self,
         app_type: &AppType,
@@ -45,7 +47,7 @@ impl UsageCache {
             .and_then(|r| r.get(app_type).map(f))
     }
 
-    /// 以借用形式暴露脚本型用量结果，同上。
+    /// Borrows a script-based usage result for the same reason.
     pub fn with_script<R>(
         &self,
         app_type: &AppType,
@@ -59,8 +61,9 @@ impl UsageCache {
     }
 
     pub fn invalidate_script(&self, app_type: &AppType, provider_id: &str) {
-        // 热路径会对每个禁用脚本的 provider 在托盘重建时调用一次：先走读锁
-        // `contains_key` 快速放行"本来就不在缓存里"的常见情况，避免无谓的写锁升级。
+        // During tray rebuilds, this hot path runs once for every provider whose script is
+        // disabled. Check `contains_key` under a read lock first so the common "not cached"
+        // case avoids an unnecessary write-lock upgrade.
         let key = (app_type.clone(), provider_id.to_string());
         if !self.script.read().is_ok_and(|r| r.contains_key(&key)) {
             return;

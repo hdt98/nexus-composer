@@ -8,7 +8,10 @@ use crate::app_config::AppType;
 use crate::error::AppError;
 use crate::services::skill::{SkillStorageLocation, SyncMethod};
 
-/// 自定义端点配置（历史兼容，实际存储在 provider.meta.custom_endpoints）
+/// Custom endpoint configuration.
+///
+/// Kept for backward compatibility; the actual value is stored in
+/// `provider.meta.custom_endpoints`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomEndpoint {
@@ -22,7 +25,7 @@ fn default_true() -> bool {
     true
 }
 
-/// 主页面显示的应用配置
+/// App visibility configuration for the main page.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VisibleApps {
@@ -56,7 +59,7 @@ impl Default for VisibleApps {
             gemini: true,
             opencode: true,
             openclaw: true,
-            hermes: false, // 默认不显示，需用户手动启用
+            hermes: false, // Hidden by default and enabled explicitly by the user.
         }
     }
 }
@@ -76,7 +79,7 @@ impl VisibleApps {
     }
 }
 
-/// WebDAV 同步状态（持久化同步进度信息）
+/// WebDAV sync status persisted with the latest progress details.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDavSyncStatus {
@@ -101,7 +104,7 @@ fn default_profile() -> String {
     "default".to_string()
 }
 
-/// WebDAV 同步设置
+/// WebDAV sync settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebDavSyncSettings {
@@ -143,14 +146,14 @@ impl WebDavSyncSettings {
         if self.base_url.trim().is_empty() {
             return Err(crate::error::AppError::localized(
                 "webdav.base_url.required",
-                "WebDAV 地址不能为空",
+                "WebDAV URL is required.",
                 "WebDAV URL is required.",
             ));
         }
         if self.username.trim().is_empty() {
             return Err(crate::error::AppError::localized(
                 "webdav.username.required",
-                "WebDAV 用户名不能为空",
+                "WebDAV username is required.",
                 "WebDAV username is required.",
             ));
         }
@@ -176,7 +179,7 @@ impl WebDavSyncSettings {
     }
 }
 
-/// S3 同步设置
+/// S3 sync settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct S3SyncSettings {
@@ -224,28 +227,28 @@ impl S3SyncSettings {
         if self.bucket.trim().is_empty() {
             return Err(crate::error::AppError::localized(
                 "s3.bucket.required",
-                "S3 存储桶不能为空",
+                "S3 bucket is required.",
                 "S3 bucket is required.",
             ));
         }
         if self.region.trim().is_empty() {
             return Err(crate::error::AppError::localized(
                 "s3.region.required",
-                "S3 区域不能为空",
+                "S3 region is required.",
                 "S3 region is required.",
             ));
         }
         if self.access_key_id.trim().is_empty() {
             return Err(crate::error::AppError::localized(
                 "s3.access_key_id.required",
-                "S3 Access Key ID 不能为空",
+                "S3 Access Key ID is required.",
                 "S3 Access Key ID is required.",
             ));
         }
         if self.secret_access_key.trim().is_empty() {
             return Err(crate::error::AppError::localized(
                 "s3.secret_access_key.required",
-                "S3 Secret Access Key 不能为空",
+                "S3 Secret Access Key is required.",
                 "S3 Secret Access Key is required.",
             ));
         }
@@ -276,9 +279,10 @@ impl S3SyncSettings {
     }
 }
 
-/// 本机自动迁移状态。
+/// Local automatic migration state.
 ///
-/// 这里记录的是本机启动时执行过的一次性迁移；标记不随数据库同步。
+/// Records one-time migrations run on this machine at startup. These markers do
+/// not sync with the database.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalMigrations {
@@ -287,8 +291,9 @@ pub struct LocalMigrations {
         Option<CodexThirdPartyHistoryProviderBucketMigration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_provider_template_v1: Option<CodexProviderTemplateMigration>,
-    /// 统一会话开关的官方历史迁移标记。开关关闭时会被清除，
-    /// 这样重新开启能把"关闭期间"落入 openai 桶的官方会话补迁进来。
+    /// Migration marker for the official-history unify toggle.
+    /// Cleared when the toggle turns off so re-enabling it can backfill
+    /// official sessions that landed in the `openai` bucket while it was off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_official_history_unify_v1: Option<CodexOfficialHistoryUnifyMigration>,
 }
@@ -325,39 +330,43 @@ pub struct CodexOfficialHistoryUnifyMigration {
     pub migrated_jsonl_files: usize,
     #[serde(default)]
     pub migrated_state_rows: usize,
-    /// 迁移时的规范化 Codex 目录。标记只对同一目录生效：
-    /// 切换 codex_config_dir 后旧标记不会挡住新目录的迁移。
+    /// Normalized Codex directory used during migration.
+    /// The marker only applies to the same directory, so changing
+    /// `codex_config_dir` does not block migration for the new directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_config_dir: Option<String>,
 }
 
-/// 应用设置结构
+/// Application settings structure.
 ///
-/// 存储设备级别设置，保存在本地 `~/.cc-switch/settings.json`，不随数据库同步。
-/// 这确保了云同步场景下多设备可以独立运作。
+/// Stores device-level settings in local `~/.cc-switch/settings.json` without
+/// syncing them through the database. This keeps each device independent in
+/// cloud-sync scenarios.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
-    // ===== 设备级 UI 设置 =====
+    // ===== Device-level UI settings =====
     #[serde(default = "default_show_in_tray")]
     pub show_in_tray: bool,
     #[serde(default = "default_minimize_to_tray_on_close")]
     pub minimize_to_tray_on_close: bool,
     #[serde(default)]
     pub use_app_window_controls: bool,
-    /// 是否启用 Claude 插件联动
+    /// Whether Claude plugin integration is enabled.
     #[serde(default)]
     pub enable_claude_plugin_integration: bool,
-    /// 是否跳过 Claude Code 初次安装确认
+    /// Whether to skip the first-install confirmation for Claude Code.
     #[serde(default)]
     pub skip_claude_onboarding: bool,
-    /// 是否开机自启
+    /// Whether to launch at system startup.
     #[serde(default)]
     pub launch_on_startup: bool,
-    /// 静默启动（程序启动时不显示主窗口，仅托盘运行）
+    /// Silent startup. The app starts without showing the main window and runs
+    /// only in the tray.
     #[serde(default)]
     pub silent_startup: bool,
-    /// 是否在主页面启用本地代理功能（默认关闭）
+    /// Whether to enable the local proxy feature on the main page. Disabled by
+    /// default.
     #[serde(default)]
     pub enable_local_proxy: bool,
     /// User has confirmed the local proxy first-run notice
@@ -398,11 +407,11 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
 
-    // ===== 主页面显示的应用 =====
+    // ===== Main-page app visibility =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_apps: Option<VisibleApps>,
 
-    // ===== 设备级目录覆盖 =====
+    // ===== Device-level directory overrides =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -416,50 +425,58 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hermes_config_dir: Option<String>,
 
-    // ===== 当前供应商 ID（设备级）=====
-    /// 当前 Claude 供应商 ID（本地存储，优先于数据库 is_current）
+    // ===== Current provider IDs (device-level) =====
+    /// Current Claude provider ID. Stored locally and takes precedence over the
+    /// database `is_current` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_claude: Option<String>,
-    /// 当前 Claude Desktop 供应商 ID（本地存储，优先于数据库 is_current）
+    /// Current Claude Desktop provider ID. Stored locally and takes precedence
+    /// over the database `is_current` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_claude_desktop: Option<String>,
-    /// 当前 Codex 供应商 ID（本地存储，优先于数据库 is_current）
+    /// Current Codex provider ID. Stored locally and takes precedence over the
+    /// database `is_current` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_codex: Option<String>,
-    /// 当前 Gemini 供应商 ID（本地存储，优先于数据库 is_current）
+    /// Current Gemini provider ID. Stored locally and takes precedence over the
+    /// database `is_current` flag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_gemini: Option<String>,
-    /// 当前 OpenCode 供应商 ID（本地存储，对 OpenCode 可能无意义，但保持结构一致）
+    /// Current OpenCode provider ID. Stored locally for schema consistency even
+    /// if it may not be meaningful for OpenCode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_opencode: Option<String>,
-    /// 当前 OpenClaw 供应商 ID（本地存储，对 OpenClaw 可能无意义，但保持结构一致）
+    /// Current OpenClaw provider ID. Stored locally for schema consistency even
+    /// if it may not be meaningful for OpenClaw.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_openclaw: Option<String>,
-    /// 当前 Hermes 供应商 ID（本地存储，保持结构一致）
+    /// Current Hermes provider ID. Stored locally for schema consistency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_provider_hermes: Option<String>,
 
-    // ===== Skill 同步设置 =====
-    /// Skill 同步方式：auto（默认，优先 symlink）、symlink、copy
+    // ===== Skill sync settings =====
+    /// Skill sync method: `auto` (default, prefer `symlink`), `symlink`, or
+    /// `copy`.
     #[serde(default)]
     pub skill_sync_method: SyncMethod,
-    /// Skill 存储位置：cc_switch（默认）或 unified（~/.agents/skills/）
+    /// Skill storage location: `cc_switch` (default) or
+    /// `unified` (`~/.agents/skills/`).
     #[serde(default)]
     pub skill_storage_location: SkillStorageLocation,
 
-    // ===== WebDAV 同步设置 =====
+    // ===== WebDAV sync settings =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_sync: Option<WebDavSyncSettings>,
 
-    // ===== S3 同步设置 =====
+    // ===== S3 sync settings =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3_sync: Option<S3SyncSettings>,
 
-    // ===== WebDAV 备份设置（旧版，保留向后兼容）=====
+    // ===== WebDAV backup settings (legacy, kept for compatibility) =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_backup: Option<serde_json::Value>,
 
-    // ===== 备份策略设置 =====
+    // ===== Backup policy settings =====
     /// Auto-backup interval in hours (default 24, 0 = disabled)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_interval_hours: Option<u32>,
@@ -467,15 +484,16 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_retain_count: Option<u32>,
 
-    // ===== 终端设置 =====
-    /// 首选终端应用（可选，默认使用系统默认终端）
+    // ===== Terminal settings =====
+    /// Preferred terminal application. Optional; defaults to the system
+    /// terminal.
     /// - macOS: "terminal" | "iterm2" | "warp" | "alacritty" | "kitty" | "ghostty" | "wezterm" | "kaku"
     /// - Windows: "cmd" | "powershell" | "wt" (Windows Terminal)
     /// - Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preferred_terminal: Option<String>,
 
-    // ===== 本机自动迁移状态 =====
+    // ===== Local automatic migration state =====
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_migrations: Option<LocalMigrations>,
 }
@@ -543,7 +561,7 @@ impl Default for AppSettings {
 
 impl AppSettings {
     fn settings_path() -> Option<PathBuf> {
-        // settings.json 保留用于旧版本迁移和无数据库场景
+        // Keep settings.json for legacy migration and database-free scenarios.
         Some(
             crate::config::get_home_dir()
                 .join(".cc-switch")
@@ -628,7 +646,7 @@ impl AppSettings {
                 }
                 Err(err) => {
                     log::warn!(
-                        "解析设置文件失败，将使用默认设置。路径: {}, 错误: {}",
+                        "Failed to parse the settings file. Falling back to defaults. Path: {}, error: {}",
                         path.display(),
                         err
                     );
@@ -645,7 +663,9 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
     let mut normalized = settings.clone();
     normalized.normalize_paths();
     let Some(path) = AppSettings::settings_path() else {
-        return Err(AppError::Config("无法获取用户主目录".to_string()));
+        return Err(AppError::Config(
+            "Failed to resolve the user home directory".to_string(),
+        ));
     };
 
     if let Some(parent) = path.parent() {
@@ -706,7 +726,7 @@ pub fn get_settings() -> AppSettings {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .clone()
@@ -729,7 +749,7 @@ pub fn update_settings(mut new_settings: AppSettings) -> Result<(), AppError> {
     save_settings_file(&new_settings)?;
 
     let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
+        log::warn!("Settings lock was poisoned; using the recovered value: {e}");
         e.into_inner()
     });
     *guard = new_settings;
@@ -741,7 +761,7 @@ where
     F: FnOnce(&mut AppSettings),
 {
     let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
+        log::warn!("Settings lock was poisoned; using the recovered value: {e}");
         e.into_inner()
     });
     let mut next = guard.clone();
@@ -794,8 +814,9 @@ pub fn mark_codex_provider_template_migrated(
     })
 }
 
-/// 统一会话迁移标记是否覆盖指定目录。标记里没记目录（不应出现的旧格式）
-/// 视为不匹配——重跑迁移是幂等的，宁可重迁也不漏迁。
+/// Whether the unified-session migration marker covers the given directory.
+/// If the marker has no recorded directory, treat it as a mismatch. That old
+/// format should not appear, and rerunning the migration is idempotent.
 pub fn is_codex_official_history_unify_migrated_for_dir(codex_dir: &str) -> bool {
     get_settings()
         .local_migrations
@@ -804,10 +825,13 @@ pub fn is_codex_official_history_unify_migrated_for_dir(codex_dir: &str) -> bool
         .is_some_and(|migration| migration.codex_config_dir.as_deref() == Some(codex_dir))
 }
 
-/// 条件写入迁移完成标记：仅当此刻开关仍开启且迁移意愿仍在时才写。
-/// 检查与写入在 settings 写锁内原子完成，与关闭开关路径
-/// （`update_settings` / 清标记）串行，消除"迁移线程复查开关后、写标记前
-/// 用户恰好关闭开关"的竞态窗口。返回是否实际写入。
+/// Conditionally write the migration-complete marker only if the toggle is
+/// still on and migration is still requested at this moment.
+/// The check and write happen atomically under the settings write lock and are
+/// serialized with the toggle-off path (`update_settings` / marker clearing),
+/// eliminating the race where a user disables the toggle after the migration
+/// thread rechecks it but before the marker is written. Returns whether a
+/// marker was actually written.
 pub fn mark_codex_official_history_unify_migrated_if_enabled(
     migration: CodexOfficialHistoryUnifyMigration,
 ) -> Result<bool, AppError> {
@@ -844,12 +868,13 @@ pub fn clear_codex_unify_migrate_existing() -> Result<(), AppError> {
     })
 }
 
-/// 从文件重新加载设置到内存缓存
-/// 用于导入配置等场景，确保内存缓存与文件同步
+/// Reload settings from disk into the in-memory cache.
+/// Used for flows such as config import to keep the cache in sync with the
+/// file.
 pub fn reload_settings() -> Result<(), AppError> {
     let fresh_settings = AppSettings::load_from_file();
     let mut guard = settings_store().write().unwrap_or_else(|e| {
-        log::warn!("设置锁已毒化，使用恢复值: {e}");
+        log::warn!("Settings lock was poisoned; using the recovered value: {e}");
         e.into_inner()
     });
     *guard = fresh_settings;
@@ -908,7 +933,7 @@ pub fn preserve_codex_official_auth_on_switch() -> bool {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .preserve_codex_official_auth_on_switch
@@ -918,18 +943,19 @@ pub fn unify_codex_session_history() -> bool {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .unify_codex_session_history
 }
 
-// ===== 当前供应商管理函数 =====
+// ===== Current provider management =====
 
-/// 获取指定应用类型的当前供应商 ID（从本地 settings 读取）
+/// Get the current provider ID for the given app type from local settings.
 ///
-/// 这是设备级别的设置，不随数据库同步。
-/// 如果本地没有设置，调用者应该 fallback 到数据库的 `is_current` 字段。
+/// This is a device-level setting and does not sync through the database. If
+/// no local value is set, callers should fall back to the database
+/// `is_current` field.
 pub fn get_current_provider(app_type: &AppType) -> Option<String> {
     let settings = settings_store().read().ok()?;
     match app_type {
@@ -943,10 +969,10 @@ pub fn get_current_provider(app_type: &AppType) -> Option<String> {
     }
 }
 
-/// 设置指定应用类型的当前供应商 ID（保存到本地 settings）
+/// Set the current provider ID for the given app type in local settings.
 ///
-/// 这是设备级别的设置，不随数据库同步。
-/// 传入 `None` 会清除当前供应商设置。
+/// This is a device-level setting and does not sync through the database.
+/// Passing `None` clears the current provider setting.
 pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), AppError> {
     let id_owned = id.map(|s| s.to_string());
     mutate_settings(|settings| match app_type {
@@ -960,82 +986,84 @@ pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), 
     })
 }
 
-/// 获取有效的当前供应商 ID（验证存在性）
+/// Get the effective current provider ID after validating that it still exists.
 ///
-/// 逻辑：
-/// 1. 从本地 settings 读取当前供应商 ID
-/// 2. 验证该 ID 在数据库中存在
-/// 3. 如果不存在则清理本地 settings，fallback 到数据库的 is_current
+/// Logic:
+/// 1. Read the current provider ID from local settings.
+/// 2. Verify that the ID exists in the database.
+/// 3. If it does not exist, clear the local settings value and fall back to
+///    the database `is_current` flag.
 ///
-/// 这确保了返回的 ID 一定是有效的（在数据库中存在）。
-/// 多设备云同步场景下，配置导入后本地 ID 可能失效，此函数会自动修复。
+/// This guarantees that any returned ID exists in the database. In multi-device
+/// cloud-sync scenarios, a local ID may become stale after config import, and
+/// this function repairs that automatically.
 pub fn get_effective_current_provider(
     db: &crate::database::Database,
     app_type: &AppType,
 ) -> Result<Option<String>, AppError> {
-    // 1. 从本地 settings 读取
+    // 1. Read from local settings.
     if let Some(local_id) = get_current_provider(app_type) {
-        // 2. 验证该 ID 在数据库中存在
+        // 2. Verify that the ID exists in the database.
         let providers = db.get_all_providers(app_type.as_str())?;
         if providers.contains_key(&local_id) {
-            // 存在，直接返回
+            // It exists, so return it directly.
             return Ok(Some(local_id));
         }
 
-        // 3. 不存在，清理本地 settings
+        // 3. It no longer exists, so clear the local settings value.
         log::warn!(
-            "本地 settings 中的供应商 {} ({}) 在数据库中不存在，将清理并 fallback 到数据库",
+            "Provider {} ({}) from local settings does not exist in the database; clearing it and falling back to the database value",
             local_id,
             app_type.as_str()
         );
         let _ = set_current_provider(app_type, None);
     }
 
-    // Fallback 到数据库的 is_current
+    // Fall back to the database `is_current` flag.
     db.get_current_provider(app_type.as_str())
 }
 
-// ===== Skill 同步方式管理函数 =====
+// ===== Skill sync method management =====
 
-/// 获取 Skill 同步方式配置
+/// Get the configured skill sync method.
 pub fn get_skill_sync_method() -> SyncMethod {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .skill_sync_method
 }
 
-// ===== Skill 存储位置管理函数 =====
+// ===== Skill storage location management =====
 
-/// 获取 Skill 存储位置配置
+/// Get the configured skill storage location.
 pub fn get_skill_storage_location() -> SkillStorageLocation {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .skill_storage_location
 }
 
-/// 设置 Skill 存储位置
+/// Set the skill storage location.
 pub fn set_skill_storage_location(location: SkillStorageLocation) -> Result<(), AppError> {
     mutate_settings(|s| {
         s.skill_storage_location = location;
     })
 }
 
-// ===== 备份策略管理函数 =====
+// ===== Backup policy management =====
 
 /// Get the effective auto-backup interval in hours (default 24)
 pub fn effective_backup_interval_hours() -> u32 {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .backup_interval_hours
@@ -1047,7 +1075,7 @@ pub fn effective_backup_retain_count() -> usize {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .backup_retain_count
@@ -1055,35 +1083,36 @@ pub fn effective_backup_retain_count() -> usize {
         .unwrap_or(10)
 }
 
-// ===== 终端设置管理函数 =====
+// ===== Terminal settings management =====
 
-/// 获取首选终端应用
+/// Get the preferred terminal application.
 pub fn get_preferred_terminal() -> Option<String> {
     settings_store()
         .read()
         .unwrap_or_else(|e| {
-            log::warn!("设置锁已毒化，使用恢复值: {e}");
+            log::warn!("Settings lock was poisoned; using the recovered value: {e}");
             e.into_inner()
         })
         .preferred_terminal
         .clone()
 }
 
-// ===== WebDAV 同步设置管理函数 =====
+// ===== WebDAV sync settings management =====
 
-/// 获取 WebDAV 同步设置
+/// Get the WebDAV sync settings.
 pub fn get_webdav_sync_settings() -> Option<WebDavSyncSettings> {
     settings_store().read().ok()?.webdav_sync.clone()
 }
 
-/// 保存 WebDAV 同步设置
+/// Save the WebDAV sync settings.
 pub fn set_webdav_sync_settings(settings: Option<WebDavSyncSettings>) -> Result<(), AppError> {
     mutate_settings(|current| {
         current.webdav_sync = settings;
     })
 }
 
-/// 仅更新 WebDAV 同步状态，避免覆写 credentials/root/profile 等字段
+/// Update only the WebDAV sync status without overwriting fields such as
+/// credentials, root, or profile.
 pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppError> {
     mutate_settings(|current| {
         if let Some(sync) = current.webdav_sync.as_mut() {
@@ -1092,7 +1121,7 @@ pub fn update_webdav_sync_status(status: WebDavSyncStatus) -> Result<(), AppErro
     })
 }
 
-// ===== S3 同步设置管理函数 =====
+// ===== S3 sync settings management =====
 
 pub fn get_s3_sync_settings() -> Option<S3SyncSettings> {
     settings_store().read().ok()?.s3_sync.clone()
@@ -1160,7 +1189,7 @@ mod tests {
         }
 
         let mut unsupported = AppSettings {
-            language: Some("zh".to_string()),
+            language: Some("unsupported".to_string()),
             ..AppSettings::default()
         };
         unsupported.normalize_paths();

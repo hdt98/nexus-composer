@@ -42,7 +42,7 @@ export function useProviderActions(
   const deleteProviderMutation = useDeleteProviderMutation(activeApp);
   const switchProviderMutation = useSwitchProviderMutation(activeApp);
 
-  // Claude 插件同步逻辑
+  // Synchronize the Claude plugin configuration.
   const syncClaudePlugin = useCallback(
     async (provider: Provider) => {
       if (activeApp !== "claude") return;
@@ -56,12 +56,12 @@ export function useProviderActions(
         const isOfficial = provider.category === "official";
         await settingsApi.applyClaudePluginConfig({ official: isOfficial });
 
-        // 静默执行，不显示成功通知
+        // Run silently without a success notification.
       } catch (error) {
         const detail =
           extractErrorMessage(error) ||
           t("notifications.syncClaudePluginFailed", {
-            defaultValue: "同步 Claude 插件失败",
+            defaultValue: "Sync Claude plugin failed",
           });
         toast.error(detail, { duration: 4200 });
       }
@@ -69,7 +69,7 @@ export function useProviderActions(
     [activeApp, t],
   );
 
-  // 添加供应商
+  // Add a provider.
   const addProvider = useCallback(
     async (
       provider: Omit<Provider, "id"> & {
@@ -114,7 +114,7 @@ export function useProviderActions(
           if (modelsRegistered) {
             toast.success(
               t("notifications.openclawModelsRegistered", {
-                defaultValue: "模型已注册到 /model 列表",
+                defaultValue: "Models have been registered to /model list",
               }),
               { closeButton: true },
             );
@@ -131,12 +131,12 @@ export function useProviderActions(
     [addProviderMutation, activeApp, queryClient, t],
   );
 
-  // 更新供应商
+  // Update a provider.
   const updateProvider = useCallback(
     async (provider: Provider, originalId?: string) => {
       await updateProviderMutation.mutateAsync({ provider, originalId });
 
-      // 更新托盘菜单（失败不影响主操作）
+      // Update the tray menu without letting failure affect the main action.
       try {
         await providersApi.updateTrayMenu();
       } catch (trayError) {
@@ -149,7 +149,7 @@ export function useProviderActions(
     [updateProviderMutation],
   );
 
-  // 切换供应商
+  // Switch providers.
   const switchProvider = useCallback(
     async (provider: Provider) => {
       const isCopilotProvider =
@@ -175,39 +175,39 @@ export function useProviderActions(
       ) {
         if (isCopilotProvider) {
           proxyRequiredReason = t("notifications.proxyReasonCopilot", {
-            defaultValue: "使用 GitHub Copilot 作为 Claude 供应商",
+            defaultValue: "uses GitHub Copilot as a Claude provider",
           });
         } else if (
           provider.meta?.apiFormat === "openai_chat" &&
           activeApp === "claude"
         ) {
           proxyRequiredReason = t("notifications.proxyReasonOpenAIChat", {
-            defaultValue: "使用 OpenAI Chat 接口格式",
+            defaultValue: "uses OpenAI Chat API format",
           });
         } else if (
           provider.meta?.apiFormat === "openai_responses" &&
           activeApp === "claude"
         ) {
           proxyRequiredReason = t("notifications.proxyReasonOpenAIResponses", {
-            defaultValue: "使用 OpenAI Responses 接口格式",
+            defaultValue: "uses OpenAI Responses API format",
           });
         } else if (isCodexChatFormat) {
           proxyRequiredReason = t("notifications.proxyReasonOpenAIChat", {
-            defaultValue: "使用 OpenAI Chat 接口格式",
+            defaultValue: "uses OpenAI Chat API format",
           });
         } else if (
           activeApp === "claude-desktop" &&
           provider.meta?.claudeDesktopMode === "proxy"
         ) {
           proxyRequiredReason = t("notifications.proxyReasonClaudeDesktop", {
-            defaultValue: "使用 Claude Desktop 本地路由模式",
+            defaultValue: "uses Claude Desktop local routing mode",
           });
         } else if (
           provider.meta?.isFullUrl &&
           (activeApp === "claude" || activeApp === "codex")
         ) {
           proxyRequiredReason = t("notifications.proxyReasonFullUrl", {
-            defaultValue: "开启了完整 URL 连接模式",
+            defaultValue: "has full URL connection mode enabled",
           });
         }
       }
@@ -217,7 +217,7 @@ export function useProviderActions(
           t("notifications.proxyRequiredForSwitch", {
             reason: proxyRequiredReason,
             defaultValue:
-              "此供应商{{reason}}，需要代理服务才能正常使用，请先启动代理",
+              "This provider {{reason}}, requires the routing service to work properly. Start routing first.",
           }),
         );
       }
@@ -232,7 +232,7 @@ export function useProviderActions(
         toast.error(
           t("notifications.officialBlockedByProxy", {
             defaultValue:
-              "代理接管模式下不能切换到官方供应商，使用代理访问官方 API 可能导致账号被封禁",
+              "Cannot switch to official provider while local routing is active. Using routing with official APIs may cause account bans.",
           }),
           { duration: 6000 },
         );
@@ -264,38 +264,40 @@ export function useProviderActions(
           toast.warning(
             t("notifications.backfillWarning", {
               defaultValue:
-                "切换成功，但旧供应商配置回填失败，您手动修改的配置可能未保存",
+                "Switched successfully, but failed to save changes back to the previous provider",
             }),
             { duration: 5000 },
           );
         }
 
-        // 若已弹过 proxyRequired 警告则不再弹 success
+        // Do not show a success toast after a proxy-required warning.
         if (!proxyRequiredReason) {
           let messageKey = "notifications.switchSuccess";
-          let defaultMessage = "切换成功！";
+          let defaultMessage = "Switch successful!";
           if (activeApp === "codex") {
             messageKey = "notifications.codexRestartRequired";
-            defaultMessage = "切换成功，请重启客户端以生效";
+            defaultMessage =
+              "Switched successfully. Restart the client to apply changes.";
           } else if (activeApp === "claude-desktop") {
             if (provider.meta?.claudeDesktopMode === "proxy") {
               messageKey = "notifications.claudeDesktopProxyRestartRequired";
               defaultMessage =
-                "切换成功，请保持 Nexus Composer 运行，并重启 Claude Desktop 后生效";
+                "Switched successfully. Keep Nexus Composer running and restart Claude Desktop to apply changes.";
             } else {
               messageKey = "notifications.claudeDesktopRestartRequired";
-              defaultMessage = "切换成功，重启 Claude Desktop 后生效";
+              defaultMessage =
+                "Switched successfully. Restart Claude Desktop to apply changes.";
             }
           } else if (activeApp === "opencode" || activeApp === "openclaw") {
             messageKey = "notifications.addToConfigSuccess";
-            defaultMessage = "已添加到配置";
+            defaultMessage = "Added to config";
           }
           toast.success(t(messageKey, { defaultValue: defaultMessage }), {
             closeButton: true,
           });
         }
       } catch {
-        // 错误提示由 mutation 处理
+        // The mutation handles error notifications.
       }
     },
     [
@@ -309,7 +311,7 @@ export function useProviderActions(
     ],
   );
 
-  // 删除供应商
+  // Delete a provider.
   const deleteProvider = useCallback(
     async (id: string) => {
       await deleteProviderMutation.mutateAsync(id);
@@ -317,7 +319,7 @@ export function useProviderActions(
     [deleteProviderMutation],
   );
 
-  // 保存用量脚本
+  // Save a usage script.
   const saveUsageScript = useCallback(
     async (provider: Provider, script: UsageScript) => {
       try {
@@ -333,8 +335,9 @@ export function useProviderActions(
         await queryClient.invalidateQueries({
           queryKey: ["providers", activeApp],
         });
-        // 🔧 保存用量脚本后，也应该失效该 provider 的用量查询缓存
-        // 这样主页列表会使用新配置重新查询，而不是使用测试时的缓存
+        // Invalidate this provider's usage-query cache after saving so the
+        // home-page list fetches with the new configuration instead of using
+        // results cached during testing.
         await queryClient.invalidateQueries({
           queryKey: usageKeys.script(provider.id, activeApp),
         });
@@ -343,7 +346,7 @@ export function useProviderActions(
         });
         toast.success(
           t("provider.usageSaved", {
-            defaultValue: "用量查询配置已保存",
+            defaultValue: "Usage query configuration saved",
           }),
           { closeButton: true },
         );
@@ -351,7 +354,7 @@ export function useProviderActions(
         const detail =
           extractErrorMessage(error) ||
           t("provider.usageSaveFailed", {
-            defaultValue: "用量查询配置保存失败",
+            defaultValue: "Failed to save usage query configuration",
           });
         toast.error(detail);
       }
@@ -366,7 +369,7 @@ export function useProviderActions(
       if (!config.models || config.models.length === 0) {
         toast.error(
           t("notifications.openclawNoModels", {
-            defaultValue: "该供应商没有配置模型",
+            defaultValue: "No models configured",
           }),
         );
         return;
@@ -387,7 +390,7 @@ export function useProviderActions(
         });
         toast.success(
           t("notifications.openclawDefaultModelSet", {
-            defaultValue: "已设为默认模型",
+            defaultValue: "Set as default model",
           }),
           { closeButton: true },
         );
@@ -395,7 +398,7 @@ export function useProviderActions(
         const detail =
           extractErrorMessage(error) ||
           t("notifications.openclawDefaultModelSetFailed", {
-            defaultValue: "设置默认模型失败",
+            defaultValue: "Failed to set default model",
           });
         toast.error(detail);
       }

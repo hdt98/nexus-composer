@@ -1,7 +1,7 @@
 /**
- * 从各种错误对象中提取错误信息
- * @param error 错误对象
- * @returns 提取的错误信息字符串
+ * Extract a message from supported error shapes.
+ * @param error Error value.
+ * @returns The extracted message.
  */
 export const extractErrorMessage = (error: unknown): string => {
   if (!error) return "";
@@ -38,9 +38,10 @@ export const extractErrorMessage = (error: unknown): string => {
 };
 
 /**
- * 将已知的 MCP 相关后端错误（通常为中文硬编码）映射为 i18n 文案
- * 采用包含式匹配，尽量稳健地覆盖不同上下文的相似消息。
- * 若无法识别，返回空字符串以便调用方回退到原始 detail 或默认 i18n。
+ * Map known MCP backend errors to localized messages.
+ * Substring matching covers equivalent messages in different contexts.
+ * Return an empty string when no match exists so callers can use the original
+ * detail or their default localized message.
  */
 export const translateMcpBackendError = (
   message: string,
@@ -49,58 +50,64 @@ export const translateMcpBackendError = (
   if (!message) return "";
   const msg = String(message).trim();
 
-  // 基础字段与结构校验相关
-  if (msg.includes("MCP 服务器 ID 不能为空")) {
+  // Basic field and structure validation.
+  if (msg.includes("MCP server ID cannot be empty")) {
     return t("mcp.error.idRequired");
   }
   if (
-    msg.includes("MCP 服务器定义必须为 JSON 对象") ||
-    msg.includes("MCP 服务器条目必须为 JSON 对象") ||
-    msg.includes("MCP 服务器条目缺少 server 字段") ||
-    msg.includes("MCP 服务器 server 字段必须为 JSON 对象") ||
-    msg.includes("MCP 服务器连接定义必须为 JSON 对象") ||
-    msg.includes("MCP 服务器 '" /* 不是对象 */) ||
-    msg.includes("不是对象") ||
-    msg.includes("服务器配置必须是对象") ||
-    msg.includes("MCP 服务器 name 必须为字符串") ||
-    msg.includes("MCP 服务器 description 必须为字符串") ||
-    msg.includes("MCP 服务器 homepage 必须为字符串") ||
-    msg.includes("MCP 服务器 docs 必须为字符串") ||
-    msg.includes("MCP 服务器 tags 必须为字符串数组") ||
-    msg.includes("MCP 服务器 enabled 必须为布尔值")
+    msg.includes("MCP server definition must be a JSON object") ||
+    msg.includes("An MCP server entry must be a JSON object") ||
+    msg.includes("An MCP server entry is missing the server field") ||
+    msg.includes(
+      "The server field of an MCP server entry must be a JSON object",
+    ) ||
+    msg.includes("An MCP server connection definition must be a JSON object") ||
+    (msg.includes("MCP server '") && msg.includes("is not an object")) ||
+    msg.includes("has a non-object `server` field") ||
+    msg.includes("Server configuration must be an object") ||
+    msg.includes("MCP server name must be a string") ||
+    msg.includes("MCP server description must be a string") ||
+    msg.includes("MCP server homepage must be a string") ||
+    msg.includes("MCP server docs must be a string") ||
+    msg.includes("MCP server tags must be an array of strings") ||
+    msg.includes("MCP server enabled must be a boolean")
   ) {
     return t("mcp.error.jsonInvalid");
   }
-  if (msg.includes("MCP 服务器 type 必须是")) {
+  if (msg.includes("MCP server type must be")) {
     return t("mcp.error.jsonInvalid");
   }
 
-  // 必填字段
+  // Required fields.
   if (
-    msg.includes("stdio 类型的 MCP 服务器缺少 command 字段") ||
-    msg.includes("必须包含 command 字段")
+    msg.includes("An stdio MCP server is missing the command field") ||
+    msg.includes("stdio MCP server is missing the `command` field") ||
+    msg.includes("stdio MCP servers must include the command field")
   ) {
     return t("mcp.error.commandRequired");
   }
   if (
-    msg.includes("http 类型的 MCP 服务器缺少 url 字段") ||
-    msg.includes("sse 类型的 MCP 服务器缺少 url 字段") ||
-    msg.includes("必须包含 url 字段") ||
-    msg === "URL 不能为空"
+    msg.includes("An HTTP MCP server is missing the url field") ||
+    msg.includes("An SSE MCP server is missing the url field") ||
+    msg.includes("http MCP server is missing the `url` field") ||
+    msg.includes("sse MCP server is missing the `url` field") ||
+    msg.includes("MCP servers must include the url field") ||
+    msg === "URL cannot be empty"
   ) {
     return t("mcp.wizard.urlRequired");
   }
 
-  // 文件解析/序列化
+  // File parsing and serialization.
   if (
-    msg.includes("解析 ~/.claude.json 失败") ||
-    msg.includes("解析 config.toml 失败") ||
-    msg.includes("无法识别的 TOML 格式") ||
-    msg.includes("TOML 内容不能为空")
+    msg.includes("Failed to parse ~/.claude.json") ||
+    msg.includes("Failed to parse ~/.codex/config.toml") ||
+    msg.includes("Failed to parse config.toml") ||
+    msg.includes("Unrecognized TOML format") ||
+    msg.includes("TOML content cannot be empty")
   ) {
     return t("mcp.error.tomlInvalid");
   }
-  if (msg.includes("序列化 config.toml 失败")) {
+  if (msg.includes("Failed to serialize config.toml")) {
     return t("mcp.error.tomlInvalid");
   }
 

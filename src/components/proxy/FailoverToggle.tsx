@@ -1,7 +1,7 @@
 /**
- * 故障转移切换开关组件
+ * Failover toggle.
  *
- * 放置在主界面头部，用于一键启用/关闭自动故障转移
+ * Displayed in the main header to enable or disable automatic failover.
  */
 
 import { Shuffle, Loader2 } from "lucide-react";
@@ -43,16 +43,18 @@ export function FailoverToggle({ className, activeApp }: FailoverToggleProps) {
   const tooltipText = !takeoverEnabled
     ? t("failover.tooltip.takeoverRequired", {
         app: appLabel,
-        defaultValue: `请先接管 ${appLabel}，再启用故障转移`,
+        defaultValue: "Enable routing for {{app}} before enabling failover",
       })
     : isEnabled
       ? t("failover.tooltip.enabled", {
           app: appLabel,
-          defaultValue: `${appLabel} 故障转移已启用\n按队列优先级（P1→P2→...）选择供应商`,
+          defaultValue:
+            "{{app}} failover enabled\nRequests follow queue priority (P1→P2→...)",
         })
       : t("failover.tooltip.disabled", {
           app: appLabel,
-          defaultValue: `启用 ${appLabel} 故障转移\n将立即切换到队列 P1，并在失败时自动切换到下一个`,
+          defaultValue:
+            "Enable {{app}} failover\nSwitches to queue P1 immediately, then falls back on failures",
         });
 
   return (

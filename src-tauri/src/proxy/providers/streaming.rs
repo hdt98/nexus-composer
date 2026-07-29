@@ -1,6 +1,6 @@
-//! 流式响应转换模块
+//! Streaming response conversion module.
 //!
-//! 实现 OpenAI SSE → Anthropic SSE 格式转换
+//! Converts OpenAI SSE to Anthropic SSE.
 
 use crate::proxy::sse::{strip_sse_field, take_sse_block};
 use bytes::Bytes;
@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 
-/// OpenAI 流式响应数据结构
+/// OpenAI streaming response data.
 #[derive(Debug, Deserialize)]
 struct OpenAIStreamChunk {
     #[serde(default)]
@@ -33,7 +33,7 @@ struct StreamChoice {
 struct Delta {
     #[serde(default)]
     content: Option<String>,
-    // OpenRouter/Kimi/其它 使用 reasoning，DeepSeek 使用 reasoning_content
+    // OpenRouter, Kimi, and others use `reasoning`; DeepSeek uses `reasoning_content`.
     #[serde(default, alias = "reasoning_content")]
     reasoning: Option<String>,
     #[serde(default)]
@@ -59,7 +59,7 @@ struct DeltaFunction {
     arguments: Option<String>,
 }
 
-/// OpenAI 流式响应的 usage 信息（完整版）
+/// Complete usage data from an OpenAI streaming response.
 #[derive(Debug, Deserialize)]
 struct Usage {
     #[serde(default)]
@@ -89,19 +89,20 @@ struct ToolBlockState {
     name: String,
     started: bool,
     pending_args: String,
-    /// 连续空白字符计数 — 用于检测 Copilot 无限换行 bug
-    /// 当 function call 参数中的连续空白字符达到阈值时，强制终止流
+    /// Consecutive whitespace count for detecting the Copilot infinite-newline bug.
+    /// Terminates the stream when function-call arguments reach the threshold.
     consecutive_whitespace: usize,
-    /// 是否已因无限空白 bug 被中止
+    /// Whether this tool call was aborted because of infinite whitespace.
     aborted: bool,
 }
 
-/// 无限空白 bug 的连续空白字符阈值
+/// Consecutive whitespace threshold for the infinite-whitespace bug.
 const INFINITE_WHITESPACE_THRESHOLD: usize = 500;
 
 fn build_anthropic_usage_json(usage: &Usage) -> Value {
-    // OpenAI prompt_tokens 含缓存，Anthropic input_tokens 不含，需减去 cache_read 与 cache_creation
-    // （三桶互斥，恒等 input + cache_read + cache_creation == prompt_tokens）。
+    // OpenAI `prompt_tokens` includes cached tokens, while Anthropic `input_tokens` does not.
+    // Subtract cache reads and creation to preserve the mutually exclusive bucket invariant:
+    // input + cache_read + cache_creation == prompt_tokens.
     let cached = extract_cache_read_tokens(usage).unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
     let input_tokens = usage
@@ -143,7 +144,7 @@ fn build_message_delta_event(stop_reason: Option<String>, usage_json: Option<Val
     })
 }
 
-/// 创建 Anthropic SSE 流
+/// Creates an Anthropic SSE stream.
 pub fn create_anthropic_sse_stream<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
@@ -161,11 +162,11 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
         let mut current_model = None;
         let mut next_content_index: u32 = 0;
         let mut has_sent_message_start = false;
-        // 某些上游 provider（如 OpenRouter 的 kimi-k2.6）会在 tool_use 后发送多个
-        // 带 finish_reason 的 SSE chunk。Anthropic 协议要求每个消息流只能有一个
-        // message_delta，重复会导致 Claude Code abort 连接。因此需要：
-        // 1) has_emitted_message_delta: 去重，只处理第一个 finish_reason
-        // 2) pending_message_delta: 缓存延迟到 [DONE] 发送，确保 usage 完整
+        // Some upstreams, such as OpenRouter's kimi-k2.6, send multiple SSE chunks with
+        // `finish_reason` after `tool_use`. Anthropic allows one `message_delta` per message;
+        // duplicates make Claude Code abort the connection. Therefore:
+        // 1) `has_emitted_message_delta` processes only the first `finish_reason`.
+        // 2) `pending_message_delta` delays emission until `[DONE]` for complete usage.
         let mut has_emitted_message_delta = false;
         let mut pending_message_delta: Option<(Option<String>, Option<Value>)> = None;
         let mut has_sent_message_stop = false;
@@ -213,7 +214,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                 if data.trim() == "[DONE]" {
                                     log::debug!("[Claude/OpenRouter] <<< OpenAI SSE: [DONE]");
 
-                                    // 流正常结束，发出缓存的 message_delta（含完整 usage）。
+                                    // Emit the pending `message_delta` with complete usage.
                                     if let Some((stop_reason, usage_json)) = pending_message_delta.take() {
                                         let event = build_message_delta_event(stop_reason, usage_json);
                                         let sse_data = format!("event: message_delta\ndata: {}\n\n",
@@ -294,7 +295,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                             has_sent_message_start = true;
                                         }
 
-                                        // 处理 reasoning（thinking）
+                                        // Convert reasoning to thinking.
                                         if let Some(reasoning) = &choice.delta.reasoning {
                                             if current_non_tool_block_type != Some("thinking") {
                                                 if let Some(index) = current_non_tool_block_index.take() {
@@ -338,7 +339,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                             }
                                         }
 
-                                        // 处理文本内容
+                                        // Convert text content.
                                         if let Some(content) = &choice.delta.content {
                                             if !content.is_empty() {
                                                 if current_non_tool_block_type != Some("text") {
@@ -385,7 +386,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                             }
                                         }
 
-                                        // 处理工具调用
+                                        // Convert tool calls.
                                         if let Some(tool_calls) = &choice.delta.tool_calls {
                                             if !tool_calls.is_empty() {
                                                 if let Some(index) = current_non_tool_block_index.take() {
@@ -424,7 +425,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                                                 }
                                                             });
 
-                                                        // 如果此 tool call 已被中止（无限空白 bug），跳过后续处理
+                                                        // Ignore later chunks for a tool call aborted by infinite whitespace.
                                                         if state.aborted {
                                                             continue;
                                                         }
@@ -457,7 +458,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                                             .as_ref()
                                                             .and_then(|f| f.arguments.clone());
                                                         let immediate_delta = if let Some(args) = args_delta {
-                                                            // 无限空白 bug 检测：跟踪连续空白字符
+                                                            // Track consecutive whitespace to detect the infinite-whitespace bug.
                                                             for ch in args.chars() {
                                                                 if ch.is_whitespace() {
                                                                     state.consecutive_whitespace += 1;
@@ -467,7 +468,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                                             }
                                                             if state.consecutive_whitespace >= INFINITE_WHITESPACE_THRESHOLD {
                                                                 log::warn!(
-                                                                    "[Copilot] 检测到无限空白 bug (tool: {}), 中止此 tool call 流",
+                                                                    "[Copilot] Infinite whitespace detected for tool {}; aborting tool-call stream",
                                                                     state.name
                                                                 );
                                                                 state.aborted = true;
@@ -538,17 +539,17 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                             }
                                         }
 
-                                        // 处理 finish_reason。
-                                        // 注意：OpenRouter 某些 provider 会发送多个带 finish_reason 的 chunk
-                                        // （第一个 usage 为 null，后续才补全）。此处只做缓存，不立即发送，
-                                        // 等到 [DONE] 或流末尾再统一发出，确保 usage 完整且只发一次。
+                                        // Handle `finish_reason`. Some OpenRouter providers send multiple
+                                        // chunks with `finish_reason`: the first has null usage and a later
+                                        // chunk completes it. Cache the result until `[DONE]` or stream end
+                                        // so complete usage is emitted exactly once.
                                         if let Some(finish_reason) = &choice.finish_reason {
                                             let stop_reason = map_stop_reason(Some(finish_reason));
                                             let usage_json =
                                                 chunk_usage_json.clone().or_else(|| latest_usage.clone());
 
                                             if has_emitted_message_delta {
-                                                // 更新缓存的 message_delta usage（如果有更完整的 usage）
+                                                // Update pending usage when a more complete value arrives.
                                                 if let (Some((_, ref mut usage)), Some(uj)) = (&mut pending_message_delta, usage_json) {
                                                     *usage = Some(uj);
                                                 }
@@ -645,7 +646,7 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
                                                 open_tool_block_indices.clear();
                                             }
 
-                                            // 缓存 message_delta，等到 [DONE] 时发送（以便收集完整的 usage）
+                                            // Cache `message_delta` until `[DONE]` to collect complete usage.
                                             pending_message_delta = Some((stop_reason, usage_json));
                                         }
                                     }
@@ -672,8 +673,9 @@ pub(crate) fn create_anthropic_sse_stream_with_mode<E: std::error::Error + Send 
             }
         }
 
-        // 流自然结束但未收到 [DONE] 时，确保发送缓存的 message_delta 和 message_stop。
-        // 若上游已显式报错，则只保留 error 事件，避免把失败伪装成成功完成。
+        // If the stream ends without `[DONE]`, emit pending `message_delta` and `message_stop`.
+        // After an explicit upstream error, retain only the error event rather than presenting
+        // the failure as a successful completion.
         if !stream_ended_with_error {
             let emitted_pending_message_delta = if let Some((stop_reason, usage_json)) =
                 pending_message_delta.take()
@@ -713,7 +715,7 @@ fn extract_cache_read_tokens(usage: &Usage) -> Option<u32> {
         .filter(|&v| v > 0)
 }
 
-/// 映射停止原因
+/// Maps a finish reason to an Anthropic stop reason.
 fn map_stop_reason(finish_reason: Option<&str>) -> Option<String> {
     finish_reason.map(|r| {
         match r {
@@ -798,7 +800,9 @@ mod tests {
         assert_eq!(events[0]["type"], "ping");
 
         for error in ["{}", "false", r#"{"message":"","code":"0"}"#] {
-            let input = format!("data: {{\"error\":{error},\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+            let input = format!(
+                "data: {{\"error\":{error},\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+            );
             let events = collect_nexus_anthropic_events(&input).await;
             assert!(events.iter().any(|event| event["type"] == "message_stop"));
             assert!(!events.iter().any(|event| event["type"] == "error"));
@@ -1019,19 +1023,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_streaming_chinese_split_across_chunks_no_replacement_chars() {
-        // "你好" split across two TCP chunks inside a streaming text delta.
+    async fn test_streaming_vietnamese_split_across_chunks_no_replacement_chars() {
+        // "Xin chào" is split across two TCP chunks inside a streaming text delta.
         // Before the fix, from_utf8_lossy would produce U+FFFD for each half.
         let full = concat!(
-            "data: {\"id\":\"chatcmpl_3\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n",
+            "data: {\"id\":\"chatcmpl_3\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{\"content\":\"Xin chào\"}}]}\n\n",
             "data: {\"id\":\"chatcmpl_3\",\"model\":\"gpt-4o\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2}}\n\n",
             "data: [DONE]\n\n"
         );
         let bytes = full.as_bytes();
 
-        // Find "你" in the byte stream and split inside it
-        let ni_start = bytes.windows(3).position(|w| w == "你".as_bytes()).unwrap();
-        let split_point = ni_start + 1; // split after first byte of "你"
+        // Find "à" in the byte stream and split after its first byte.
+        let char_start = bytes.windows(2).position(|w| w == "à".as_bytes()).unwrap();
+        let split_point = char_start + 1;
 
         let chunk1 = Bytes::from(bytes[..split_point].to_vec());
         let chunk2 = Bytes::from(bytes[split_point..].to_vec());
@@ -1048,10 +1052,10 @@ mod tests {
             .map(|chunk| String::from_utf8_lossy(chunk.unwrap().as_ref()).to_string())
             .collect::<String>();
 
-        // Must contain the original Chinese characters, not replacement chars
+        // The output must retain the original Vietnamese text without replacement characters.
         assert!(
-            merged.contains("你好"),
-            "expected '你好' in output, got replacement chars (U+FFFD)"
+            merged.contains("Xin chào"),
+            "expected 'Xin chào' in output, got replacement chars (U+FFFD)"
         );
         assert!(
             !merged.contains('\u{FFFD}'),
@@ -1164,8 +1168,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_usage_chunk_subtracts_cache_read_and_creation_from_input() {
-        // prompt_tokens(1000) 含 cache_read(600) 与 cache_creation(300)；转 Anthropic 后
-        // input 应为 fresh，守恒：input(100) + cache_read(600) + cache_creation(300) == prompt(1000)。
+        // `prompt_tokens` includes cache_read(600) and cache_creation(300). After conversion,
+        // fresh input preserves: input(100) + cache_read(600) + cache_creation(300) == prompt(1000).
         let input = concat!(
             "data: {\"id\":\"chatcmpl_cc\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tool-1\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_cc\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
@@ -1202,8 +1206,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_usage_chunk_clamps_input_to_zero_when_cache_exceeds_prompt() {
-        // prompt(100) < cache_read(80)+cache_creation(50)=130：saturating 钳到 0，防下溢。
-        // 钉桩：阻止未来把 saturating_sub 误改成普通减法(debug panic / release wrap)。
+        // Cache totals exceed prompt tokens, so saturating subtraction clamps to zero.
+        // This guards against subtraction that panics in debug builds or wraps in release builds.
         let input = concat!(
             "data: {\"id\":\"chatcmpl_uf\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"tool-1\",\"type\":\"function\",\"function\":{\"name\":\"Bash\",\"arguments\":\"{\\\"command\\\":\\\"pwd\\\"}\"}}]}}]}\n\n",
             "data: {\"id\":\"chatcmpl_uf\",\"model\":\"glm-5.1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",

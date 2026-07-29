@@ -35,10 +35,10 @@ export function ApiKeySection({
 
   const defaultPlaceholder = {
     official: t("providerForm.officialNoApiKey", {
-      defaultValue: "官方供应商无需 API Key",
+      defaultValue: "Official login does not require API Key, save directly",
     }),
     thirdParty: t("providerForm.apiKeyAutoFill", {
-      defaultValue: "输入 API Key，将自动填充到配置",
+      defaultValue: "Just fill in here, config below will be auto-filled",
     }),
   };
 
@@ -58,7 +58,7 @@ export function ApiKeySection({
         }
         disabled={disabled ?? category === "official"}
       />
-      {/* API Key 获取链接 */}
+      {/* API key link */}
       {shouldShowLink && websiteUrl && (
         <div className="space-y-2 -mt-1 pl-1">
           <a
@@ -68,11 +68,12 @@ export function ApiKeySection({
             className="text-xs text-blue-400 dark:text-blue-500 hover:text-blue-500 dark:hover:text-blue-400 transition-colors"
           >
             {t("providerForm.getApiKey", {
-              defaultValue: "获取 API Key",
+              defaultValue: "Get API Key",
             })}
           </a>
 
-          {/* 促销信息（与 isPartner 解耦：仅凭 partnerPromotionKey 即可展示，星标仍由 isPartner 控制） */}
+          {/* Promotion display depends only on partnerPromotionKey, while
+              isPartner continues to control the partner badge. */}
           {partnerPromotionKey && (
             <div className="rounded-md bg-blue-50 dark:bg-blue-950/30 p-2.5 border border-blue-200 dark:border-blue-800">
               <p className="text-xs leading-relaxed text-blue-700 dark:text-blue-300">

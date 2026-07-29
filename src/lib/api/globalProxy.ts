@@ -1,13 +1,13 @@
 /**
- * 全局出站代理 API
+ * Global outbound proxy API.
  *
- * 提供获取、设置和测试全局代理的功能。
+ * Provides operations to get, set, and test the global proxy.
  */
 
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * 代理测试结果
+ * Proxy test result.
  */
 export interface ProxyTestResult {
   success: boolean;
@@ -16,7 +16,7 @@ export interface ProxyTestResult {
 }
 
 /**
- * 出站代理状态
+ * Outbound proxy status.
  */
 export interface UpstreamProxyStatus {
   enabled: boolean;
@@ -24,7 +24,7 @@ export interface UpstreamProxyStatus {
 }
 
 /**
- * 检测到的代理
+ * Detected proxy.
  */
 export interface DetectedProxy {
   url: string;
@@ -33,52 +33,52 @@ export interface DetectedProxy {
 }
 
 /**
- * 获取全局代理 URL
+ * Get the global proxy URL.
  *
- * @returns 代理 URL，null 表示未配置（直连）
+ * @returns The proxy URL, or null when direct connection is configured.
  */
 export async function getGlobalProxyUrl(): Promise<string | null> {
   return invoke<string | null>("get_global_proxy_url");
 }
 
 /**
- * 设置全局代理 URL
+ * Set the global proxy URL.
  *
- * @param url - 代理 URL（如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080）
- *              空字符串表示清除代理（直连）
+ * @param url - Proxy URL such as http://127.0.0.1:7890 or socks5://127.0.0.1:1080.
+ *              An empty string clears the proxy and uses a direct connection.
  */
 export async function setGlobalProxyUrl(url: string): Promise<void> {
   try {
     return await invoke("set_global_proxy_url", { url });
   } catch (error) {
-    // Tauri invoke 错误可能是字符串
+    // Tauri invoke errors may be strings.
     throw new Error(typeof error === "string" ? error : String(error));
   }
 }
 
 /**
- * 测试代理连接
+ * Test a proxy connection.
  *
- * @param url - 要测试的代理 URL
- * @returns 测试结果，包含是否成功、延迟和错误信息
+ * @param url - Proxy URL to test.
+ * @returns The result with success, latency, and error information.
  */
 export async function testProxyUrl(url: string): Promise<ProxyTestResult> {
   return invoke<ProxyTestResult>("test_proxy_url", { url });
 }
 
 /**
- * 获取当前出站代理状态
+ * Get current outbound proxy status.
  *
- * @returns 代理状态，包含是否启用和代理 URL
+ * @returns Proxy status with enabled state and URL.
  */
 export async function getUpstreamProxyStatus(): Promise<UpstreamProxyStatus> {
   return invoke<UpstreamProxyStatus>("get_upstream_proxy_status");
 }
 
 /**
- * 扫描本地代理
+ * Scan for local proxies.
  *
- * @returns 检测到的代理列表
+ * @returns Detected proxies.
  */
 export async function scanLocalProxies(): Promise<DetectedProxy[]> {
   return invoke<DetectedProxy[]>("scan_local_proxies");

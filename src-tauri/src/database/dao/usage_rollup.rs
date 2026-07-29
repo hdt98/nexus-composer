@@ -75,11 +75,12 @@ impl Database {
             return Ok(0);
         }
 
-        // 剪枝是不可逆的：明细一旦汇总删除，0 成本行就永远失去按 pricing_model
-        // 补价重算的机会（启动序列里 seed 定价先于 rollup、但启动回填在 rollup
-        // 之后；周期任务同理）。所以剪枝前先尽力回填一次。失败仅告警不阻断——
-        // 否则一行损坏的定价数据会永久卡死日志清理。
-        // 注意必须在 SAVEPOINT 之外调用：回填内部自己开顶层事务。
+        // Pruning is irreversible: after detail rows are aggregated and deleted, zero-cost rows
+        // can no longer be repriced by pricing_model. Startup seeds pricing before rollup but runs
+        // its backfill afterward, and the periodic task has the same ordering. Attempt a best-effort
+        // backfill before pruning. Warn without blocking on failure so one malformed pricing row
+        // cannot permanently prevent log cleanup. Run this outside the SAVEPOINT because backfill
+        // opens its own top-level transaction.
         if let Err(e) = Self::backfill_missing_usage_costs_on_conn(&conn, None) {
             log::warn!("Pre-prune cost backfill failed, pruning anyway: {e}");
         }
@@ -98,8 +99,8 @@ impl Database {
                     log::info!(
                         "Rolled up and pruned {deleted} proxy_request_logs (retain={retain_days}d)"
                     );
-                    // 归档触发了表结构变化，前端 30 天前的统计可能跟着变，
-                    // 通知一次让 UsageDashboard 重拉数据
+                    // Archiving can change statistics older than 30 days. Notify once so
+                    // UsageDashboard reloads its data.
                     crate::usage_events::notify_log_recorded();
                 }
                 Ok(deleted)
@@ -115,9 +116,10 @@ impl Database {
     fn do_rollup_and_prune(conn: &rusqlite::Connection, cutoff: i64) -> Result<u64, AppError> {
         // Aggregate old logs, merging with any pre-existing rollup rows via LEFT JOIN.
         let effective_filter = effective_usage_log_filter("l");
-        // request_model 维度保留路由接管的「客户端别名 → 真实模型」映射，
-        // pricing_model 维度保留写入时的计价基准（request 计价模式下与 model 分叉）；
-        // 明细行的这两列可能为 NULL（历史/手工数据），归一为 ''。
+        // The request_model dimension preserves the takeover route's client-alias-to-real-model
+        // mapping. The pricing_model dimension preserves the pricing basis at write time and may
+        // differ from model in request-pricing mode. Normalize NULL values from historical or
+        // manually inserted detail rows to ''.
         let aggregation_sql = format!(
             "INSERT OR REPLACE INTO usage_daily_rollups
                 (date, app_type, provider_id, data_source, model, request_model, pricing_model,
@@ -350,8 +352,8 @@ mod tests {
 
         {
             let conn = crate::database::lock_conn!(db.conn);
-            // 路由接管行：model 是真实上游模型，request_model 是客户端别名。
-            // 同 model 下两个不同别名必须各自成行，prune 后映射关系仍可审计。
+            // For takeover rows, model is the real upstream model and request_model is the client alias.
+            // Distinct aliases for one model need separate rows so the mapping remains auditable after pruning.
             for (i, request_model) in [
                 ("a", "claude-sonnet-4-6"),
                 ("b", "claude-sonnet-4-6"),
@@ -400,7 +402,7 @@ mod tests {
 
         {
             let conn = crate::database::lock_conn!(db.conn);
-            // request 计价模式下 pricing_model 与 model 分叉，必须各自成行
+            // In request-pricing mode, distinct pricing_model values need separate rows from model.
             conn.execute(
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model, pricing_model,
@@ -449,8 +451,8 @@ mod tests {
 
         {
             let conn = crate::database::lock_conn!(db.conn);
-            // >30 天的 0 成本行：pricing_model（gpt-5.5）在 seed 定价表中有价。
-            // 剪枝是不可逆的，rollup 必须先回填再汇总，否则按 0 永久入账。
+            // This zero-cost row is over 30 days old, but its pricing_model (gpt-5.5) has a seeded price.
+            // Because pruning is irreversible, rollup must backfill before aggregation to avoid a permanent zero cost.
             conn.execute(
                 "INSERT INTO proxy_request_logs (
                     request_id, provider_id, app_type, model, request_model, pricing_model,
@@ -472,7 +474,7 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        // gpt-5.5 input $5/M × 1M tokens，回填后再汇总
+        // gpt-5.5 input costs $5/M; backfill 1M tokens before aggregation.
         assert!(
             (total_cost - 5.0).abs() < 1e-6,
             "expected backfilled cost 5.0, got {total_cost}"

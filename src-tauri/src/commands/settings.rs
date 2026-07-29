@@ -3,7 +3,7 @@
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_updater::UpdaterExt;
 
-/// 应用更新下载进度（通过 `update-download-progress` 事件发给前端）。
+/// Application-update download progress emitted to the renderer as `update-download-progress`.
 #[derive(Clone, serde::Serialize)]
 struct UpdateDownloadProgress {
     downloaded: u64,
@@ -15,13 +15,13 @@ fn merge_settings_for_save(
     existing: &crate::settings::AppSettings,
 ) -> crate::settings::AppSettings {
     match (&mut incoming.webdav_sync, &existing.webdav_sync) {
-        // incoming 没有 webdav → 保留现有
+        // Preserve existing WebDAV settings when incoming omits them.
         (None, _) => {
             incoming.webdav_sync = existing.webdav_sync.clone();
         }
-        // incoming 有 webdav 但密码为空，且现有有密码 → 填回现有密码
-        // （get_settings_for_frontend 总是清空密码，所以通过 save_settings
-        //   传入的空密码意味着"保持现有"而非"用户主动清空"）
+        // If incoming WebDAV settings have an empty password while the current settings have one,
+        // restore the current password. get_settings_for_frontend always redacts it, so an empty
+        // password passed through save_settings means "preserve existing", not an explicit clear.
         (Some(incoming_sync), Some(existing_sync))
             if incoming_sync.password.is_empty() && !existing_sync.password.is_empty() =>
         {
@@ -30,11 +30,12 @@ fn merge_settings_for_save(
         _ => {}
     }
     match (&mut incoming.s3_sync, &existing.s3_sync) {
-        // incoming 没有 s3 → 保留现有
+        // Preserve existing S3 settings when incoming omits them.
         (None, _) => {
             incoming.s3_sync = existing.s3_sync.clone();
         }
-        // incoming 有 s3 但密钥为空，且现有有密钥 → 填回现有密钥
+        // If incoming S3 settings have empty credentials while current settings have credentials,
+        // restore the current credentials.
         (Some(incoming_sync), Some(existing_sync))
             if incoming_sync.secret_access_key.is_empty()
                 && !existing_sync.secret_access_key.is_empty() =>
@@ -43,21 +44,21 @@ fn merge_settings_for_save(
         }
         _ => {}
     }
-    // local_migrations 是纯后端状态（迁移完成标记），前端没有合法的修改场景，
-    // 无条件取现有值。若按 incoming 透传：后端清掉 marker（如关闭统一会话
-    // 开关）后、前端 query 缓存刷新前的一次全量保存会把旧 marker 重放回来，
-    // 重新开启时被"复活"的标记挡住而漏迁。
+    // local_migrations is backend-only state containing migration-completion markers, and the
+    // renderer has no valid reason to change it. Always retain the current value. If incoming were
+    // accepted, a full save between backend marker removal, such as disabling unified sessions, and
+    // renderer query-cache refresh could replay a stale marker. Re-enabling would then skip migration.
     incoming.local_migrations = existing.local_migrations.clone();
     incoming
 }
 
-/// 获取设置
+/// Returns settings.
 #[tauri::command]
 pub async fn get_settings() -> Result<crate::settings::AppSettings, String> {
     Ok(crate::settings::get_settings_for_frontend())
 }
 
-/// 保存设置
+/// Saves settings.
 #[tauri::command]
 pub async fn save_settings(
     state: tauri::State<'_, crate::store::AppState>,
@@ -96,9 +97,10 @@ pub async fn save_settings(
 
     if unify_codex_changed {
         if unify_codex_enabled {
-            // 后台执行存量迁移（openai 桶 → custom 桶；仅当用户勾选了迁入既有
-            // 会话，函数内部自门控）。大会话目录可能要读数秒，不能阻塞设置保存；
-            // 失败时不写完成标记，下次启动自动重试。
+            // Run the existing-session migration from the openai bucket to the custom bucket in the
+            // background. The function gates itself on the user's migration choice. Large session
+            // directories can take seconds to read and must not block saving settings. A failure does
+            // not write the completion marker, so the next startup retries automatically.
             tauri::async_runtime::spawn_blocking(|| {
                 match crate::codex_history_migration::maybe_migrate_codex_official_history_to_unified_bucket() {
                     Ok(outcome) => {
@@ -118,13 +120,13 @@ pub async fn save_settings(
                 }
             });
         } else {
-            // 清除标记与迁移意愿，让重新开启并再次勾选时能补迁
-            // 关闭期间落入 openai 桶的官方会话。
+            // Clear the marker and migration intent so enabling and selecting migration again can
+            // migrate official sessions added to the openai bucket while the feature was disabled.
             if let Err(err) = crate::settings::clear_codex_official_history_unify_migration() {
-                log::warn!("清除统一会话迁移标记失败: {err}");
+                log::warn!("Failed to clear the unified-session migration marker: {err}");
             }
             if let Err(err) = crate::settings::clear_codex_unify_migrate_existing() {
-                log::warn!("清除统一会话迁移意愿失败: {err}");
+                log::warn!("Failed to clear unified-session migration intent: {err}");
             }
         }
     }
@@ -136,19 +138,22 @@ pub async fn save_settings(
 pub struct CodexUnifyHistoryRestoreResult {
     pub restored_jsonl_files: usize,
     pub restored_state_rows: usize,
-    /// 还原被跳过的原因（如当前目录没有账本），前端据此提示而非报"成功 0 项"。
+    /// Reason restoration was skipped, such as no ledger in the current directory. The renderer
+    /// presents this explanation instead of reporting a misleading success with zero items.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skipped_reason: Option<String>,
 }
 
-/// 是否存在统一会话开关的迁移备份（决定关闭弹窗里是否显示"恢复备份"勾选）。
+/// Returns whether a unified-session migration backup exists, controlling whether the disable
+/// dialog displays its restore-backup option.
 #[tauri::command]
 pub async fn has_codex_unify_history_backup() -> Result<bool, String> {
     Ok(crate::codex_history_migration::has_codex_official_history_unify_backup())
 }
 
-/// 按迁移备份账本把当时迁入共享桶的官方会话还原回 "openai" 桶。
-/// 由关闭统一会话开关的确认弹窗触发；幂等，可安全重试。
+/// Uses the migration-backup ledger to restore official sessions moved into the shared bucket back
+/// to the "openai" bucket. Triggered by the disable-unified-sessions confirmation dialog; idempotent
+/// and safe to retry.
 #[tauri::command]
 pub async fn restore_codex_unified_history() -> Result<CodexUnifyHistoryRestoreResult, String> {
     let outcome = tauri::async_runtime::spawn_blocking(|| {
@@ -175,46 +180,47 @@ pub async fn restore_codex_unified_history() -> Result<CodexUnifyHistoryRestoreR
     })
 }
 
-/// 重启应用程序（当 app_config_dir 变更后使用）
+/// Restarts the application after app_config_dir changes.
 #[tauri::command]
 pub async fn restart_app(app: AppHandle) -> Result<bool, String> {
     crate::save_window_state_before_exit(&app);
 
-    // 在后台延迟重启，让函数有时间返回响应
+    // Delay restart in the background so the command can return its response.
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        // app.restart() 走 RESTART_EXIT_CODE 路径，ExitRequested 处理器会直接
-        // 放行给 Tauri 默认 re-exec，不执行代理/Live 清理。但本命令用于
-        // app_config_dir 变更后的重启：新实例会切到新数据库，拿不到旧库里的
-        // Live 备份，无法恢复被接管的 Live 配置。因此必须趁旧实例的事件循环
-        // 仍存活，在这里同步完成恢复（保留代理状态，新实例启动时自动重新接管）。
+        // app.restart() follows RESTART_EXIT_CODE, so ExitRequested delegates directly to Tauri's
+        // default re-exec without proxy/live cleanup. This command restarts after app_config_dir
+        // changes; the new process uses a different database and cannot access old live backups to
+        // restore intercepted configuration. Restore synchronously while the old event loop remains
+        // alive, retaining proxy state so the new process automatically takes over again.
         crate::cleanup_before_exit(&app).await;
         app.restart();
     });
     Ok(true)
 }
 
-/// 下载并安装应用更新，然后由后端直接重启应用。
+/// Downloads and installs an application update, then restarts directly from the backend.
 ///
-/// macOS 更新会原地替换 `.app` bundle。如果先返回前端、再让旧 WebView 调
-/// `process.relaunch()`，旧进程可能已经处在 bundle 被替换后的不稳定窗口期。
-/// 这里把退出清理、安装和重启串在同一个后端流程中，避免依赖旧前端继续执行。
+/// A macOS update replaces the `.app` bundle in place. If this returns to the renderer before the
+/// old WebView calls `process.relaunch()`, the process may already be in an unstable window after
+/// bundle replacement. Keep exit cleanup, installation, and restart in one backend flow without
+/// relying on the old renderer to continue.
 #[tauri::command]
 pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> {
     let updater = app
         .updater_builder()
         .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
+        .map_err(|e| format!("Failed to initialize the updater: {e}"))?;
 
     let Some(update) = updater
         .check()
         .await
-        .map_err(|e| format!("检查更新失败: {e}"))?
+        .map_err(|e| format!("Failed to check for updates: {e}"))?
     else {
         return Ok(false);
     };
 
-    log::info!("开始下载应用更新: {}", update.version);
+    log::info!("Downloading application update: {}", update.version);
     let progress_handle = app.clone();
     let mut downloaded: u64 = 0;
     let bytes = update
@@ -232,16 +238,16 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
             || {},
         )
         .await
-        .map_err(|e| format!("下载更新失败: {e}"))?;
+        .map_err(|e| format!("Failed to download the update: {e}"))?;
 
-    log::info!("开始安装应用更新: {}", update.version);
+    log::info!("Installing application update: {}", update.version);
 
     #[cfg(target_os = "windows")]
     {
-        // Windows updater 会在 install() 内启动安装器并直接退出当前进程
-        // （插件内部 std::process::exit(0)，绕过 TrayIcon::drop、不发
-        // NIM_DELETE，会残留死图标——与托盘"退出"路径相同的问题）。
-        // 因此清理只能放在 install 前执行，且必须显式移除托盘图标。
+        // The Windows updater launches the installer inside install() and exits the current process
+        // directly through std::process::exit(0). This bypasses TrayIcon::drop and does not send
+        // NIM_DELETE, leaving a stale icon like the tray Exit path. Cleanup must therefore run before
+        // install and explicitly remove the tray icon.
         crate::save_window_state_before_exit(&app);
         crate::cleanup_before_exit(&app).await;
         crate::remove_tray_icon_before_exit(&app);
@@ -249,7 +255,7 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         update.install(bytes).map_err(|e| {
             format!(
-                "Windows 更新安装失败: {e}。已执行退出前清理，代理或 Live 接管可能已暂停；请重启应用或重新开启代理后再试。"
+                "Failed to install the Windows update: {e}. Pre-exit cleanup has already run, so proxy or live takeover may be paused; restart the application or re-enable the proxy before retrying."
             )
         })?;
         return Ok(true);
@@ -257,46 +263,48 @@ pub async fn install_update_and_restart(app: AppHandle) -> Result<bool, String> 
 
     #[cfg(not(target_os = "windows"))]
     {
-        // macOS/Linux install() 会返回；先安装，避免安装失败时误停代理/撤回接管。
+        // install() returns on macOS/Linux. Install first so a failure does not unnecessarily stop
+        // the proxy or withdraw takeover.
         update
             .install(bytes)
-            .map_err(|e| format!("安装更新失败: {e}"))?;
+            .map_err(|e| format!("Failed to install the update: {e}"))?;
 
         crate::save_window_state_before_exit(&app);
         crate::cleanup_before_exit(&app).await;
 
-        log::info!("应用更新安装完成，正在重启应用");
+        log::info!("Application update installed; restarting");
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         crate::restart_process(&app);
     }
 }
 
-/// 检查是否有可用的应用更新，返回可用的新版本号（无更新时返回 None）。
+/// Checks for an application update and returns its version, or None when no update is available.
 ///
-/// 数据库版本过新的恢复界面用它判断：升级应用能否解决问题。若返回 None，说明
-/// 已是最新版本，但数据库仍不兼容（通常由第三方客户端或更高版本创建），应提示用户
-/// 升级无法解决，而不是让其反复尝试。
+/// The database-too-new recovery screen uses this to determine whether upgrading can help. None
+/// means the application is current but the database remains incompatible, usually because a
+/// third-party client or newer build created it. The UI should explain that upgrading cannot solve
+/// the problem instead of prompting repeated attempts.
 #[tauri::command]
 pub async fn check_app_update_available(app: AppHandle) -> Result<Option<String>, String> {
     let updater = app
         .updater_builder()
         .build()
-        .map_err(|e| format!("初始化更新器失败: {e}"))?;
+        .map_err(|e| format!("Failed to initialize the updater: {e}"))?;
     let update = updater
         .check()
         .await
-        .map_err(|e| format!("检查更新失败: {e}"))?;
+        .map_err(|e| format!("Failed to check for updates: {e}"))?;
     Ok(update.map(|u| u.version))
 }
 
-/// 获取 app_config_dir 覆盖配置 (从 Store)
+/// Returns the app_config_dir override from Store.
 #[tauri::command]
 pub async fn get_app_config_dir_override(app: AppHandle) -> Result<Option<String>, String> {
     Ok(crate::app_store::refresh_app_config_dir_override(&app)
         .map(|p| p.to_string_lossy().to_string()))
 }
 
-/// 设置 app_config_dir 覆盖配置 (到 Store)
+/// Writes the app_config_dir override to Store.
 #[tauri::command]
 pub async fn set_app_config_dir_override(
     app: AppHandle,
@@ -306,13 +314,15 @@ pub async fn set_app_config_dir_override(
     Ok(true)
 }
 
-/// 设置开机自启
+/// Configures launch at startup.
 #[tauri::command]
 pub async fn set_auto_launch(enabled: bool) -> Result<bool, String> {
     if enabled {
-        crate::auto_launch::enable_auto_launch().map_err(|e| format!("启用开机自启失败: {e}"))?;
+        crate::auto_launch::enable_auto_launch()
+            .map_err(|e| format!("Failed to enable launch at startup: {e}"))?;
     } else {
-        crate::auto_launch::disable_auto_launch().map_err(|e| format!("禁用开机自启失败: {e}"))?;
+        crate::auto_launch::disable_auto_launch()
+            .map_err(|e| format!("Failed to disable launch at startup: {e}"))?;
     }
     Ok(true)
 }
@@ -568,7 +578,7 @@ mod tests {
         assert_eq!(unify_migration.migrated_state_rows, 7);
     }
 
-    /// incoming 带有 local_migrations（哪怕是空的）也不能覆盖后端维护的标记。
+    /// incoming local_migrations, even an empty value, cannot overwrite backend-managed markers.
     #[test]
     fn save_settings_should_keep_backend_migration_markers_over_incoming() {
         let existing = AppSettings {
@@ -599,9 +609,9 @@ mod tests {
             .is_some());
     }
 
-    /// 后端清掉 marker 后（如关闭统一会话开关）、前端缓存刷新前的全量保存
-    /// 会携带旧 marker；merge 必须忽略它，否则被"复活"的标记会让重新开启
-    /// 时误判已迁移而漏迁。
+    /// After the backend clears a marker, such as when disabling unified sessions, a full save before
+    /// renderer-cache refresh can carry the stale marker. The merge must ignore it or re-enabling may
+    /// revive the marker, incorrectly treat migration as complete, and skip data.
     #[test]
     fn save_settings_should_ignore_stale_incoming_migration_markers() {
         let existing = AppSettings::default();
@@ -625,13 +635,14 @@ mod tests {
     }
 }
 
-/// 获取开机自启状态
+/// Returns launch-at-startup state.
 #[tauri::command]
 pub async fn get_auto_launch_status() -> Result<bool, String> {
-    crate::auto_launch::is_auto_launch_enabled().map_err(|e| format!("获取开机自启状态失败: {e}"))
+    crate::auto_launch::is_auto_launch_enabled()
+        .map_err(|e| format!("Failed to get launch-at-startup state: {e}"))
 }
 
-/// 获取整流器配置
+/// Returns rectifier configuration.
 #[tauri::command]
 pub async fn get_rectifier_config(
     state: tauri::State<'_, crate::AppState>,
@@ -639,7 +650,7 @@ pub async fn get_rectifier_config(
     state.db.get_rectifier_config().map_err(|e| e.to_string())
 }
 
-/// 设置整流器配置
+/// Sets rectifier configuration.
 #[tauri::command]
 pub async fn set_rectifier_config(
     state: tauri::State<'_, crate::AppState>,
@@ -652,7 +663,7 @@ pub async fn set_rectifier_config(
     Ok(true)
 }
 
-/// 获取优化器配置
+/// Returns optimizer configuration.
 #[tauri::command]
 pub async fn get_optimizer_config(
     state: tauri::State<'_, crate::AppState>,
@@ -660,7 +671,7 @@ pub async fn get_optimizer_config(
     state.db.get_optimizer_config().map_err(|e| e.to_string())
 }
 
-/// 设置优化器配置
+/// Sets optimizer configuration.
 #[tauri::command]
 pub async fn set_optimizer_config(
     state: tauri::State<'_, crate::AppState>,
@@ -682,7 +693,7 @@ pub async fn set_optimizer_config(
     Ok(true)
 }
 
-/// 获取 Copilot 优化器配置
+/// Returns Copilot optimizer configuration.
 #[tauri::command]
 pub async fn get_copilot_optimizer_config(
     state: tauri::State<'_, crate::AppState>,
@@ -693,7 +704,7 @@ pub async fn get_copilot_optimizer_config(
         .map_err(|e| e.to_string())
 }
 
-/// 设置 Copilot 优化器配置
+/// Sets Copilot optimizer configuration.
 #[tauri::command]
 pub async fn set_copilot_optimizer_config(
     state: tauri::State<'_, crate::AppState>,
@@ -706,7 +717,7 @@ pub async fn set_copilot_optimizer_config(
     Ok(true)
 }
 
-/// 获取日志配置
+/// Returns logging configuration.
 #[tauri::command]
 pub async fn get_log_config(
     state: tauri::State<'_, crate::AppState>,
@@ -714,7 +725,7 @@ pub async fn get_log_config(
     state.db.get_log_config().map_err(|e| e.to_string())
 }
 
-/// 设置日志配置
+/// Sets logging configuration.
 #[tauri::command]
 pub async fn set_log_config(
     state: tauri::State<'_, crate::AppState>,
@@ -726,7 +737,7 @@ pub async fn set_log_config(
         .map_err(|e| e.to_string())?;
     log::set_max_level(config.to_level_filter());
     log::info!(
-        "日志配置已更新: enabled={}, level={}",
+        "Updated logging configuration: enabled={}, level={}",
         config.enabled,
         config.level
     );

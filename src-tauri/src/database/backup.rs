@@ -1,6 +1,6 @@
-//! 数据库备份和恢复
+//! Database backup and recovery.
 //!
-//! 提供 SQL 导出/导入和二进制快照备份功能。
+//! Provides SQL import/export and binary snapshot backups.
 
 use super::{lock_conn, Database};
 use crate::config::get_app_config_dir;
@@ -13,7 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
-const NEXUS_SQL_EXPORT_HEADER: &str = "-- Nexus Composer SQLite 导出";
+const NEXUS_SQL_EXPORT_HEADER: &str = "-- Nexus Composer SQLite export";
+const NEXUS_SQL_EXPORT_HEADER_PREFIX: &str = "-- Nexus Composer SQLite ";
 
 /// Tables whose data rows are skipped when exporting for WebDAV sync.
 const SYNC_SKIP_TABLES: &[&str] = &[
@@ -45,7 +46,7 @@ pub struct BackupEntry {
 }
 
 impl Database {
-    /// 导出为 SQLite 兼容的 SQL 文本（内存字符串，完整导出）
+    /// Exports a complete SQLite-compatible SQL dump in memory.
     pub fn export_sql_string(&self) -> Result<String, AppError> {
         let snapshot = self.snapshot_to_memory()?;
         Self::dump_sql(&snapshot, &[])
@@ -57,7 +58,7 @@ impl Database {
         Self::dump_sql(&snapshot, SYNC_SKIP_TABLES)
     }
 
-    /// 导出为 SQLite 兼容的 SQL 文本
+    /// Exports SQLite-compatible SQL to a file.
     pub fn export_sql(&self, target_path: &Path) -> Result<(), AppError> {
         let dump = self.export_sql_string()?;
 
@@ -68,11 +69,11 @@ impl Database {
         crate::config::atomic_write(target_path, dump.as_bytes())
     }
 
-    /// 从 SQL 文件导入，返回生成的备份 ID（若无备份则为空字符串）
+    /// Imports an SQL file and returns the generated backup ID, or an empty string.
     pub fn import_sql(&self, source_path: &Path) -> Result<String, AppError> {
         if !source_path.exists() {
             return Err(AppError::InvalidInput(format!(
-                "SQL 文件不存在: {}",
+                "SQL file does not exist: {}",
                 source_path.display()
             )));
         }
@@ -82,7 +83,7 @@ impl Database {
         self.import_sql_string(sql_content)
     }
 
-    /// 从 SQL 字符串导入，返回生成的备份 ID（若无备份则为空字符串）
+    /// Imports an SQL string and returns the generated backup ID, or an empty string.
     pub fn import_sql_string(&self, sql_raw: &str) -> Result<String, AppError> {
         self.import_sql_string_inner(sql_raw, &[])
     }
@@ -101,7 +102,7 @@ impl Database {
         let sql_content = sql_raw.trim_start_matches('\u{feff}');
         Self::validate_nexus_sql_export(sql_content)?;
 
-        // 导入前备份现有数据库
+        // Back up the current database before importing.
         let backup_path = self.backup_database_file()?;
 
         let local_snapshot = if preserve_tables.is_empty() {
@@ -110,9 +111,9 @@ impl Database {
             Some(self.snapshot_to_memory()?)
         };
 
-        // 在临时数据库执行导入，确保失败不会污染主库
+        // Import into a temporary database so failures cannot corrupt the main database.
         let temp_file = NamedTempFile::new().map_err(|e| AppError::IoContext {
-            context: "创建临时数据库文件失败".to_string(),
+            context: "Failed to create temporary database file".to_string(),
             source: e,
         })?;
         let temp_path = temp_file.path().to_path_buf();
@@ -121,9 +122,9 @@ impl Database {
 
         temp_conn
             .execute_batch(sql_content)
-            .map_err(|e| AppError::Database(format!("执行 SQL 导入失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to execute SQL import: {e}")))?;
 
-        // 补齐缺失表/索引并进行基础校验
+        // Create missing tables and indexes, then validate the imported database.
         Self::create_tables_on_conn(&temp_conn)?;
         Self::apply_schema_migrations_on_conn(&temp_conn)?;
         Self::validate_basic_state(&temp_conn)?;
@@ -131,7 +132,7 @@ impl Database {
             Self::restore_tables(local_snapshot, &temp_conn, preserve_tables)?;
         }
 
-        // 使用 Backup 将临时库原子写回主库
+        // Atomically replace the main database from the temporary database.
         {
             let mut main_conn = lock_conn!(self.conn);
             let backup = Backup::new(&temp_conn, &mut main_conn)
@@ -148,7 +149,7 @@ impl Database {
         Ok(backup_id)
     }
 
-    /// 创建内存快照以避免长时间持有数据库锁
+    /// Creates an in-memory snapshot to avoid holding the database lock for long.
     pub(crate) fn snapshot_to_memory(&self) -> Result<Connection, AppError> {
         let conn = lock_conn!(self.conn);
         let mut snapshot =
@@ -167,13 +168,16 @@ impl Database {
 
     fn validate_nexus_sql_export(sql: &str) -> Result<(), AppError> {
         let trimmed = sql.trim_start();
-        if trimmed.starts_with(NEXUS_SQL_EXPORT_HEADER) {
+        // Older releases localized the final word in this header. Match the
+        // stable product prefix so those exports remain importable without
+        // retaining language-specific legacy text in source.
+        if trimmed.starts_with(NEXUS_SQL_EXPORT_HEADER_PREFIX) {
             return Ok(());
         }
 
         Err(AppError::localized(
             "backup.sql.invalid_format",
-            "仅支持导入由 Nexus Composer 导出的 SQL 备份文件。",
+            "Only SQL backups exported by Nexus Composer are supported.",
             "Only SQL backups exported by Nexus Composer are supported.",
         ))
     }
@@ -196,7 +200,7 @@ impl Database {
 
             target_conn
                 .execute(&format!("DELETE FROM \"{table}\""), [])
-                .map_err(|e| AppError::Database(format!("清空表 {table} 失败: {e}")))?;
+                .map_err(|e| AppError::Database(format!("Failed to clear table {table}: {e}")))?;
 
             let placeholders = (1..=columns.len())
                 .map(|idx| format!("?{idx}"))
@@ -211,10 +215,10 @@ impl Database {
 
             let mut stmt = source_conn
                 .prepare(&format!("SELECT * FROM \"{table}\""))
-                .map_err(|e| AppError::Database(format!("读取表 {table} 失败: {e}")))?;
+                .map_err(|e| AppError::Database(format!("Failed to read table {table}: {e}")))?;
             let mut rows = stmt
                 .query([])
-                .map_err(|e| AppError::Database(format!("查询表 {table} 数据失败: {e}")))?;
+                .map_err(|e| AppError::Database(format!("Failed to query table {table}: {e}")))?;
 
             while let Some(row) = rows.next().map_err(|e| AppError::Database(e.to_string()))? {
                 let mut values = Vec::with_capacity(columns.len());
@@ -227,7 +231,9 @@ impl Database {
 
                 target_conn
                     .execute(&insert_sql, rusqlite::params_from_iter(values.iter()))
-                    .map_err(|e| AppError::Database(format!("恢复表 {table} 数据失败: {e}")))?;
+                    .map_err(|e| {
+                        AppError::Database(format!("Failed to restore table {table}: {e}"))
+                    })?;
             }
         }
 
@@ -296,7 +302,7 @@ impl Database {
         Ok(())
     }
 
-    /// 生成一致性快照备份，返回备份文件路径（不存在主库时返回 None）
+    /// Create a consistent snapshot and return its path, or None if no database exists.
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
         let db_path = get_app_config_dir().join("cc-switch.db");
         if !db_path.exists() {
@@ -305,7 +311,7 @@ impl Database {
 
         let backup_dir = db_path
             .parent()
-            .ok_or_else(|| AppError::Config("无效的数据库路径".to_string()))?
+            .ok_or_else(|| AppError::Config("Invalid database path".to_string()))?
             .join("backups");
 
         fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
@@ -335,7 +341,7 @@ impl Database {
         Ok(Some(backup_path))
     }
 
-    /// 清理旧的数据库备份，保留最新的 N 个
+    /// Remove old database backups, retaining the latest N files.
     fn cleanup_db_backups(dir: &Path) -> Result<(), AppError> {
         let retain = crate::settings::effective_backup_retain_count();
         let entries = match fs::read_dir(dir) {
@@ -362,13 +368,17 @@ impl Database {
 
         for entry in sorted.into_iter().take(remove_count) {
             if let Err(err) = fs::remove_file(entry.path()) {
-                log::warn!("删除旧数据库备份失败 {}: {}", entry.path().display(), err);
+                log::warn!(
+                    "Failed to delete old database backup {}: {}",
+                    entry.path().display(),
+                    err
+                );
             }
         }
         Ok(())
     }
 
-    /// 基础状态校验
+    /// Validate the basic database state.
     fn validate_basic_state(conn: &Connection) -> Result<(), AppError> {
         let provider_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
@@ -379,13 +389,13 @@ impl Database {
 
         if provider_count == 0 && mcp_count == 0 {
             return Err(AppError::Config(
-                "导入的 SQL 未包含有效的供应商或 MCP 数据".to_string(),
+                "Imported SQL contains no valid provider or MCP data".to_string(),
             ));
         }
         Ok(())
     }
 
-    /// 导出数据库为 SQL 文本
+    /// Export the database as an SQL dump.
     fn dump_sql(conn: &Connection, skip_tables: &[&str]) -> Result<String, AppError> {
         let mut output = String::new();
         let timestamp = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
@@ -394,13 +404,13 @@ impl Database {
             .unwrap_or(0);
 
         output.push_str(&format!(
-            "-- Nexus Composer SQLite 导出\n-- 生成时间: {timestamp}\n-- user_version: {user_version}\n"
+            "{NEXUS_SQL_EXPORT_HEADER}\n-- Generated at: {timestamp}\n-- user_version: {user_version}\n"
         ));
         output.push_str("PRAGMA foreign_keys=OFF;\n");
         output.push_str(&format!("PRAGMA user_version={user_version};\n"));
         output.push_str("BEGIN TRANSACTION;\n");
 
-        // 导出 schema
+        // Export the schema.
         let mut stmt = conn
             .prepare(
                 "SELECT type, name, tbl_name, sql
@@ -419,7 +429,7 @@ impl Database {
             let name: String = row.get(1).map_err(|e| AppError::Database(e.to_string()))?;
             let sql: String = row.get(3).map_err(|e| AppError::Database(e.to_string()))?;
 
-            // 跳过 SQLite 内部对象（如 sqlite_sequence）
+            // Skip internal SQLite objects such as sqlite_sequence.
             if name.starts_with("sqlite_") {
                 continue;
             }
@@ -432,7 +442,7 @@ impl Database {
             }
         }
 
-        // 导出数据
+        // Export table data.
         for table in tables {
             if skip_tables.iter().any(|t| *t == table) {
                 continue;
@@ -474,7 +484,7 @@ impl Database {
         Ok(output)
     }
 
-    /// 获取表的列名列表
+    /// Return the column names for a table.
     fn get_table_columns(conn: &Connection, table: &str) -> Result<Vec<String>, AppError> {
         let mut stmt = conn
             .prepare(&format!("PRAGMA table_info(\"{table}\")"))
@@ -490,15 +500,16 @@ impl Database {
         Ok(columns)
     }
 
-    /// 格式化 SQL 值
+    /// Format an SQL value.
     fn format_sql_value(value: ValueRef<'_>) -> Result<String, AppError> {
         match value {
             ValueRef::Null => Ok("NULL".to_string()),
             ValueRef::Integer(i) => Ok(i.to_string()),
             ValueRef::Real(f) => Ok(f.to_string()),
             ValueRef::Text(t) => {
-                let text = std::str::from_utf8(t)
-                    .map_err(|e| AppError::Database(format!("文本字段不是有效的 UTF-8: {e}")))?;
+                let text = std::str::from_utf8(t).map_err(|e| {
+                    AppError::Database(format!("Text field is not valid UTF-8: {e}"))
+                })?;
                 let escaped = text.replace('\'', "''");
                 Ok(format!("'{escaped}'"))
             }
@@ -695,6 +706,23 @@ mod tests {
     use crate::error::AppError;
     use crate::settings::{update_settings, AppSettings};
     use serial_test::serial;
+
+    #[test]
+    fn sql_export_header_accepts_current_and_legacy_localized_suffixes() {
+        assert!(Database::validate_nexus_sql_export(
+            "-- Nexus Composer SQLite export\nBEGIN TRANSACTION;"
+        )
+        .is_ok());
+        assert!(Database::validate_nexus_sql_export(
+            "-- Nexus Composer SQLite xuất dữ liệu\nBEGIN TRANSACTION;"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn sql_export_header_rejects_unrelated_sql() {
+        assert!(Database::validate_nexus_sql_export("BEGIN TRANSACTION;").is_err());
+    }
 
     fn create_codex_sync_checkpoint_table(conn: &rusqlite::Connection) -> Result<(), AppError> {
         conn.execute_batch(

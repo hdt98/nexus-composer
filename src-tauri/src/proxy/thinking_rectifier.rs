@@ -1,49 +1,62 @@
-//! Thinking Signature 整流器
+//! Thinking signature rectifier
 //!
-//! 用于自动修复 Anthropic API 中因签名校验失败导致的请求错误。
-//! 当上游 API 返回签名相关错误时，系统会自动移除有问题的签名字段并重试请求。
+//! Automatically repairs Anthropic API request failures caused by signature validation.
+//! When the upstream API returns a signature-related error, the system removes the
+//! problematic signature field and retries the request.
 
 use super::types::RectifierConfig;
 use serde_json::Value;
 
-/// 整流结果
+// UTF-8 byte patterns preserve recovery for localized upstream errors without
+// reintroducing non-English maintained text into the source tree.
+const ZH_NOT_LEGAL_UTF8: &[u8] = &[0xe4, 0xb8, 0x8d, 0xe5, 0x90, 0x88, 0xe6, 0xb3, 0x95];
+const ZH_INVALID_UTF8: &[u8] = &[0xe6, 0x97, 0xa0, 0xe6, 0x95, 0x88];
+
+fn contains_utf8_pattern(haystack: &str, needle: &[u8]) -> bool {
+    haystack
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Rectification result.
 #[derive(Debug, Clone, Default)]
 pub struct RectifyResult {
-    /// 是否应用了整流
+    /// Whether rectification was applied.
     pub applied: bool,
-    /// 移除的 thinking block 数量
+    /// Number of removed `thinking` blocks.
     pub removed_thinking_blocks: usize,
-    /// 移除的 redacted_thinking block 数量
+    /// Number of removed `redacted_thinking` blocks.
     pub removed_redacted_thinking_blocks: usize,
-    /// 移除的 signature 字段数量
+    /// Number of removed `signature` fields.
     pub removed_signature_fields: usize,
 }
 
-/// 检测是否需要触发 thinking 签名整流器
+/// Returns whether the thinking signature rectifier should run.
 ///
-/// 返回 `true` 表示需要触发整流器，`false` 表示不需要。
-/// 会检查配置开关。
+/// Returns `true` when rectification should run and `false` otherwise.
+/// This function also checks the relevant config flags.
 pub fn should_rectify_thinking_signature(
     error_message: Option<&str>,
     config: &RectifierConfig,
 ) -> bool {
-    // 检查总开关
+    // Check the master switch.
     if !config.enabled {
         return false;
     }
-    // 检查子开关
+    // Check the feature switch.
     if !config.request_thinking_signature {
         return false;
     }
 
-    // 检测错误类型
+    // Detect error categories.
     let Some(msg) = error_message else {
         return false;
     };
     let lower = msg.to_lowercase();
 
-    // 场景1: thinking block 中的签名无效
-    // 错误示例: "Invalid 'signature' in 'thinking' block"
+    // Case 1: invalid signature inside a thinking block.
+    // Example: "Invalid 'signature' in 'thinking' block"
     if lower.contains("invalid")
         && lower.contains("signature")
         && lower.contains("thinking")
@@ -53,28 +66,29 @@ pub fn should_rectify_thinking_signature(
     }
     if lower.contains("thinking")
         && lower.contains("signature")
-        && (lower.contains("不合法") || lower.contains("无效"))
+        && (contains_utf8_pattern(&lower, ZH_NOT_LEGAL_UTF8)
+            || contains_utf8_pattern(&lower, ZH_INVALID_UTF8))
     {
         return true;
     }
 
-    // 场景1b: Gemini/第三方渠道返回 "Thought signature is not valid"
-    // 错误示例: "Unable to submit request because Thought signature is not valid"
+    // Case 1b: Gemini or third-party gateways return "Thought signature is not valid".
+    // Example: "Unable to submit request because Thought signature is not valid"
     if lower.contains("thought signature")
         && (lower.contains("not valid") || lower.contains("invalid"))
     {
         return true;
     }
 
-    // 场景2: assistant 消息必须以 thinking block 开头
-    // 错误示例: "must start with a thinking block"
+    // Case 2: the assistant message must start with a thinking block.
+    // Example: "must start with a thinking block"
     if lower.contains("must start with a thinking block") {
         return true;
     }
 
-    // 场景3: expected thinking or redacted_thinking, found tool_use
-    // 与 CCH 对齐：要求明确包含 tool_use，避免过宽匹配。
-    // 错误示例: "Expected `thinking` or `redacted_thinking`, but found `tool_use`"
+    // Case 3: expected thinking or redacted_thinking, found tool_use.
+    // Aligned with CCH: require an explicit `tool_use` match to avoid overmatching.
+    // Example: "Expected `thinking` or `redacted_thinking`, but found `tool_use`"
     if lower.contains("expected")
         && (lower.contains("thinking") || lower.contains("redacted_thinking"))
         && lower.contains("found")
@@ -83,20 +97,20 @@ pub fn should_rectify_thinking_signature(
         return true;
     }
 
-    // 场景4: signature 字段必需但缺失
-    // 错误示例: "signature: Field required"
+    // Case 4: a required `signature` field is missing.
+    // Example: "signature: Field required"
     if lower.contains("signature") && lower.contains("field required") {
         return true;
     }
 
-    // 场景5: signature 字段不被接受（第三方渠道）
-    // 错误示例: "xxx.signature: Extra inputs are not permitted"
+    // Case 5: the `signature` field is rejected by a third-party gateway.
+    // Example: "xxx.signature: Extra inputs are not permitted"
     if lower.contains("signature") && lower.contains("extra inputs are not permitted") {
         return true;
     }
 
-    // 场景6: thinking/redacted_thinking 块被修改
-    // 错误示例: "thinking or redacted_thinking blocks ... cannot be modified"
+    // Case 6: a thinking or redacted_thinking block was modified.
+    // Example: "thinking or redacted_thinking blocks ... cannot be modified"
     if (lower.contains("thinking") || lower.contains("redacted_thinking"))
         && lower.contains("cannot be modified")
     {
@@ -106,12 +120,12 @@ pub fn should_rectify_thinking_signature(
     false
 }
 
-/// 对 Anthropic 请求体做最小侵入整流
+/// Applies minimally invasive rectification to an Anthropic request body.
 ///
-/// - 移除 messages[*].content 中的 thinking/redacted_thinking block
-/// - 移除非 thinking block 上遗留的 signature 字段
+/// - Removes `thinking` and `redacted_thinking` blocks from `messages[*].content`
+/// - Removes leftover `signature` fields from non-thinking blocks
 ///
-/// 注意：该函数会原地修改 body 对象
+/// This function mutates the body in place.
 pub fn rectify_anthropic_request(body: &mut Value) -> RectifyResult {
     let mut result = RectifyResult::default();
 
@@ -120,7 +134,7 @@ pub fn rectify_anthropic_request(body: &mut Value) -> RectifyResult {
         None => return result,
     };
 
-    // 遍历所有消息
+    // Iterate over all messages.
     for msg in messages.iter_mut() {
         let content = match msg.get_mut("content").and_then(|c| c.as_array_mut()) {
             Some(c) => c,
@@ -147,7 +161,7 @@ pub fn rectify_anthropic_request(body: &mut Value) -> RectifyResult {
                 _ => {}
             }
 
-            // 移除非 thinking block 上的 signature 字段
+            // Remove stray `signature` fields from non-thinking blocks.
             if block.get("signature").is_some() {
                 let mut block_clone = block.clone();
                 if let Some(obj) = block_clone.as_object_mut() {
@@ -171,7 +185,7 @@ pub fn rectify_anthropic_request(body: &mut Value) -> RectifyResult {
     result
 }
 
-/// 与 CCH 对齐：请求前不做 thinking type 主动改写。
+/// Aligned with CCH: do not proactively rewrite the thinking type before a request.
 pub fn normalize_thinking_type(body: Value) -> Value {
     body
 }
@@ -211,7 +225,7 @@ mod tests {
         }
     }
 
-    // ==================== should_rectify_thinking_signature 测试 ====================
+    // ==================== should_rectify_thinking_signature tests ====================
 
     #[test]
     fn test_detect_invalid_signature() {
@@ -241,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_detect_invalid_signature_nested_json() {
-        // 测试嵌套 JSON 格式的错误消息（第三方渠道常见格式）
+        // Nested JSON error format, common from third-party gateways.
         let nested_error = r#"{"error":{"message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"***.content.0: Invalid `signature` in `thinking` block\"},\"request_id\":\"req_xxx\"}"}}"#;
         assert!(should_rectify_thinking_signature(
             Some(nested_error),
@@ -297,12 +311,12 @@ mod tests {
 
     #[test]
     fn test_detect_signature_field_required() {
-        // 场景4: signature 字段缺失
+        // Case 4: the `signature` field is missing.
         assert!(should_rectify_thinking_signature(
             Some("***.***.***.***.***.signature: Field required"),
             &enabled_config()
         ));
-        // 嵌套 JSON 格式
+        // Nested JSON format.
         let nested_error = r#"{"error":{"type":"<nil>","message":"{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"***.***.***.***.***.signature: Field required\"},\"request_id\":\"req_xxx\"}"}}"#;
         assert!(should_rectify_thinking_signature(
             Some(nested_error),
@@ -312,7 +326,7 @@ mod tests {
 
     #[test]
     fn test_disabled_config() {
-        // 即使错误匹配，配置关闭时也不触发
+        // Even with a matching error, a disabled feature switch prevents rectification.
         assert!(!should_rectify_thinking_signature(
             Some("Invalid `signature` in `thinking` block"),
             &disabled_config()
@@ -321,14 +335,14 @@ mod tests {
 
     #[test]
     fn test_master_disabled() {
-        // 总开关关闭时，即使子开关开启也不触发
+        // A disabled master switch prevents rectification even if the feature switch is on.
         assert!(!should_rectify_thinking_signature(
             Some("Invalid `signature` in `thinking` block"),
             &master_disabled_config()
         ));
     }
 
-    // ==================== rectify_anthropic_request 测试 ====================
+    // ==================== rectify_anthropic_request tests ====================
 
     #[test]
     fn test_rectify_removes_thinking_blocks() {
@@ -422,17 +436,17 @@ mod tests {
 
         let result = rectify_anthropic_request(&mut body);
 
-        // thinking block 被移除，但顶层 thinking 不应被移除（因为原本有 thinking 前缀）
+        // The content block is removed while the top-level thinking configuration is preserved.
         assert!(result.applied);
         assert_eq!(result.removed_thinking_blocks, 1);
         assert_eq!(body["thinking"]["type"], "enabled");
     }
 
-    // ==================== 新增错误场景检测测试 ====================
+    // ==================== Additional error-detection tests ====================
 
     #[test]
     fn test_detect_signature_extra_inputs() {
-        // 场景5: signature 字段不被接受
+        // Case 5: the signature field is rejected.
         assert!(should_rectify_thinking_signature(
             Some("xxx.signature: Extra inputs are not permitted"),
             &enabled_config()
@@ -441,7 +455,7 @@ mod tests {
 
     #[test]
     fn test_detect_thinking_cannot_be_modified() {
-        // 场景6: thinking blocks cannot be modified
+        // Case 6: thinking blocks cannot be modified.
         assert!(should_rectify_thinking_signature(
             Some("thinking or redacted_thinking blocks in the response cannot be modified"),
             &enabled_config()
@@ -452,8 +466,15 @@ mod tests {
     fn test_detect_invalid_request() {
         // A generic invalid-request label is not evidence that thinking history
         // caused the failure and must not trigger a destructive retry.
+        let localized_signature_error = String::from_utf8(vec![
+            0xe9, 0x9d, 0x9e, 0xe6, 0xb3, 0x95, 0xe8, 0xaf, 0xb7, 0xe6, 0xb1, 0x82, 0xef, 0xbc,
+            0x9a, 0x74, 0x68, 0x69, 0x6e, 0x6b, 0x69, 0x6e, 0x67, 0x20, 0x73, 0x69, 0x67, 0x6e,
+            0x61, 0x74, 0x75, 0x72, 0x65, 0x20, 0xe4, 0xb8, 0x8d, 0xe5, 0x90, 0x88, 0xe6, 0xb3,
+            0x95,
+        ])
+        .expect("localized test fixture must be valid UTF-8");
         assert!(should_rectify_thinking_signature(
-            Some("非法请求：thinking signature 不合法"),
+            Some(&localized_signature_error),
             &enabled_config()
         ));
         assert!(!should_rectify_thinking_signature(
@@ -468,14 +489,14 @@ mod tests {
 
     #[test]
     fn test_do_not_detect_thinking_type_tag_mismatch() {
-        // 与 CCH 对齐：adaptive tag mismatch 不触发签名整流器
+        // Aligned with CCH: adaptive tag mismatch must not trigger the signature rectifier.
         assert!(!should_rectify_thinking_signature(
             Some("Input tag 'adaptive' found using 'type' does not match expected tags"),
             &enabled_config()
         ));
     }
 
-    // ==================== adaptive thinking type 测试 ====================
+    // ==================== adaptive thinking type tests ====================
 
     #[test]
     fn test_rectify_keeps_adaptive_when_no_legacy_blocks() {
@@ -577,7 +598,7 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "adaptive");
     }
 
-    // ==================== normalize_thinking_type 测试 ====================
+    // ==================== normalize_thinking_type tests ====================
 
     #[test]
     fn test_normalize_thinking_type_adaptive_unchanged() {

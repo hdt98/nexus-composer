@@ -1,8 +1,9 @@
 /**
- * 统一供应商（Universal Provider）预设配置
+ * Universal Provider preset configuration.
  *
- * 统一供应商是跨应用共享的配置，修改后会自动同步到 Claude、Codex、Gemini 三个应用。
- * 适用于 NewAPI 等支持多种协议的 API 网关。
+ * Universal Providers share configuration across applications. Changes are
+ * automatically synchronized to Claude, Codex, and Gemini.
+ * Intended for multi-protocol API gateways such as NewAPI.
  */
 
 import type {
@@ -13,31 +14,31 @@ import type {
 import { deepClone } from "@/utils/deepClone";
 
 /**
- * 统一供应商预设接口
+ * Universal Provider preset definition.
  */
 export interface UniversalProviderPreset {
-  /** 预设名称 */
+  /** Preset name. */
   name: string;
-  /** 供应商类型标识 */
+  /** Provider type identifier. */
   providerType: string;
-  /** 默认启用的应用 */
+  /** Applications enabled by default. */
   defaultApps: UniversalProviderApps;
-  /** 默认模型配置 */
+  /** Default model configuration. */
   defaultModels: UniversalProviderModels;
-  /** 网站链接 */
+  /** Website URL. */
   websiteUrl?: string;
-  /** 图标名称 */
+  /** Icon name. */
   icon?: string;
-  /** 图标颜色 */
+  /** Icon color. */
   iconColor?: string;
-  /** 描述 */
+  /** Description. */
   description?: string;
-  /** 是否为自定义模板（允许用户完全自定义） */
+  /** Whether this is a custom template that users can fully customize. */
   isCustomTemplate?: boolean;
 }
 
 /**
- * NewAPI 默认模型配置
+ * Default NewAPI model configuration.
  */
 const NEWAPI_DEFAULT_MODELS: UniversalProviderModels = {
   claude: {
@@ -56,7 +57,7 @@ const NEWAPI_DEFAULT_MODELS: UniversalProviderModels = {
 };
 
 /**
- * 统一供应商预设列表
+ * Universal Provider presets.
  */
 export const universalProviderPresets: UniversalProviderPreset[] = [
   {
@@ -91,7 +92,7 @@ export const universalProviderPresets: UniversalProviderPreset[] = [
 ];
 
 /**
- * 根据预设创建统一供应商
+ * Creates a Universal Provider from a preset.
  */
 export function createUniversalProviderFromPreset(
   preset: UniversalProviderPreset,
@@ -116,14 +117,14 @@ export function createUniversalProviderFromPreset(
 }
 
 /**
- * 获取预设的显示名称（用于 UI）
+ * Returns the preset name for display in the UI.
  */
 export function getPresetDisplayName(preset: UniversalProviderPreset): string {
   return preset.name;
 }
 
 /**
- * 根据类型查找预设
+ * Finds a preset by provider type.
  */
 export function findPresetByType(
   providerType: string,

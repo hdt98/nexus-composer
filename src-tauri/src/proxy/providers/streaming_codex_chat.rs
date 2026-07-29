@@ -1306,7 +1306,9 @@ mod tests {
         assert!(!output.contains("</think>"));
 
         for error in ["{}", "false", r#"{"message":"","code":"0"}"#] {
-            let input = format!("\u{feff}data: {{\"error\":{error},\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n");
+            let input = format!(
+                "\u{feff}data: {{\"error\":{error},\"choices\":[{{\"delta\":{{\"content\":\"plan</think>answer\"}},\"finish_reason\":\"stop\"}}]}}\n\ndata: [DONE]\n\n"
+            );
             let output = collect_strict(&input).await;
             assert!(output.contains("event: response.completed"), "{output}");
             assert!(!output.contains("event: response.failed"), "{output}");

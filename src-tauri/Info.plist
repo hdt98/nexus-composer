@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- 注册 ccswitch:// 自定义 URL 协议，用于深链接导入 -->
+  <!-- Register the custom nexus:// URL scheme for deep-link imports. -->
   <key>CFBundleURLTypes</key>
   <array>
     <dict>
@@ -16,4 +16,3 @@
   </array>
 </dict>
 </plist>
-

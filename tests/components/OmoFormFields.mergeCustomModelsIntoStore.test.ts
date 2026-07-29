@@ -5,7 +5,7 @@ import {
 } from "@/components/providers/forms/OmoFormFields";
 
 describe("mergeCustomModelsIntoStore", () => {
-  it("保留自定义项高级字段，并在模型变更时仅按需清理非法 variant", () => {
+  it("preserves advanced custom fields and removes invalid variants when needed", () => {
     const store = {
       sisyphus: { model: "builtin-model" },
       "custom-agent": {
@@ -34,7 +34,7 @@ describe("mergeCustomModelsIntoStore", () => {
     });
   });
 
-  it("重命名自定义 key 时迁移原有 variant 和高级字段", () => {
+  it("migrates variants and advanced fields when renaming a custom key", () => {
     const store = {
       sisyphus: { model: "builtin-model" },
       "custom-agent-old": {
@@ -66,7 +66,7 @@ describe("mergeCustomModelsIntoStore", () => {
     });
   });
 
-  it("custom 列表为空时移除旧自定义项但保留内置项", () => {
+  it("removes old custom entries but preserves built-ins when the custom list is empty", () => {
     const store = {
       sisyphus: { model: "builtin-model" },
       hephaestus: { model: "builtin-model-2" },
@@ -86,7 +86,7 @@ describe("mergeCustomModelsIntoStore", () => {
     });
   });
 
-  it("清空 model 时保留高级字段并移除 model/variant", () => {
+  it("preserves advanced fields while removing model and variant when cleared", () => {
     const store = {
       sisyphus: { model: "builtin-model" },
       "custom-agent": {

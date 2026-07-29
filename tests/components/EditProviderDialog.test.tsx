@@ -177,7 +177,7 @@ describe("EditProviderDialog", () => {
     },
   );
 
-  it("代理接管中编辑 Codex 供应商时展示数据库配置而不是读取 live 代理配置", async () => {
+  it("shows stored Codex configuration instead of live routing configuration while editing", async () => {
     const provider: Provider = {
       id: "deepseek",
       name: "DeepSeek",

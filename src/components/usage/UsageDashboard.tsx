@@ -94,8 +94,9 @@ export function UsageDashboard() {
     useState<RemoteSourceOption | null>(null);
   const [refreshIntervalMs, setRefreshIntervalMs] = useState(30000);
 
-  // 后端写入新日志时 emit `usage-log-recorded`，本 hook 立刻 invalidate 所有
-  // usage 查询，实现实时刷新（仅在 Dashboard 挂载时生效，离开页面自动取消监听）
+  // The backend emits `usage-log-recorded` after writing a log. This hook
+  // immediately invalidates usage queries for live refresh while the dashboard
+  // is mounted and automatically stops listening when it unmounts.
   useUsageEventBridge();
 
   const { data: dataSources } = useQuery({

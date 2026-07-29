@@ -85,9 +85,9 @@ interface ClaudeFormFieldsProps {
   isCopilotPreset?: boolean;
   usesOAuth?: boolean;
   isCopilotAuthenticated?: boolean;
-  /** 当前选中的 GitHub 账号 ID（多账号支持） */
+  /** Currently selected GitHub account ID for multi-account support. */
   selectedGitHubAccountId?: string | null;
-  /** GitHub 账号选择回调（多账号支持） */
+  /** GitHub account selection callback for multi-account support. */
   onGitHubAccountSelect?: (accountId: string | null) => void;
 
   // Codex OAuth (ChatGPT Plus/Pro)
@@ -228,24 +228,24 @@ export function ClaudeFormFields({
   );
   const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
 
-  // 预设填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
+  // Expand after a preset populates advanced values, without collapsing automatically.
   useEffect(() => {
     if (hasAnyAdvancedValue) {
       setAdvancedExpanded(true);
     }
   }, [hasAnyAdvancedValue]);
 
-  // Copilot 可用模型列表
+  // Available Copilot models.
   const [copilotModels, setCopilotModels] = useState<CopilotModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const copilotModelsRequestRef = useRef(0);
 
-  // Codex OAuth 可用模型列表
+  // Available Codex OAuth models.
   const [codexOauthModels, setCodexOauthModels] = useState<FetchedModel[]>([]);
   const [codexOauthModelsLoading, setCodexOauthModelsLoading] = useState(false);
   const codexOauthModelsRequestRef = useRef(0);
 
-  // 通用模型获取（非 Copilot 供应商）
+  // General model fetching for non-Copilot providers.
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
 
@@ -268,8 +268,8 @@ export function ClaudeFormFields({
       });
       return;
     }
-    // 当 baseURL 仍是某预设的默认值时，优先使用预设上的 modelsUrl 覆写
-    // 避免多走一次失败的候选请求（如 DeepSeek 把 /models 挂在根，而不是 /anthropic 子路径下）
+    // Prefer a preset's modelsUrl override while baseURL still matches that preset's default.
+    // This avoids an unnecessary failed candidate request, such as DeepSeek serving /models at the root instead of under /anthropic.
     const matchedPreset = providerPresets.find((p) => {
       const env = (p.settingsConfig as { env?: Record<string, string> })?.env;
       return env?.ANTHROPIC_BASE_URL === baseUrl;
@@ -293,7 +293,7 @@ export function ClaudeFormFields({
     if (!isCopilotAuthenticated) {
       toast.error(
         t("copilot.loginRequired", {
-          defaultValue: "请先登录 GitHub Copilot",
+          defaultValue: "Please login to GitHub Copilot first",
         }),
       );
       return;
@@ -317,7 +317,7 @@ export function ClaudeFormFields({
         console.warn("[Copilot] Failed to fetch models:", err);
         toast.error(
           t("copilot.loadModelsFailed", {
-            defaultValue: "加载 Copilot 模型列表失败",
+            defaultValue: "Failed to load Copilot models",
           }),
         );
       })
@@ -337,7 +337,7 @@ export function ClaudeFormFields({
     if (!isCodexOauthAuthenticated) {
       toast.error(
         t("codexOauth.loginRequired", {
-          defaultValue: "请先登录 ChatGPT 账号",
+          defaultValue: "Please sign in to ChatGPT first",
         }),
       );
       return;
@@ -392,7 +392,7 @@ export function ClaudeFormFields({
       ? handleFetchCodexOauthModels
       : handleFetchModels;
 
-  // 模型输入框：支持手动输入 + 下拉选择
+  // Model input supporting both manual entry and dropdown selection.
   const renderModelInput = (
     id: string,
     value: string,
@@ -417,7 +417,7 @@ export function ClaudeFormFields({
     }
 
     if (isCopilotPreset && copilotModels.length > 0) {
-      // 按 vendor 分组
+      // Group by vendor.
       const grouped: Record<string, CopilotModel[]> = {};
       for (const model of copilotModels) {
         const vendor = model.vendor || "Other";
@@ -499,7 +499,7 @@ export function ClaudeFormFields({
       );
     }
 
-    // 普通供应商: 使用 ModelInputWithFetch（获取按钮在 section 标题旁）
+    // Regular providers use ModelInputWithFetch, with the fetch button beside the section title.
     return (
       <ModelInputWithFetch
         id={id}
@@ -587,7 +587,7 @@ export function ClaudeFormFields({
 
   return (
     <>
-      {/* GitHub Copilot OAuth 认证 */}
+      {/* GitHub Copilot OAuth authentication. */}
       {isCopilotPreset && (
         <CopilotAuthSection
           selectedAccountId={selectedGitHubAccountId}
@@ -595,7 +595,7 @@ export function ClaudeFormFields({
         />
       )}
 
-      {/* Codex OAuth 认证 (ChatGPT Plus/Pro) */}
+      {/* Codex OAuth authentication through ChatGPT Plus/Pro. */}
       {isCodexOauthPreset && (
         <CodexOAuthSection
           selectedAccountId={selectedCodexAccountId}
@@ -605,7 +605,7 @@ export function ClaudeFormFields({
         />
       )}
 
-      {/* API Key 输入框（非 OAuth 预设时显示） */}
+      {/* API key input for non-OAuth presets. */}
       {shouldShowApiKey && !usesOAuth && (
         <ApiKeySection
           value={apiKey}
@@ -618,13 +618,13 @@ export function ClaudeFormFields({
         />
       )}
 
-      {/* 模板变量输入 */}
+      {/* Template variable inputs. */}
       {templateValueEntries.length > 0 && (
         <div className="space-y-3">
           <FormLabel>
             {t("providerForm.parameterConfig", {
               name: templatePresetName,
-              defaultValue: `${templatePresetName} 参数配置`,
+              defaultValue: "Parameter Config - {{name}} *",
             })}
           </FormLabel>
           <div className="space-y-4">
@@ -653,7 +653,7 @@ export function ClaudeFormFields({
         </div>
       )}
 
-      {/* Base URL 输入框 */}
+      {/* Base URL input. */}
       {shouldShowSpeedTest && (
         <EndpointField
           id="baseUrl"
@@ -685,7 +685,7 @@ export function ClaudeFormFields({
         />
       )}
 
-      {/* 端点测速弹窗 */}
+      {/* Endpoint speed-test dialog. */}
       {shouldShowSpeedTest && showEndpointTools && isEndpointModalOpen && (
         <EndpointSpeedTest
           appId="claude"
@@ -724,11 +724,11 @@ export function ClaudeFormFields({
             </p>
           )}
           <CollapsibleContent className="space-y-4 pt-2">
-            {/* API 格式选择（仅非云服务商显示） */}
+            {/* API format selection shown only for non-cloud providers. */}
             {category !== "cloud_provider" && (
               <div className="space-y-2">
                 <FormLabel htmlFor="apiFormat">
-                  {t("providerForm.apiFormat", { defaultValue: "API 格式" })}
+                  {t("providerForm.apiFormat", { defaultValue: "API Format" })}
                 </FormLabel>
                 <Select value={apiFormat} onValueChange={onApiFormatChange}>
                   <SelectTrigger id="apiFormat" className="w-full">
@@ -737,38 +737,40 @@ export function ClaudeFormFields({
                   <SelectContent>
                     <SelectItem value="anthropic">
                       {t("providerForm.apiFormatAnthropic", {
-                        defaultValue: "Anthropic Messages (原生)",
+                        defaultValue: "Anthropic Messages (Native)",
                       })}
                     </SelectItem>
                     <SelectItem value="openai_chat">
                       {t("providerForm.apiFormatOpenAIChat", {
-                        defaultValue: "OpenAI Chat Completions (需转换)",
+                        defaultValue: "OpenAI Chat Completions (Needs Routing)",
                       })}
                     </SelectItem>
                     <SelectItem value="openai_responses">
                       {t("providerForm.apiFormatOpenAIResponses", {
-                        defaultValue: "OpenAI Responses API (需转换)",
+                        defaultValue: "OpenAI Responses API (Needs Routing)",
                       })}
                     </SelectItem>
                     <SelectItem value="gemini_native">
                       {t("providerForm.apiFormatGeminiNative", {
-                        defaultValue: "Gemini Native generateContent (需转换)",
+                        defaultValue:
+                          "Gemini Native generateContent (Needs Routing)",
                       })}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   {t("providerForm.apiFormatHint", {
-                    defaultValue: "选择供应商 API 的输入格式",
+                    defaultValue:
+                      "Select the input format for the provider's API",
                   })}
                 </p>
               </div>
             )}
 
-            {/* 认证字段选择器 */}
+            {/* Authentication field selector. */}
             <div className="space-y-2">
               <FormLabel>
-                {t("providerForm.authField", { defaultValue: "认证字段" })}
+                {t("providerForm.authField", { defaultValue: "Auth Field" })}
               </FormLabel>
               <Select
                 value={apiKeyField}
@@ -782,7 +784,7 @@ export function ClaudeFormFields({
                 <SelectContent>
                   <SelectItem value="ANTHROPIC_AUTH_TOKEN">
                     {t("providerForm.authFieldAuthToken", {
-                      defaultValue: "ANTHROPIC_AUTH_TOKEN（默认）",
+                      defaultValue: "ANTHROPIC_AUTH_TOKEN (Default)",
                     })}
                   </SelectItem>
                   <SelectItem value="ANTHROPIC_API_KEY">
@@ -794,17 +796,18 @@ export function ClaudeFormFields({
               </Select>
               <p className="text-xs text-muted-foreground">
                 {t("providerForm.authFieldHint", {
-                  defaultValue: "选择写入配置的认证环境变量名",
+                  defaultValue:
+                    "Select the authentication env variable name for the config",
                 })}
               </p>
             </div>
 
-            {/* 模型映射 */}
+            {/* Model mapping. */}
             <div className="space-y-1 pt-2 border-t">
               <div className="flex items-center justify-between">
                 <FormLabel>{t("providerForm.modelMappingLabel")}</FormLabel>
                 <div className="flex gap-2">
-                  {/* 一键设置按钮 */}
+                  {/* Quick-set button. */}
                   <Button
                     type="button"
                     variant="outline"
@@ -829,7 +832,7 @@ export function ClaudeFormFields({
                         }
                         toast.success(
                           t("providerForm.quickSetSuccess", {
-                            defaultValue: "已将模型名称应用到所有角色",
+                            defaultValue: "Model name applied to all roles",
                           }),
                         );
                       }
@@ -845,7 +848,7 @@ export function ClaudeFormFields({
                   >
                     <Wand2 className="h-3.5 w-3.5" />
                     {t("providerForm.quickSetModels", {
-                      defaultValue: "一键设置",
+                      defaultValue: "Quick Set",
                     })}
                   </Button>
                   <Button
@@ -874,22 +877,22 @@ export function ClaudeFormFields({
               <div className="hidden grid-cols-[120px_1fr_minmax(0,1fr)_104px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                 <span>
                   {t("providerForm.modelRoleLabel", {
-                    defaultValue: "模型角色",
+                    defaultValue: "Model role",
                   })}
                 </span>
                 <span>
                   {t("providerForm.modelDisplayNameLabel", {
-                    defaultValue: "显示名称",
+                    defaultValue: "Display name",
                   })}
                 </span>
                 <span>
                   {t("providerForm.requestModelLabel", {
-                    defaultValue: "实际请求模型",
+                    defaultValue: "Requested model",
                   })}
                 </span>
                 <span>
                   {t("providerForm.modelOneMHeader", {
-                    defaultValue: "声明支持 1M",
+                    defaultValue: "Declare 1M",
                   })}
                 </span>
               </div>
@@ -915,7 +918,7 @@ export function ClaudeFormFields({
                       placeholder={
                         modelBase ||
                         t("providerForm.modelDisplayNamePlaceholder", {
-                          defaultValue: "例如 DeepSeek V4 Pro",
+                          defaultValue: "e.g. DeepSeek V4 Pro",
                         })
                       }
                       autoComplete="off"
@@ -954,7 +957,7 @@ export function ClaudeFormFields({
             <div className="space-y-2 border-t pt-4">
               <FormLabel htmlFor="claudeModel">
                 {t("providerForm.fallbackModelLabel", {
-                  defaultValue: "默认兜底模型",
+                  defaultValue: "Default fallback model",
                 })}
               </FormLabel>
               {renderModelInput(
@@ -966,7 +969,7 @@ export function ClaudeFormFields({
               <p className="text-xs text-muted-foreground">
                 {t("providerForm.fallbackModelHint", {
                   defaultValue:
-                    "用于未明确落到 Sonnet、Opus、Fable、Haiku 角色的请求。使用第三方/中转端点时建议填写：否则这些请求（含 Haiku 后台子任务）会以原始 Claude 模型名透传给上游，可能因上游无此模型而报错。官方端点可留空。",
+                    "A fallback for requests that don't clearly map to Sonnet, Opus, Fable, or Haiku. Recommended for third-party/relay endpoints—otherwise such requests (including Haiku background subtasks) are forwarded under their original Claude model name and may fail if the upstream doesn't host it. Safe to leave blank for official endpoints.",
                 })}
               </p>
             </div>

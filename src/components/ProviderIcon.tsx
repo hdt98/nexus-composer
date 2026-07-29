@@ -9,12 +9,12 @@ import {
 import { cn } from "@/lib/utils";
 
 interface ProviderIconProps {
-  icon?: string; // 图标名称
-  name: string; // 供应商名称（用于 fallback）
-  color?: string; // 自定义颜色 (Deprecated, kept for compatibility but ignored for SVG)
-  size?: number | string; // 尺寸
+  icon?: string; // Icon name.
+  name: string; // Provider name used for the fallback.
+  color?: string; // Custom color; deprecated and ignored for SVG compatibility.
+  size?: number | string; // Icon size.
   className?: string;
-  showFallback?: boolean; // 是否显示 fallback
+  showFallback?: boolean; // Whether to display the fallback.
 }
 
 export const ProviderIcon: React.FC<ProviderIconProps> = ({
@@ -25,7 +25,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
   className,
   showFallback = true,
 }) => {
-  // 获取内联 SVG 字符串
+  // Resolve the inline SVG string.
   const iconSvg = useMemo(() => {
     if (icon && !isUrlIcon(icon) && hasIcon(icon)) {
       return getIcon(icon);
@@ -33,7 +33,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
     return "";
   }, [icon]);
 
-  // 获取图标 URL（URL_ICONS 列表中的 SVG / 光栅图片）
+  // Resolve SVG and raster image URLs listed in URL_ICONS.
   const iconUrl = useMemo(() => {
     if (icon && isUrlIcon(icon)) {
       return getIconUrl(icon);
@@ -41,7 +41,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
     return "";
   }, [icon]);
 
-  // 计算尺寸样式
+  // Calculate size styles.
   const sizeStyle = useMemo(() => {
     const sizeValue = typeof size === "number" ? `${size}px` : size;
     return {
@@ -52,7 +52,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
     };
   }, [size]);
 
-  // 获取有效颜色：优先使用传入的有效 color，否则从元数据获取 defaultColor
+  // Prefer a valid supplied color, then fall back to metadata.defaultColor.
   const effectiveColor = useMemo(() => {
     if (color && typeof color === "string" && color.trim() !== "") {
       return color;
@@ -66,7 +66,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
     return undefined;
   }, [color, icon]);
 
-  // 内联 SVG 渲染（支持 CSS currentColor 着色）
+  // Render inline SVG with CSS currentColor support.
   if (iconSvg) {
     return (
       <span
@@ -81,7 +81,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
     );
   }
 
-  // URL-based 图标（大型 SVG / 光栅图片）：以 <img> 渲染
+  // Render URL-based large SVG and raster icons as an image.
   if (iconUrl) {
     return (
       <img
@@ -98,7 +98,7 @@ export const ProviderIcon: React.FC<ProviderIconProps> = ({
     );
   }
 
-  // Fallback：显示首字母
+  // Fall back to initials.
   if (showFallback) {
     const initials = name
       .split(" ")

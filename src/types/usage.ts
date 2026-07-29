@@ -1,4 +1,4 @@
-// 使用统计相关类型定义
+// Usage statistics types.
 
 export interface TokenUsage {
   inputTokens: number;
@@ -16,7 +16,7 @@ export interface RequestLog {
   appType: string;
   model: string;
   requestModel?: string;
-  /** 写入时实际用于计价的模型名；路由接管 + request 计价模式下可能与 model 不同 */
+  /** Model used for pricing when written; routing with request pricing may differ from model. */
   pricingModel?: string;
   costMultiplier: string;
   inputTokens: number;
@@ -133,12 +133,14 @@ export interface LogFilters {
 }
 
 /**
- * Dashboard 顶栏的全局筛选维度，作用于 Hero / 趋势图 / 三个统计 Tab。
+ * Global dashboard filters applied to the hero, trend chart, and three
+ * statistics tabs.
  *
- * - `providerName` 按展示名精确匹配（与 Provider 统计列表同口径，含
- *   "Claude (Session)" 等会话占位名）；
- * - `model` 按「有效计价模型」匹配（pricing_model 优先、回落 model，
- *   与模型统计的分组口径一致）。
+ * - `providerName` exactly matches the display name, using the same rules as
+ *   provider statistics and including session placeholders such as
+ *   "Claude (Session)".
+ * - `model` matches the effective pricing model, preferring pricing_model and
+ *   falling back to model, consistent with model-statistics grouping.
  */
 export interface UsageScopeFilters {
   appType?: string;

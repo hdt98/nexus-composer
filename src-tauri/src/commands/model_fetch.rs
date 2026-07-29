@@ -1,13 +1,14 @@
-//! 模型列表获取命令
+//! Model-list retrieval commands.
 //!
-//! 提供 Tauri 命令，供前端在供应商表单中获取可用模型列表。
+//! Provides Tauri commands for fetching available models in provider forms.
 
 use crate::services::model_fetch::{self, FetchedModel};
 
-/// 获取供应商的可用模型列表
+/// Fetches the available models for a provider.
 ///
-/// 使用 OpenAI 兼容的 GET /v1/models 端点。优先使用 `models_url` 精确覆写；
-/// 否则对 baseURL 生成候选列表（含「剥离 Anthropic 兼容子路径」兜底），按序尝试。
+/// Uses an OpenAI-compatible GET /v1/models endpoint. An explicit `models_url`
+/// takes precedence; otherwise candidates are generated from baseURL, including
+/// a fallback with any Anthropic-compatible suffix removed, and tried in order.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn fetch_models_for_config(
     base_url: String,
@@ -16,7 +17,8 @@ pub async fn fetch_models_for_config(
     models_url: Option<String>,
     custom_user_agent: Option<String>,
 ) -> Result<Vec<FetchedModel>, String> {
-    // 与转发 / 检测路径共用 parse_custom_user_agent：非法 UA 静默忽略（不阻断取模型）。
+    // Share parse_custom_user_agent with forwarding and diagnostics. Ignore an invalid UA
+    // instead of blocking model retrieval.
     let user_agent = crate::provider::parse_custom_user_agent(custom_user_agent.as_deref())
         .ok()
         .flatten();

@@ -1,6 +1,6 @@
-//! Response Handler - 统一响应处理
+//! Unified response handling.
 //!
-//! 提供流式和非流式响应的统一处理接口
+//! Provides one interface for streaming and non-streaming responses.
 
 use super::session::ProxySession;
 use super::usage::parser::TokenUsage;
@@ -14,18 +14,18 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
-/// 响应类型
+/// Response type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum ResponseType {
-    /// 流式响应 (SSE)
+    /// Streaming SSE response.
     Stream,
-    /// 非流式响应
+    /// Non-streaming response.
     NonStream,
 }
 
 impl ResponseType {
-    /// 从 Content-Type 检测响应类型
+    /// Detects the response type from Content-Type.
     #[allow(dead_code)]
     pub fn from_content_type(content_type: &str) -> Self {
         if content_type.contains("text/event-stream") {
@@ -36,18 +36,18 @@ impl ResponseType {
     }
 }
 
-/// 流式响应处理器
+/// Streaming response handler.
 #[allow(dead_code)]
 pub struct StreamHandler {
-    /// 空闲超时时间
+    /// Idle timeout.
     idle_timeout: Duration,
-    /// 收集的事件
+    /// Collected events.
     events: Arc<Mutex<Vec<Value>>>,
 }
 
 #[allow(dead_code)]
 impl StreamHandler {
-    /// 创建新的流式处理器
+    /// Creates a streaming handler.
     pub fn new(idle_timeout_secs: u64) -> Self {
         Self {
             idle_timeout: Duration::from_secs(idle_timeout_secs),
@@ -55,9 +55,9 @@ impl StreamHandler {
         }
     }
 
-    /// 处理流式响应，返回分流后的客户端流
+    /// Handles a streaming response and returns the client stream.
     ///
-    /// 客户端流立即返回，内部流在后台收集事件
+    /// The client stream returns immediately while events are collected internally.
     pub fn handle_stream<S>(
         &self,
         stream: S,
@@ -82,10 +82,10 @@ impl StreamHandler {
                     Ok(Some(Ok(bytes))) => {
                         _last_activity = Instant::now();
 
-                        // 解析 SSE 事件
+                        // Append SSE bytes without breaking UTF-8 boundaries.
                         crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
 
-                        // 提取完整事件
+                        // Extract complete events.
                         while let Some(event_text) = take_sse_block(&mut buffer) {
                             for line in event_text.lines() {
                                 if let Some(data) = strip_sse_field(line, "data") {
@@ -102,17 +102,17 @@ impl StreamHandler {
                         yield Ok(bytes);
                     }
                     Ok(Some(Err(e))) => {
-                        log::error!("流错误: {e}");
+                        log::error!("Stream error: {e}");
                         yield Err(std::io::Error::other(e.to_string()));
                         break;
                     }
                     Ok(None) => {
-                        // 流结束
+                        // Stream ended.
                         break;
                     }
                     Err(_) => {
-                        // 空闲超时
-                        log::warn!("流式响应空闲超时: {idle_timeout:?} 无数据");
+                        // Idle timeout.
+                        log::warn!("Streaming response idle timeout after {idle_timeout:?}");
                         yield Err(std::io::Error::other("Stream idle timeout"));
                         break;
                     }
@@ -121,13 +121,13 @@ impl StreamHandler {
         }
     }
 
-    /// 获取收集的事件
+    /// Returns collected events.
     pub async fn get_events(&self) -> Vec<Value> {
         let guard = self.events.lock().await;
         guard.clone()
     }
 
-    /// 从收集的事件中提取 Token 使用量
+    /// Extracts token usage from collected events.
     pub async fn extract_usage(&self, session: &ProxySession) -> Option<TokenUsage> {
         let events = self.get_events().await;
 
@@ -142,15 +142,15 @@ impl StreamHandler {
     }
 }
 
-/// 非流式响应处理器
+/// Non-streaming response handler.
 #[allow(dead_code)]
 pub struct NonStreamHandler;
 
 #[allow(dead_code)]
 impl NonStreamHandler {
-    /// 处理非流式响应
+    /// Handles a non-streaming response.
     ///
-    /// 克隆响应体用于后台解析，原始响应立即返回
+    /// Parses a copy of the response body while the original response returns immediately.
     pub async fn handle_response(
         body: &[u8],
         session: &ProxySession,
@@ -172,13 +172,13 @@ impl NonStreamHandler {
     }
 }
 
-/// 统一响应分发器
+/// Unified response dispatcher.
 #[allow(dead_code)]
 pub struct ResponseDispatcher;
 
 #[allow(dead_code)]
 impl ResponseDispatcher {
-    /// 判断响应类型
+    /// Detects the response type.
     pub fn detect_type(content_type: &str) -> ResponseType {
         ResponseType::from_content_type(content_type)
     }

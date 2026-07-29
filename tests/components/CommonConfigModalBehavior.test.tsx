@@ -70,7 +70,7 @@ describe("Common config modals", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: /codexConfig.editCommonConfig|编辑通用配置/,
+        name: /codexConfig.editCommonConfig|Edit Common Config/,
       }),
     );
 
@@ -153,7 +153,7 @@ describe("Common config modals", () => {
 
     fireEvent.click(
       screen.getByRole("button", {
-        name: /geminiConfig.editCommonConfig|编辑通用配置/,
+        name: /geminiConfig.editCommonConfig|Edit Common Config/,
       }),
     );
 

@@ -87,8 +87,8 @@ export const getSkillsPageHeaderActions = (source: SkillsPageSource) =>
 const SKILLSSH_PAGE_SIZE = 20;
 
 /**
- * Skills 发现面板
- * 用于浏览和安装来自仓库或 skills.sh 的 Skills
+ * Skill discovery panel for browsing and installing skills from repositories
+ * or skills.sh.
  */
 export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
   ({ initialApp = "claude", onSourceChange }, ref) => {
@@ -100,7 +100,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       "all" | "installed" | "uninstalled"
     >("all");
 
-    // skills.sh 搜索状态
+    // skills.sh search state.
     const [searchSource, setSearchSource] = useState<SkillsPageSource>("repos");
     const [skillsShInput, setSkillsShInput] = useState("");
     const [skillsShQuery, setSkillsShQuery] = useState("");
@@ -109,7 +109,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       SkillsShDiscoverableSkill[]
     >([]);
 
-    // currentApp 用于安装时的默认应用
+    // Use currentApp as the default installation target.
     const currentApp = initialApp;
 
     // Queries
@@ -122,7 +122,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     const { data: installedSkills } = useInstalledSkills();
     const { data: repos = [], refetch: refetchRepos } = useSkillRepos();
 
-    // skills.sh 搜索
+    // skills.sh search.
     const {
       data: skillsShResult,
       isLoading: loadingSkillsSh,
@@ -130,7 +130,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       isPlaceholderData: placeholderSkillsSh,
     } = useSearchSkillsSh(skillsShQuery, SKILLSSH_PAGE_SIZE, skillsShOffset);
 
-    // 当搜索结果返回时累积
+    // Accumulate search results as pages arrive.
     useEffect(() => {
       if (skillsShResult && !placeholderSkillsSh) {
         if (skillsShOffset === 0) {
@@ -141,7 +141,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       }
     }, [skillsShResult, skillsShOffset, placeholderSkillsSh]);
 
-    // 手动提交搜索
+    // Submit the search explicitly.
     const handleSkillsShSearch = () => {
       const trimmed = skillsShInput.trim();
       if (trimmed.length < 2) return;
@@ -156,12 +156,12 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     const addRepoMutation = useAddSkillRepo();
     const removeRepoMutation = useRemoveSkillRepo();
 
-    // 已安装的 skill key 集合（使用 directory + repoOwner + repoName 组合判断）
+    // Build installed-skill keys from directory, repository owner, and repository name.
     const installedKeys = useMemo(() => {
       if (!installedSkills) return new Set<string>();
       return new Set(
         installedSkills.map((s) => {
-          // 构建唯一 key：directory + repoOwner + repoName
+          // Build a unique key from directory, repository owner, and repository name.
           const owner = s.repoOwner?.toLowerCase() || "";
           const name = s.repoName?.toLowerCase() || "";
           return `${s.directory.toLowerCase()}:${owner}:${name}`;
@@ -171,7 +171,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
 
     type DiscoverableSkillItem = DiscoverableSkill & { installed: boolean };
 
-    // 从可发现技能中提取所有仓库选项
+    // Collect repository filter options from discoverable skills.
     const repoOptions = useMemo(() => {
       if (!discoverableSkills) return [];
       const repoSet = new Set<string>();
@@ -183,15 +183,15 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       return Array.from(repoSet).sort();
     }, [discoverableSkills]);
 
-    // 为发现列表补齐 installed 状态，供 SkillCard 使用
+    // Add installation state to discovery results for SkillCard.
     const skills: DiscoverableSkillItem[] = useMemo(() => {
       if (!discoverableSkills) return [];
       return discoverableSkills.map((d) => {
-        // 同时处理 / 和 \ 路径分隔符（兼容 Windows 和 Unix）
+        // Support both Windows and Unix path separators.
         const installName =
           d.directory.split(/[/\\]/).pop()?.toLowerCase() ||
           d.directory.toLowerCase();
-        // 使用 directory + repoOwner + repoName 组合判断是否已安装
+        // Determine installation state from directory, repository owner, and repository name.
         const key = `${installName}:${d.repoOwner.toLowerCase()}:${d.repoName.toLowerCase()}`;
         return {
           ...d,
@@ -200,7 +200,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       });
     }, [discoverableSkills, installedKeys]);
 
-    // 检查 skills.sh 结果的安装状态
+    // Check whether a skills.sh result is installed.
     const isSkillsShInstalled = (skill: SkillsShDiscoverableSkill): boolean => {
       const key = `${skill.directory.toLowerCase()}:${skill.repoOwner.toLowerCase()}:${skill.repoName.toLowerCase()}`;
       return installedKeys.has(key);
@@ -219,7 +219,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       openRepoManager: () => setRepoManagerOpen(true),
     }));
 
-    // skills.sh 结果转为 DiscoverableSkill（复用现有安装流程）
+    // Convert skills.sh results to DiscoverableSkill for the existing installation flow.
     const toDiscoverableSkill = (
       s: SkillsShDiscoverableSkill,
     ): DiscoverableSkill => ({
@@ -275,7 +275,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
     };
 
     const handleUninstall = async (_directory: string) => {
-      // 在发现面板中，不支持卸载，需要在主面板中操作
+      // Uninstallation is available from the main panel, not discovery.
       toast.info(t("skills.uninstallInMainPanel"));
     };
 
@@ -319,23 +319,23 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       }
     };
 
-    // 过滤技能列表（仓库模式）
+    // Filter the skill list in repository mode.
     const filteredSkills = useMemo(() => {
-      // 按仓库筛选
+      // Filter by repository.
       const byRepo = skills.filter((skill) => {
         if (filterRepo === "all") return true;
         const skillRepo = `${skill.repoOwner}/${skill.repoName}`;
         return skillRepo === filterRepo;
       });
 
-      // 按安装状态筛选
+      // Filter by installation state.
       const byStatus = byRepo.filter((skill) => {
         if (filterStatus === "installed") return skill.installed;
         if (filterStatus === "uninstalled") return !skill.installed;
         return true;
       });
 
-      // 按搜索关键词筛选
+      // Filter by search term.
       if (!searchQuery.trim()) return byStatus;
 
       const query = searchQuery.toLowerCase();
@@ -350,13 +350,13 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
       });
     }, [skills, searchQuery, filterRepo, filterStatus]);
 
-    // 是否有更多 skills.sh 结果
+    // Check whether more skills.sh results are available.
     const hasMoreSkillsSh =
       skillsShResult && accumulatedResults.length < skillsShResult.totalCount;
     const searchingSkillsSh =
       (loadingSkillsSh || fetchingSkillsSh) && accumulatedResults.length === 0;
 
-    // 无仓库配置时默认切换到 skills.sh；仓库发现结果为空时仍保留仓库视图，方便手动刷新重试。
+    // Default to skills.sh when no repositories are configured. Keep the repository view when discovery is empty so the user can retry manually.
     const effectiveSource =
       searchSource === "repos" && repos.length === 0 && !loading
         ? "skillssh"
@@ -368,12 +368,12 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
 
     return (
       <div className="px-6 flex flex-col flex-1 min-h-0 overflow-hidden bg-background/50">
-        {/* 技能网格（可滚动详情区域） */}
+        {/* Scrollable skill grid */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden animate-fade-in">
           <div className="py-4">
-            {/* 搜索来源切换 + 搜索框 */}
+            {/* Search source selector and input */}
             <div className="mb-6 flex flex-col gap-3 md:flex-row md:items-center">
-              {/* 来源切换 */}
+              {/* Source selector */}
               <div className="inline-flex gap-1 rounded-md border border-border-default bg-background p-1 shrink-0">
                 <Button
                   type="button"
@@ -405,7 +405,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
 
               {effectiveSource === "repos" ? (
                 <>
-                  {/* 仓库模式搜索框 */}
+                  {/* Repository search input */}
                   <div className="relative flex-1 min-w-0">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
@@ -416,7 +416,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                       className="pl-9 pr-3"
                     />
                   </div>
-                  {/* 仓库筛选 */}
+                  {/* Repository filter */}
                   <div className="w-full md:w-56">
                     <Select value={filterRepo} onValueChange={setFilterRepo}>
                       <SelectTrigger className="bg-card border shadow-sm text-foreground">
@@ -447,7 +447,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                       </SelectContent>
                     </Select>
                   </div>
-                  {/* 安装状态筛选 */}
+                  {/* Installation-state filter */}
                   <div className="w-full md:w-36">
                     <Select
                       value={filterStatus}
@@ -493,7 +493,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                 </>
               ) : (
                 <>
-                  {/* skills.sh 搜索框 */}
+                  {/* skills.sh search input */}
                   <div className="relative flex-1 min-w-0">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
                     <Input
@@ -526,9 +526,9 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
               )}
             </div>
 
-            {/* 内容区域 */}
+            {/* Content */}
             {effectiveSource === "repos" ? (
-              /* ===== 仓库模式 ===== */
+              /* Repository mode */
               loading ? (
                 <div className="flex items-center justify-center h-64">
                   <RefreshCw className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -571,7 +571,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                 </div>
               )
             ) : (
-              /* ===== skills.sh 模式 ===== */
+              /* skills.sh mode */
               <>
                 {searchingSkillsSh ? (
                   <div className="flex items-center justify-center h-64">
@@ -615,7 +615,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
                       })}
                     </div>
 
-                    {/* 加载更多 + 底部信息 */}
+                    {/* Load-more control and footer */}
                     <div className="mt-6 flex flex-col items-center gap-2">
                       {hasMoreSkillsSh && (
                         <Button
@@ -645,7 +645,7 @@ export const SkillsPage = forwardRef<SkillsPageHandle, SkillsPageProps>(
           </div>
         </div>
 
-        {/* 仓库管理面板 */}
+        {/* Repository manager */}
         {repoManagerOpen && (
           <RepoManagerPanel
             repos={repos}

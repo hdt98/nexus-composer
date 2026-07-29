@@ -1352,7 +1352,9 @@ wire_api = "responses"
         let error = ProviderService::switch(&state, AppType::Codex, "nexus-glm")
             .expect_err("occupied proxy port should abort the complete transition");
         assert!(
-            error.to_string().contains("启动代理服务器失败"),
+            error
+                .to_string()
+                .contains("Failed to start the proxy server"),
             "the original takeover failure should be surfaced: {error}"
         );
 
@@ -2118,8 +2120,9 @@ sidebar-density = "compact"
 
     #[test]
     fn extract_claude_common_config_strips_all_credentials_keeps_shareable() {
-        // env 混入多种凭据（Anthropic/OpenRouter/Google/OpenAI/Gemini + AWS/Vertex）
-        // 与可共享配置；顶层混入非标准的 apiKey/api_key 凭据与正常设置。
+        // env mixes credentials for Anthropic, OpenRouter, Google, OpenAI, Gemini, AWS, and Vertex
+        // with shareable settings. The top level mixes nonstandard apiKey/api_key credentials with
+        // regular settings.
         let settings = json!({
             "env": {
                 "ANTHROPIC_API_KEY": "sk-ant",
@@ -2135,7 +2138,7 @@ sidebar-density = "compact"
                 "AWS_BEARER_TOKEN_BEDROCK": "bedrock-tok",
                 "ANTHROPIC_BASE_URL": "https://example.com",
                 "ANTHROPIC_MODEL": "claude-x",
-                // 可共享、非机密配置（复数 _TOKENS 不应被误剥）
+                // Shareable, non-sensitive settings; plural _TOKENS keys must not be stripped.
                 "ENABLE_TOOL_SEARCH": "true",
                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "8192"
             },
@@ -2149,7 +2152,7 @@ sidebar-density = "compact"
             .expect("extract should succeed");
         let value: Value = serde_json::from_str(&snippet).expect("snippet is valid JSON");
 
-        // 所有凭据都不得出现在共享片段里
+        // No credential may appear in the shared snippet.
         let env = value.get("env");
         for leaked in [
             "ANTHROPIC_API_KEY",
@@ -2174,11 +2177,11 @@ sidebar-density = "compact"
             "top-level credentials must be stripped"
         );
 
-        // 端点/模型（provider-specific 非机密）也应剥掉
+        // Strip provider-specific, non-sensitive endpoints and models as well.
         assert!(env.and_then(|e| e.get("ANTHROPIC_BASE_URL")).is_none());
         assert!(env.and_then(|e| e.get("ANTHROPIC_MODEL")).is_none());
 
-        // 可共享的非机密配置必须保留（含复数 _TOKENS 不被误剥）
+        // Preserve shareable, non-sensitive settings, including plural _TOKENS keys.
         assert_eq!(
             env.and_then(|e| e.get("ENABLE_TOOL_SEARCH"))
                 .and_then(|v| v.as_str()),
@@ -3123,11 +3126,13 @@ impl ProviderService {
 
     /// Get current provider ID
     ///
-    /// 使用有效的当前供应商 ID（验证过存在性）。
-    /// 优先从本地 settings 读取，验证后 fallback 到数据库的 is_current 字段。
-    /// 这确保了云同步场景下多设备可以独立选择供应商，且返回的 ID 一定有效。
+    /// Returns a valid current-provider ID whose existence has been verified.
+    /// Reads local settings first and falls back to the database is_current field after validation.
+    /// This lets devices select providers independently after cloud synchronization while ensuring
+    /// the returned ID exists.
     ///
-    /// 对于累加模式应用（OpenCode, OpenClaw），不存在"当前供应商"概念，直接返回空字符串。
+    /// Additive applications such as OpenCode and OpenClaw have no current-provider concept and
+    /// return an empty string.
     pub fn current(state: &AppState, app_type: AppType) -> Result<String, AppError> {
         // Additive mode apps have no "current" provider concept
         if app_type.is_additive_mode() {
@@ -3345,9 +3350,9 @@ impl ProviderService {
         let is_current = effective_current.as_deref() == Some(provider.id.as_str());
 
         if is_current {
-            // 如果 Claude 代理接管处于激活状态，并且代理服务正在运行：
-            // - 不直接走普通 Live 写入逻辑
-            // - 改为更新 Live 备份，并在 Claude 下同步代理安全的 Live 配置
+            // If Claude proxy takeover is active and the proxy service is running:
+            // - Do not use the normal live-write path.
+            // - Update the live backup and synchronize a proxy-safe live configuration for Claude.
             let has_live_backup =
                 futures::executor::block_on(state.db.get_live_backup(app_type.as_str()))
                     .ok()
@@ -3370,7 +3375,9 @@ impl ProviderService {
                             .proxy_service
                             .update_live_backup_from_provider(app_type.as_str(), &provider),
                     )
-                    .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+                    .map_err(|e| {
+                        AppError::Message(format!("Failed to update the live backup: {e}"))
+                    })?;
                 }
 
                 if matches!(app_type, AppType::Claude)
@@ -3381,7 +3388,11 @@ impl ProviderService {
                             .proxy_service
                             .sync_claude_live_from_provider_while_proxy_active(&provider),
                     )
-                    .map_err(|e| AppError::Message(format!("同步 Claude Live 配置失败: {e}")))?;
+                    .map_err(|e| {
+                        AppError::Message(format!(
+                            "Failed to synchronize Claude live configuration: {e}"
+                        ))
+                    })?;
                 }
             } else {
                 write_live_with_common_config(state.db.as_ref(), &app_type, &provider)?;
@@ -3395,8 +3406,9 @@ impl ProviderService {
 
     /// Delete a provider
     ///
-    /// 同时检查本地 settings 和数据库的当前供应商，防止删除任一端正在使用的供应商。
-    /// 对于累加模式应用（OpenCode, OpenClaw），可以随时删除任意供应商，同时从 live 配置中移除。
+    /// Checks current providers in both local settings and the database so neither side can delete
+    /// a provider still in use. Additive applications such as OpenCode and OpenClaw may delete any
+    /// provider at any time and remove it from live configuration.
     pub fn delete(state: &AppState, app_type: AppType, id: &str) -> Result<(), AppError> {
         // Additive mode apps - no current provider concept
         if app_type.is_additive_mode() {
@@ -3452,7 +3464,7 @@ impl ProviderService {
 
         if local_current.as_deref() == Some(id) || db_current.as_deref() == Some(id) {
             return Err(AppError::Message(
-                "无法删除当前正在使用的供应商".to_string(),
+                "Cannot delete the provider that is currently in use".to_string(),
             ));
         }
 
@@ -3537,7 +3549,7 @@ impl ProviderService {
         let providers = state.db.get_all_providers(app_type.as_str())?;
         let _provider = providers
             .get(id)
-            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            .ok_or_else(|| AppError::Message(format!("Provider {id} does not exist")))?;
 
         // OMO providers are switched through their own exclusive path.
         if matches!(app_type, AppType::OpenCode) && _provider.category.as_deref() == Some("omo") {
@@ -3609,7 +3621,7 @@ impl ProviderService {
         {
             return Err(AppError::localized(
                 "switch.official_blocked_by_proxy",
-                "本地路由接管仍处于启用或恢复状态，无法安全切换到官方供应商",
+                "Local route takeover is still enabled or recovering; cannot safely switch to the official provider",
                 "Cannot safely switch to the Official provider while local routing takeover is active or awaiting recovery",
             ));
         }
@@ -3619,7 +3631,7 @@ impl ProviderService {
             // The proxy layer may still refresh proxy-safe Live fields so client labels
             // follow the selected provider while endpoints remain local.
             log::info!(
-                "代理接管模式：热切换 {} 的目标供应商为 {}",
+                "Proxy takeover mode: hot-switching the target provider for {} to {}",
                 app_type.as_str(),
                 id
             );
@@ -3629,7 +3641,7 @@ impl ProviderService {
                     .proxy_service
                     .hot_switch_provider_inner(app_type.as_str(), id),
             )
-            .map_err(|e| AppError::Message(format!("热切换失败: {e}")))?;
+            .map_err(|e| AppError::Message(format!("Hot switch failed: {e}")))?;
 
             // The proxy server will route requests to the new provider via is_current.
             // MCP sync is intentionally skipped while Live config is owned by takeover.
@@ -3663,7 +3675,9 @@ impl ProviderService {
                             false,
                         ),
                 )
-                .map_err(|error| AppError::Message(format!("关闭代理接管失败: {error}")))
+                .map_err(|error| {
+                    AppError::Message(format!("Failed to disable proxy takeover: {error}"))
+                })
                 .and_then(|()| Self::switch_normal(state, AppType::Codex, id, providers))
                 .and_then(|result| {
                     block_on_provider_transition(
@@ -3672,7 +3686,9 @@ impl ProviderService {
                             .clear_provider_health_for_app(AppType::Codex.as_str()),
                     )
                     .map(|()| result)
-                    .map_err(|error| AppError::Message(format!("清除 Codex 健康状态失败: {error}")))
+                    .map_err(|error| {
+                        AppError::Message(format!("Failed to clear Codex health state: {error}"))
+                    })
                 })
             } else {
                 Self::switch_normal(state, AppType::Codex, id, providers)
@@ -3685,7 +3701,9 @@ impl ProviderService {
                         .proxy_service
                         .set_takeover_for_app_inner(AppType::Codex.as_str(), true),
                 )
-                .map_err(|error| AppError::Message(format!("修复本地路由失败: {error}")))
+                .map_err(|error| {
+                    AppError::Message(format!("Failed to repair local routing: {error}"))
+                })
             } else if takeover_residue {
                 // A disabled route with backup/placeholder residue is not active
                 // takeover. Restore it before normal switching so backfill never
@@ -3698,7 +3716,11 @@ impl ProviderService {
                             false,
                         ),
                 )
-                .map_err(|error| AppError::Message(format!("清理本地路由残留失败: {error}")))
+                .map_err(|error| {
+                    AppError::Message(format!(
+                        "Failed to clean up residual local routing state: {error}"
+                    ))
+                })
             } else {
                 Ok(())
             };
@@ -3711,7 +3733,7 @@ impl ProviderService {
                             .hot_switch_provider_inner(AppType::Codex.as_str(), id),
                     )
                     .map(|_| SwitchResult::default())
-                    .map_err(|error| AppError::Message(format!("热切换失败: {error}")))
+                    .map_err(|error| AppError::Message(format!("Hot switch failed: {error}")))
                 } else {
                     Self::switch_normal(state, AppType::Codex, id, providers).and_then(|result| {
                         block_on_provider_transition(
@@ -3720,7 +3742,9 @@ impl ProviderService {
                                 .set_takeover_for_app_inner(AppType::Codex.as_str(), true),
                         )
                         .map(|()| result)
-                        .map_err(|error| AppError::Message(format!("启用本地路由失败: {error}")))
+                        .map_err(|error| {
+                            AppError::Message(format!("Failed to enable local routing: {error}"))
+                        })
                     })
                 }
             })
@@ -3760,7 +3784,7 @@ impl ProviderService {
     ) -> Result<SwitchResult, AppError> {
         let provider = providers
             .get(id)
-            .ok_or_else(|| AppError::Message(format!("供应商 {id} 不存在")))?;
+            .ok_or_else(|| AppError::Message(format!("Provider {id} does not exist")))?;
 
         // OMO ↔ OMO Slim are mutually exclusive; activating one removes the other's config file.
         if matches!(app_type, AppType::OpenCode) {
@@ -3803,9 +3827,10 @@ impl ProviderService {
                     // Only backfill when switching to a different provider
                     if let Ok(live_config) = read_live_settings(app_type.clone()) {
                         if let Some(mut current_provider) = providers.get(&current_id).cloned() {
-                            // 切走前先把 live 里的可共享改动（含用户直接在应用内
-                            // 装插件/加 hook/改偏好）同步进通用配置片段，再做剥离回填。
-                            // 详见 sync_common_config_snippet_from_live 的文档。
+                            // Before switching away, synchronize shareable live changes, including
+                            // plugins, hooks, and preferences changed directly in the application,
+                            // into the common configuration snippet before stripping and backfilling.
+                            // See sync_common_config_snippet_from_live documentation.
                             Self::sync_common_config_snippet_from_live(
                                 state,
                                 &app_type,
@@ -3958,7 +3983,7 @@ impl ProviderService {
                     .proxy_service
                     .update_live_backup_from_provider(app_type.as_str(), provider),
             )
-            .map_err(|e| AppError::Message(format!("更新 Live 备份失败: {e}")))?;
+            .map_err(|e| AppError::Message(format!("Failed to update the live backup: {e}")))?;
             return Ok(());
         }
 
@@ -4038,27 +4063,31 @@ impl ProviderService {
         Self::migrate_legacy_common_config_usage(state, app_type, &snippet)
     }
 
-    /// 切走某供应商前，把它 live 配置里的可共享部分重新提取并**整体替换**到
-    /// 通用配置片段，使在 live 应用里直接做的改动不会因切换而丢失。
+    /// Before switching away from a provider, extracts the shareable portion of its live
+    /// configuration and **fully replaces** the common snippet so direct live-application edits
+    /// survive the switch.
     ///
-    /// 采用"整体重提取 + 替换"而非"只合并新增"，是为了同时覆盖三种情况：
-    /// - **新增**：用户直接在应用里装了插件、加了 hook、改了 env/主题/权限等共享
-    ///   偏好，被捕获进通用配置，切到别的供应商也带得过去；
-    /// - **删除**：被删掉的键不在新提取结果里，于是从片段里消失、下次切换不会被
-    ///   重新注入——否则会出现"插件怎么删也删不掉"的反直觉 bug；
-    /// - **密钥安全**：提取器已剥掉 auth / model / endpoint，密钥永不进共享片段。
+    /// Full re-extraction and replacement, rather than merging additions only, covers three cases:
+    /// - **Additions**: plugins, hooks, env, theme, permissions, and other shared preferences changed
+    ///   directly in the application enter common configuration and follow provider switches.
+    /// - **Deletions**: removed keys disappear from the new extraction and are not injected during
+    ///   the next switch, avoiding settings that appear impossible to remove.
+    /// - **Credential safety**: extraction removes auth, model, and endpoint values, so credentials
+    ///   never enter the shared snippet.
     ///
-    /// 之所以"整体替换"是安全的：每次写 live 都会把当前片段合并进去，所以切走时
-    /// 读到的 live 一定是"片段 + 本地改动"的超集，重提取只会丢掉用户真正删掉的键，
-    /// 不会误删其它供应商共享的内容。
+    /// Full replacement is safe because every live write merges the current snippet. The live
+    /// configuration read during a switch is therefore a superset of the snippet plus local edits;
+    /// re-extraction drops only keys the user actually removed, not content shared by other providers.
     ///
-    /// **作用域**：仅 Claude。Codex 的 live 是 TOML 且端点藏在 `[model_providers]`
-    /// 表里（现有提取器不剥），自动同步会泄漏端点并与 modelCatalog / 统一会话桶 /
-    /// auth 还原逻辑冲突；Gemini 暂未纳入。两者如需支持应各自单独验证后再加。
+    /// **Scope**: Claude only. Codex live configuration is TOML, with endpoints nested in
+    /// `[model_providers]` that the current extractor does not strip. Automatic synchronization
+    /// would leak endpoints and conflict with modelCatalog, unified session buckets, and auth
+    /// restoration. Gemini is not included yet. Validate each client independently before support.
     ///
-    /// 仅对**显式勾选"写入通用配置"**（`meta.common_config_enabled == Some(true)`）的
-    /// 供应商生效；用户**显式清空**过片段（`_cleared`）时跳过，避免把用户主动清掉的
-    /// 配置又塞回来。所有失败均为非致命，只记 warning，绝不阻断切换。
+    /// Applies only to providers that explicitly enable writing common configuration through
+    /// `meta.common_config_enabled == Some(true)`. Skip snippets explicitly cleared by the user
+    /// (`_cleared`) so removed configuration is not restored. Failures are non-fatal warnings and
+    /// never block switching.
     fn sync_common_config_snippet_from_live(
         state: &AppState,
         app_type: &AppType,
@@ -4066,7 +4095,7 @@ impl ProviderService {
         live_config: &Value,
         result: &mut SwitchResult,
     ) {
-        // 作用域限定 Claude（见函数文档）。
+        // Restricted to Claude; see the function documentation.
         if !matches!(app_type, AppType::Claude) {
             return;
         }
@@ -4081,7 +4110,7 @@ impl ProviderService {
         }
 
         match state.db.is_config_snippet_cleared(app_type.as_str()) {
-            Ok(true) => return, // 用户显式清空过通用配置，尊重其选择，不再自动塞回
+            Ok(true) => return, // Respect an explicitly cleared snippet and do not restore it.
             Ok(false) => {}
             Err(err) => {
                 log::warn!(
@@ -4107,7 +4136,7 @@ impl ProviderService {
             }
         };
 
-        // 未变化则跳过，避免无谓写库（不切 live 配置时这是常态路径）。
+        // Skip unchanged content to avoid needless database writes, the normal path without live edits.
         let current = state
             .db
             .get_config_snippet(app_type.as_str())
@@ -4178,21 +4207,21 @@ impl ProviderService {
         }
     }
 
-    /// 判断一个 env / 顶层配置键名是否为凭据/机密：凡命中一律不得写入共享的
-    /// 通用配置片段。**故意从严**——多剥一个非机密键只是它不被共享（可恢复的小
-    /// 不便），漏剥一个凭据则会把密钥注入到每个供应商（不可恢复的泄漏）。因此用
-    /// 模式匹配覆盖整类，而非枚举具体名字（枚举永远会漏掉下一个 `*_API_KEY`）。
+    /// Returns whether an env or top-level configuration key represents a credential or secret
+    /// that must never enter the shared common snippet. This is **intentionally conservative**:
+    /// stripping one extra non-secret key merely prevents sharing and is recoverable, while missing
+    /// one credential injects it into every provider and causes an irreversible leak. Pattern matching
+    /// covers whole classes instead of enumerating names that will miss the next `*_API_KEY`.
     ///
-    /// 覆盖：Anthropic / OpenRouter / Google / OpenAI / Gemini 等 `*_API_KEY`
-    /// （Claude provider 的凭据见 `Provider::resolve_usage_credentials`，确实支持
-    /// `OPENROUTER_API_KEY` / `GOOGLE_API_KEY` 等回退）、各类 `*_AUTH_TOKEN` /
-    /// 单数 `*_TOKEN`、AWS Bedrock / Vertex 凭据、以及通用 secret / password /
-    /// 私钥命名。
+    /// Covers `*_API_KEY` for Anthropic, OpenRouter, Google, OpenAI, Gemini, and similar providers;
+    /// Claude provider credentials in `Provider::resolve_usage_credentials` do support fallbacks such
+    /// as `OPENROUTER_API_KEY` and `GOOGLE_API_KEY`. Also covers `*_AUTH_TOKEN`, singular `*_TOKEN`,
+    /// AWS Bedrock and Vertex credentials, and generic secret, password, or private-key naming.
     fn is_sensitive_config_key(name: &str) -> bool {
         let upper = name.to_ascii_uppercase();
 
-        // 单数 `_TOKEN` 命中 AWS_SESSION_TOKEN 等，但**不**误伤复数 `_TOKENS`
-        // （CLAUDE_CODE_MAX_OUTPUT_TOKENS / MAX_THINKING_TOKENS 是正常可共享配置）。
+        // Singular `_TOKEN` matches AWS_SESSION_TOKEN and similar credentials without matching plural
+        // `_TOKENS`; CLAUDE_CODE_MAX_OUTPUT_TOKENS and MAX_THINKING_TOKENS are shareable settings.
         const SENSITIVE_SUFFIXES: &[&str] = &[
             "_API_KEY",
             "_APIKEY",
@@ -4211,8 +4240,8 @@ impl ProviderService {
             "PASSWORD",
             "CREDENTIALS",
         ];
-        // contains：覆盖 AWS_SECRET_ACCESS_KEY / *_CLIENT_SECRET /
-        // GOOGLE_APPLICATION_CREDENTIALS / AWS_BEARER_TOKEN_BEDROCK 等变体。
+        // Substring matches cover variants such as AWS_SECRET_ACCESS_KEY, *_CLIENT_SECRET,
+        // GOOGLE_APPLICATION_CREDENTIALS, and AWS_BEARER_TOKEN_BEDROCK.
         const SENSITIVE_CONTAINS: &[&str] = &[
             "SECRET",
             "PASSWORD",
@@ -4231,12 +4260,12 @@ impl ProviderService {
     fn extract_claude_common_config(settings: &Value) -> Result<String, AppError> {
         let mut config = settings.clone();
 
-        // 供应商专属的**非机密**字段（模型 + 端点），不应共享。凭据/机密不在此列举，
-        // 改由 `is_sensitive_config_key`（模式匹配）统一剥离，新供应商的 `*_API_KEY`
-        // 等无需再手工补名单即可被覆盖。
+        // Provider-specific **non-secret** fields such as models and endpoints must not be shared.
+        // Credentials and secrets are omitted from this list and removed centrally through pattern
+        // matching in `is_sensitive_config_key`, so new `*_API_KEY` names require no manual addition.
         const ENV_PROVIDER_SPECIFIC_EXCLUDES: &[&str] = &[
             "ANTHROPIC_MODEL",
-            "ANTHROPIC_REASONING_MODEL", // legacy: 已废弃，但旧配置可能残留
+            "ANTHROPIC_REASONING_MODEL", // Legacy and deprecated, but may remain in old configuration.
             "ANTHROPIC_DEFAULT_HAIKU_MODEL",
             "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
             "ANTHROPIC_DEFAULT_OPUS_MODEL",
@@ -4253,7 +4282,7 @@ impl ProviderService {
             "smallFastModel",
         ];
 
-        // Remove env fields: provider-specific (models/endpoint) + 任何凭据键。
+        // Remove provider-specific env fields for models/endpoints and every credential key.
         if let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) {
             let sensitive: Vec<String> = env
                 .keys()
@@ -4272,8 +4301,8 @@ impl ProviderService {
             }
         }
 
-        // Remove top-level fields: legacy model fields + 任何凭据键
-        // （例如非标准的顶层 apiKey / api_key / *_TOKEN）。
+        // Remove legacy top-level model fields and every credential key, including nonstandard
+        // top-level apiKey, api_key, or *_TOKEN values.
         if let Some(obj) = config.as_object_mut() {
             let sensitive: Vec<String> = obj
                 .keys()
@@ -4542,7 +4571,7 @@ impl ProviderService {
                 if !provider.settings_config.is_object() {
                     return Err(AppError::localized(
                         "provider.claude.settings.not_object",
-                        "Claude 配置必须是 JSON 对象",
+                        "Claude configuration must be a JSON object",
                         "Claude configuration must be a JSON object",
                     ));
                 }
@@ -4554,7 +4583,7 @@ impl ProviderService {
                 let settings = provider.settings_config.as_object().ok_or_else(|| {
                     AppError::localized(
                         "provider.codex.settings.not_object",
-                        "Codex 配置必须是 JSON 对象",
+                        "Codex configuration must be a JSON object",
                         "Codex configuration must be a JSON object",
                     )
                 })?;
@@ -4562,14 +4591,17 @@ impl ProviderService {
                 let auth = settings.get("auth").ok_or_else(|| {
                     AppError::localized(
                         "provider.codex.auth.missing",
-                        format!("供应商 {} 缺少 auth 配置", provider.id),
+                        format!("Provider {} is missing auth configuration", provider.id),
                         format!("Provider {} is missing auth configuration", provider.id),
                     )
                 })?;
                 if !auth.is_object() {
                     return Err(AppError::localized(
                         "provider.codex.auth.not_object",
-                        format!("供应商 {} 的 auth 配置必须是 JSON 对象", provider.id),
+                        format!(
+                            "Auth configuration for provider {} must be a JSON object",
+                            provider.id
+                        ),
                         format!(
                             "Provider {} auth configuration must be a JSON object",
                             provider.id
@@ -4581,7 +4613,7 @@ impl ProviderService {
                     if !(config_value.is_string() || config_value.is_null()) {
                         return Err(AppError::localized(
                             "provider.codex.config.invalid_type",
-                            "Codex config 字段必须是字符串",
+                            "The Codex config field must be a string",
                             "Codex config field must be a string",
                         ));
                     }
@@ -4600,7 +4632,7 @@ impl ProviderService {
                 if !provider.settings_config.is_object() {
                     return Err(AppError::localized(
                         "provider.opencode.settings.not_object",
-                        "OpenCode 配置必须是 JSON 对象",
+                        "OpenCode configuration must be a JSON object",
                         "OpenCode configuration must be a JSON object",
                     ));
                 }
@@ -4611,7 +4643,7 @@ impl ProviderService {
                 if !provider.settings_config.is_object() {
                     return Err(AppError::localized(
                         "provider.openclaw.settings.not_object",
-                        "OpenClaw 配置必须是 JSON 对象",
+                        "OpenClaw configuration must be a JSON object",
                         "OpenClaw configuration must be a JSON object",
                     ));
                 }
@@ -4621,7 +4653,7 @@ impl ProviderService {
                 if !provider.settings_config.is_object() {
                     return Err(AppError::localized(
                         "provider.hermes.settings.not_object",
-                        "Hermes 配置必须是 JSON 对象",
+                        "Hermes configuration must be a JSON object",
                         "Hermes configuration must be a JSON object",
                     ));
                 }
@@ -4658,7 +4690,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.claude.env.missing",
-                            "配置格式错误: 缺少 env",
+                            "Invalid configuration format: missing env",
                             "Invalid configuration: missing env section",
                         )
                     })?;
@@ -4670,7 +4702,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.claude.api_key.missing",
-                            "缺少 API Key",
+                            "Missing API key",
                             "API key is missing",
                         )
                     })?
@@ -4682,7 +4714,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.claude.base_url.missing",
-                            "缺少 ANTHROPIC_BASE_URL 配置",
+                            "Missing ANTHROPIC_BASE_URL configuration",
                             "Missing ANTHROPIC_BASE_URL configuration",
                         )
                     })?
@@ -4703,7 +4735,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.codex.auth.missing",
-                            "配置格式错误: 缺少 auth",
+                            "Invalid configuration format: missing auth",
                             "Invalid configuration: missing auth section",
                         )
                     })?;
@@ -4721,7 +4753,7 @@ impl ProviderService {
                 .ok_or_else(|| {
                     AppError::localized(
                         "provider.codex.api_key.missing",
-                        "缺少 API Key",
+                        "Missing API key",
                         "API key is missing",
                     )
                 })?;
@@ -4730,7 +4762,7 @@ impl ProviderService {
                     let re = Regex::new(r#"base_url\s*=\s*["']([^"']+)["']"#).map_err(|e| {
                         AppError::localized(
                             "provider.regex_init_failed",
-                            format!("正则初始化失败: {e}"),
+                            format!("Failed to initialize regular expression: {e}"),
                             format!("Failed to initialize regex: {e}"),
                         )
                     })?;
@@ -4740,14 +4772,14 @@ impl ProviderService {
                         .ok_or_else(|| {
                             AppError::localized(
                                 "provider.codex.base_url.invalid",
-                                "config.toml 中 base_url 格式错误",
+                                "Invalid base_url format in config.toml",
                                 "base_url in config.toml has invalid format",
                             )
                         })?
                 } else {
                     return Err(AppError::localized(
                         "provider.codex.base_url.missing",
-                        "config.toml 中缺少 base_url 配置",
+                        "Missing base_url configuration in config.toml",
                         "base_url is missing from config.toml",
                     ));
                 };
@@ -4762,7 +4794,7 @@ impl ProviderService {
                 let api_key = env_map.get("GEMINI_API_KEY").cloned().ok_or_else(|| {
                     AppError::localized(
                         "gemini.missing_api_key",
-                        "缺少 GEMINI_API_KEY",
+                        "Missing GEMINI_API_KEY",
                         "Missing GEMINI_API_KEY",
                     )
                 })?;
@@ -4783,7 +4815,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.opencode.options.missing",
-                            "配置格式错误: 缺少 options",
+                            "Invalid configuration format: missing options",
                             "Invalid configuration: missing options section",
                         )
                     })?;
@@ -4794,7 +4826,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.opencode.api_key.missing",
-                            "缺少 API Key",
+                            "Missing API key",
                             "API key is missing",
                         )
                     })?
@@ -4817,7 +4849,7 @@ impl ProviderService {
                     .ok_or_else(|| {
                         AppError::localized(
                             "provider.openclaw.api_key.missing",
-                            "缺少 API Key",
+                            "Missing API key",
                             "API key is missing",
                         )
                     })?
@@ -4918,21 +4950,21 @@ pub struct ProviderSortUpdate {
 }
 
 // ============================================================================
-// 统一供应商（Universal Provider）服务方法
+// Universal-provider service methods.
 // ============================================================================
 
 use crate::provider::UniversalProvider;
 use std::collections::HashMap;
 
 impl ProviderService {
-    /// 获取所有统一供应商
+    /// Returns all universal providers.
     pub fn list_universal(
         state: &AppState,
     ) -> Result<HashMap<String, UniversalProvider>, AppError> {
         state.db.get_all_universal_providers()
     }
 
-    /// 获取单个统一供应商
+    /// Returns one universal provider.
     pub fn get_universal(
         state: &AppState,
         id: &str,
@@ -4940,26 +4972,27 @@ impl ProviderService {
         state.db.get_universal_provider(id)
     }
 
-    /// 添加或更新统一供应商（不自动同步，需手动调用 sync_universal_to_apps）
+    /// Adds or updates a universal provider without automatic synchronization.
+    /// Call sync_universal_to_apps explicitly.
     pub fn upsert_universal(
         state: &AppState,
         provider: UniversalProvider,
     ) -> Result<bool, AppError> {
-        // 保存统一供应商
+        // Save the universal provider.
         state.db.save_universal_provider(&provider)?;
 
         Ok(true)
     }
 
-    /// 删除统一供应商
+    /// Deletes a universal provider.
     pub fn delete_universal(state: &AppState, id: &str) -> Result<bool, AppError> {
-        // 获取统一供应商（用于删除生成的子供应商）
+        // Load the universal provider so generated child providers can be deleted.
         let provider = state.db.get_universal_provider(id)?;
 
-        // 删除统一供应商
+        // Delete the universal provider.
         state.db.delete_universal_provider(id)?;
 
-        // 删除生成的子供应商
+        // Delete generated child providers.
         if let Some(p) = provider {
             if p.apps.claude {
                 let claude_id = format!("universal-claude-{id}");
@@ -4978,16 +5011,16 @@ impl ProviderService {
         Ok(true)
     }
 
-    /// 同步统一供应商到各应用
+    /// Synchronizes a universal provider to each application.
     pub fn sync_universal_to_apps(state: &AppState, id: &str) -> Result<bool, AppError> {
         let provider = state
             .db
             .get_universal_provider(id)?
-            .ok_or_else(|| AppError::Message(format!("统一供应商 {id} 不存在")))?;
+            .ok_or_else(|| AppError::Message(format!("Universal provider {id} does not exist")))?;
 
-        // 同步到 Claude
+        // Synchronize to Claude.
         if let Some(mut claude_provider) = provider.to_claude_provider() {
-            // 合并已有配置
+            // Merge existing configuration.
             if let Some(existing) = state.db.get_provider_by_id(&claude_provider.id, "claude")? {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &claude_provider.settings_config);
@@ -4995,14 +5028,14 @@ impl ProviderService {
             }
             state.db.save_provider("claude", &claude_provider)?;
         } else {
-            // 如果禁用了 Claude，删除对应的子供应商
+            // Remove the corresponding child provider when Claude is disabled.
             let claude_id = format!("universal-claude-{id}");
             let _ = state.db.delete_provider("claude", &claude_id);
         }
 
-        // 同步到 Codex
+        // Synchronize to Codex.
         if let Some(mut codex_provider) = provider.to_codex_provider() {
-            // 合并已有配置
+            // Merge existing configuration.
             if let Some(existing) = state.db.get_provider_by_id(&codex_provider.id, "codex")? {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &codex_provider.settings_config);
@@ -5014,9 +5047,9 @@ impl ProviderService {
             let _ = state.db.delete_provider("codex", &codex_id);
         }
 
-        // 同步到 Gemini
+        // Synchronize to Gemini.
         if let Some(mut gemini_provider) = provider.to_gemini_provider() {
-            // 合并已有配置
+            // Merge existing configuration.
             if let Some(existing) = state.db.get_provider_by_id(&gemini_provider.id, "gemini")? {
                 let mut merged = existing.settings_config.clone();
                 Self::merge_json(&mut merged, &gemini_provider.settings_config);
@@ -5031,7 +5064,7 @@ impl ProviderService {
         Ok(true)
     }
 
-    /// 递归合并 JSON：base 为底，patch 覆盖同名字段
+    /// Recursively merges JSON with base as the foundation and patch overriding matching fields.
     fn merge_json(base: &mut serde_json::Value, patch: &serde_json::Value) {
         use serde_json::Value;
 
@@ -5046,7 +5079,7 @@ impl ProviderService {
                     }
                 }
             }
-            // 其它类型：直接覆盖
+            // Other types are replaced directly.
             (base_val, patch_val) => {
                 *base_val = patch_val.clone();
             }

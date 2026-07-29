@@ -37,22 +37,20 @@ pub(crate) const MAX_SYNC_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 
 pub(crate) fn localized(
     key: &'static str,
-    zh: impl Into<String>,
-    en: impl Into<String>,
+    legacy_message: impl Into<String>,
+    english_message: impl Into<String>,
 ) -> AppError {
-    AppError::localized(key, zh, en)
+    AppError::localized(key, legacy_message, english_message)
 }
 
 pub(crate) fn io_context_localized(
     _key: &'static str,
-    zh: impl Into<String>,
-    en: impl Into<String>,
+    _legacy_message: impl Into<String>,
+    english_message: impl Into<String>,
     source: std::io::Error,
 ) -> AppError {
-    let zh_msg = zh.into();
-    let en_msg = en.into();
     AppError::IoContext {
-        context: format!("{zh_msg} ({en_msg})"),
+        context: english_message.into(),
         source,
     }
 }
@@ -113,7 +111,7 @@ pub(crate) fn build_local_snapshot(
     let tmp = tempdir().map_err(|e| {
         io_context_localized(
             "sync.snapshot_tmpdir_failed",
-            "创建快照临时目录失败",
+            "Failed to create the temporary snapshot directory",
             "Failed to create temporary directory for snapshot",
             e,
         )
@@ -190,7 +188,7 @@ pub(crate) fn validate_manifest_compat(
     if manifest.format != PROTOCOL_FORMAT {
         return Err(localized(
             "sync.manifest_format_incompatible",
-            format!("远端 manifest 格式不兼容: {}", manifest.format),
+            format!("Incompatible remote manifest format: {}", manifest.format),
             format!(
                 "Remote manifest format is incompatible: {}",
                 manifest.format
@@ -201,7 +199,7 @@ pub(crate) fn validate_manifest_compat(
         return Err(localized(
             "sync.manifest_version_incompatible",
             format!(
-                "远端 manifest 协议版本不兼容: v{} (本地 v{PROTOCOL_VERSION})",
+                "Incompatible remote manifest protocol version: v{} (local v{PROTOCOL_VERSION})",
                 manifest.version
             ),
             format!(
@@ -213,7 +211,7 @@ pub(crate) fn validate_manifest_compat(
     let Some(db_compat_version) = effective_db_compat_version(manifest, layout) else {
         return Err(localized(
             "sync.manifest_db_version_missing",
-            "远端 manifest 缺少数据库兼容版本",
+            "Remote manifest is missing the database compatibility version",
             "Remote manifest is missing the database compatibility version.",
         ));
     };
@@ -222,7 +220,7 @@ pub(crate) fn validate_manifest_compat(
             return Err(localized(
                 "sync.manifest_db_version_incompatible",
                 format!(
-                    "远端数据库快照版本不兼容: db-v{db_compat_version} (本地 db-v{DB_COMPAT_VERSION})"
+                    "Incompatible remote database snapshot version: db-v{db_compat_version} (local db-v{DB_COMPAT_VERSION})"
                 ),
                 format!(
                     "Remote database snapshot version is incompatible: db-v{db_compat_version} (local db-v{DB_COMPAT_VERSION})"
@@ -233,7 +231,7 @@ pub(crate) fn validate_manifest_compat(
             return Err(localized(
                 "sync.manifest_db_version_incompatible",
                 format!(
-                    "远端数据库快照版本不兼容: db-v{db_compat_version} (本地最高支持 db-v{DB_COMPAT_VERSION})"
+                    "Incompatible remote database snapshot version: db-v{db_compat_version} (maximum local support is db-v{DB_COMPAT_VERSION})"
                 ),
                 format!(
                     "Remote database snapshot version is incompatible: db-v{db_compat_version} (local supports up to db-v{DB_COMPAT_VERSION})"
@@ -252,7 +250,10 @@ pub(crate) fn validate_artifact_size_limit(artifact_name: &str, size: u64) -> Re
         let max_mb = MAX_SYNC_ARTIFACT_BYTES / 1024 / 1024;
         return Err(localized(
             "sync.artifact_too_large",
-            format!("artifact {artifact_name} 超过下载上限（{} MB）", max_mb),
+            format!(
+                "Artifact {artifact_name} exceeds the download limit ({} MB)",
+                max_mb
+            ),
             format!(
                 "Artifact {artifact_name} exceeds download limit ({} MB)",
                 max_mb
@@ -273,7 +274,7 @@ pub(crate) fn verify_artifact(
         return Err(localized(
             "sync.artifact_size_mismatch",
             format!(
-                "artifact {artifact_name} 大小不匹配 (expected: {}, got: {})",
+                "Artifact {artifact_name} size mismatch (expected: {}, got: {})",
                 meta.size,
                 bytes.len(),
             ),
@@ -290,7 +291,7 @@ pub(crate) fn verify_artifact(
         return Err(localized(
             "sync.artifact_hash_mismatch",
             format!(
-                "artifact {artifact_name} SHA256 校验失败 (expected: {}..., got: {}...)",
+                "Artifact {artifact_name} failed SHA-256 verification (expected: {}..., got: {}...)",
                 meta.sha256.get(..8).unwrap_or(&meta.sha256),
                 actual_hash.get(..8).unwrap_or(&actual_hash),
             ),
@@ -314,7 +315,7 @@ pub(crate) fn apply_snapshot(
     let sql_str = std::str::from_utf8(db_sql).map_err(|e| {
         localized(
             "sync.sql_not_utf8",
-            format!("SQL 非 UTF-8: {e}"),
+            format!("SQL is not valid UTF-8: {e}"),
             format!("SQL is not valid UTF-8: {e}"),
         )
     })?;
@@ -327,7 +328,7 @@ pub(crate) fn apply_snapshot(
         if let Err(rollback_err) = restore_skills_from_backup(&skills_backup) {
             return Err(localized(
                 "sync.db_import_and_rollback_failed",
-                format!("导入数据库失败: {db_err}; 同时回滚 Skills 失败: {rollback_err}"),
+                format!("Failed to import database: {db_err}; Skills rollback also failed: {rollback_err}"),
                 format!(
                     "Database import failed: {db_err}; skills rollback also failed: {rollback_err}"
                 ),
@@ -599,7 +600,7 @@ mod tests {
         let err = validate_artifact_size_limit("skills.zip", MAX_SYNC_ARTIFACT_BYTES + 1)
             .expect_err("artifact larger than limit should be rejected");
         assert!(
-            err.to_string().contains("too large") || err.to_string().contains("超过"),
+            err.to_string().contains("download limit"),
             "unexpected error: {err}"
         );
     }
@@ -616,7 +617,7 @@ mod tests {
         let err = verify_artifact(&bytes, "test.bin", &meta)
             .expect_err("size mismatch should be rejected");
         assert!(
-            err.to_string().contains("mismatch") || err.to_string().contains("不匹配"),
+            err.to_string().contains("mismatch"),
             "unexpected error: {err}"
         );
     }
@@ -631,7 +632,7 @@ mod tests {
         let err = verify_artifact(bytes, "test.bin", &meta)
             .expect_err("hash mismatch should be rejected");
         assert!(
-            err.to_string().contains("verification failed") || err.to_string().contains("校验失败"),
+            err.to_string().contains("verification"),
             "unexpected error: {err}"
         );
     }

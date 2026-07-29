@@ -1,6 +1,6 @@
-//! MCP 服务器数据访问对象
+//! MCP server data-access object.
 //!
-//! 提供 MCP 服务器的 CRUD 操作。
+//! Provides CRUD operations for MCP servers.
 
 use crate::app_config::{McpApps, McpServer};
 use crate::database::{lock_conn, Database};
@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use rusqlite::params;
 
 impl Database {
-    /// 获取所有 MCP 服务器
+    /// Returns all MCP servers.
     pub fn get_all_mcp_servers(&self) -> Result<IndexMap<String, McpServer>, AppError> {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn.prepare(
@@ -66,7 +66,7 @@ impl Database {
         Ok(servers)
     }
 
-    /// 保存 MCP 服务器
+    /// Saves an MCP server.
     pub fn save_mcp_server(&self, server: &McpServer) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(
@@ -96,7 +96,7 @@ impl Database {
         Ok(())
     }
 
-    /// 删除 MCP 服务器
+    /// Deletes an MCP server.
     pub fn delete_mcp_server(&self, id: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute("DELETE FROM mcp_servers WHERE id = ?1", params![id])

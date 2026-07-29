@@ -8,22 +8,22 @@ import {
 } from "@/types/omo";
 
 describe("parseOmoOtherFieldsObject", () => {
-  it("解析对象 JSON", () => {
+  it("parses a JSON object", () => {
     expect(parseOmoOtherFieldsObject('{ "foo": 1 }')).toEqual({ foo: 1 });
   });
 
-  it("数组/字符串返回 undefined", () => {
+  it("returns undefined for arrays and strings", () => {
     expect(parseOmoOtherFieldsObject('["a"]')).toBeUndefined();
     expect(parseOmoOtherFieldsObject('"hello"')).toBeUndefined();
   });
 
-  it("非法 JSON 抛出异常", () => {
+  it("throws for invalid JSON", () => {
     expect(() => parseOmoOtherFieldsObject("{")).toThrow();
   });
 });
 
 describe("buildOmoProfilePreview", () => {
-  it("只合并 otherFields 的对象值，忽略数组", () => {
+  it("merges object-valued otherFields and ignores arrays", () => {
     const fromArray = buildOmoProfilePreview({}, {}, '["a", "b"]');
     expect(fromArray).toEqual({});
 
@@ -33,7 +33,7 @@ describe("buildOmoProfilePreview", () => {
 });
 
 describe("buildOmoSlimProfilePreview", () => {
-  it("保留 top-level council 配置，同时写入 council agent 模型", () => {
+  it("preserves top-level council config and writes the council agent model", () => {
     const preview = buildOmoSlimProfilePreview(
       {
         council: { model: "openai/gpt-5.4-mini" },
@@ -52,7 +52,7 @@ describe("buildOmoSlimProfilePreview", () => {
 });
 
 describe("OMO Slim metadata", () => {
-  it("将 council 视为内置且可禁用的 agent", () => {
+  it("treats council as a built-in, disableable agent", () => {
     expect(OMO_SLIM_BUILTIN_AGENTS).toContainEqual(
       expect.objectContaining({
         key: "council",

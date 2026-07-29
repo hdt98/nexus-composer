@@ -52,8 +52,9 @@ interface ToolVersion {
   version: string | null;
   latest_version: string | null;
   error: string | null;
-  // 后端已定位到可执行文件但 --version 报错（装了却跑不起来）。直接读此字段，
-  // 不要靠匹配 error 文案反推——避免前端与后端字符串硬耦合。
+  // The backend found the executable, but `--version` failed after install.
+  // Read this field directly instead of inferring from error text to avoid
+  // brittle frontend-backend string coupling.
   installed_but_broken: boolean;
   env_type: "windows" | "wsl" | "macos" | "linux" | "unknown";
   wsl_distro: string | null;
@@ -163,8 +164,9 @@ const TOOL_DISPLAY_NAMES: Record<ToolName, string> = {
   hermes: "Hermes",
 };
 
-// 后端返回的 tool 是 string；这里收敛唯一的 ToolName 断言与兜底，供升级确认
-// 对话框按工具名展示（避免在 JSX 里内联 cast、且每次渲染都新建闭包）。
+// The backend returns `tool` as string. Centralize the ToolName assertion and
+// fallback here so the upgrade confirmation dialog can render stable labels
+// without inline casts or per-render closures in JSX.
 function toolDisplayName(tool: string): string {
   return TOOL_DISPLAY_NAMES[tool as ToolName] ?? tool;
 }
@@ -178,19 +180,25 @@ const TOOL_APP_IDS: Record<ToolName, AppId> = {
   hermes: "hermes",
 };
 
-// 工具版本探测代价高：每个工具一次 `--version` 子进程 + 一次 npm/github/pypi 网络请求。
-// 设置页用 Radix Tabs，非激活 Tab 会被卸载——每次切回「关于」都重挂 AboutSection，若都
-// 全量重查纯属浪费。用「模块级」缓存（生命周期 = JS 模块 = 应用会话，不随组件卸载销毁）
-// 跨重挂存活：重挂时若缓存仍新鲜（距上次全量加载 < TTL）直接复用、跳过探测；超期或用户
-// 手动「刷新」才强制重查。at = 最近一次「全量加载」完成时刻；单工具刷新（切 shell / 升级
-// 后）只更新数据、不重置 at，避免一次局部刷新把整体 TTL 续命。
-const TOOL_VERSIONS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 分钟
+// Tool version probing is expensive: one `--version` subprocess plus one
+// npm/GitHub/PyPI request per tool.
+// The settings page uses Radix Tabs, and inactive tabs unmount. Re-mounting
+// AboutSection every time the user returns to "About" should not trigger a full
+// re-probe. Keep a module-level cache alive across re-mounts, reuse it while it
+// is fresh (`last full load < TTL`), and only force a full re-check when it
+// expires or the user clicks Refresh. `at` tracks the completion time of the
+// last full load. Single-tool refreshes after a shell change or upgrade update
+// the data but do not refresh `at`, so a partial refresh does not extend the
+// full-cache TTL.
+const TOOL_VERSIONS_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 let toolVersionsCache: { data: ToolVersion[]; at: number } | null = null;
-// 应用自身版本（getVersion，本地毫秒级、无网络）也缓存一份，纯为重挂时免去 loading 闪烁。
+// Cache the app version too. `getVersion` is local and fast, but caching avoids
+// a loading flicker on re-mount.
 let appVersionCache: string | null = null;
 
-// 把探测结果按 name 合并进已有列表：替换同名项、追加新项；空列表时直接采用新结果。
-// 组件 state 与模块缓存共用同一套合并语义（单工具与全量探测都经此函数）。
+// Merge probe results by name: replace existing entries, append new ones, and
+// use the new list directly when the previous list is empty. Component state
+// and the module cache share the same merge semantics.
 function mergeToolVersions(
   prev: ToolVersion[],
   updated: ToolVersion[],
@@ -208,8 +216,9 @@ function mergeToolVersions(
 export function AboutSection({ isPortable }: AboutSectionProps) {
   // ... (use hooks as before) ...
   const { t } = useTranslation();
-  // 惰性初始化自模块缓存：重挂时首帧即渲染上次的值，避免 loading 闪烁；首次挂载缓存
-  // 为空则回退到原始初值（null / loading）。
+  // Lazily initialize from the module cache so a re-mount can render the last
+  // value on the first frame without a loading flicker. Fall back to the
+  // original initial state on the first mount when the cache is empty.
   const [version, setVersion] = useState<string | null>(() => appVersionCache);
   const [isLoadingVersion, setIsLoadingVersion] = useState(
     () => appVersionCache === null,
@@ -218,8 +227,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const [toolVersions, setToolVersions] = useState<ToolVersion[]>(
     () => toolVersionsCache?.data ?? [],
   );
-  // 有缓存（哪怕已超期）就先展示旧值、初始不 loading；超期时由挂载副作用触发后台
-  // 重查（stale-while-revalidate）。无缓存（首次）才从 loading 起步。
+  // If any cache exists, show the stale value first and skip the initial
+  // loading state. When expired, let the mount effect revalidate in the
+  // background. Only the first uncached mount starts in loading state.
   const [isLoadingTools, setIsLoadingTools] = useState(
     () => toolVersionsCache === null,
   );
@@ -238,25 +248,32 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     Record<string, WslShellPreference>
   >({});
   const [loadingTools, setLoadingTools] = useState<Record<string, boolean>>({});
-  // 多处安装冲突诊断结果：按工具存储，有冲突的工具会在其卡片下方展示。
-  // 来源两路：顶部「诊断安装冲突」按钮一次性扫全部，或升级后版本未变时自动补诊。
+  // Installation conflict diagnostics keyed by tool. Conflicts render under
+  // the matching card. Data comes either from the top-level "Diagnose install
+  // conflicts" action or from silent re-diagnosis after an upgrade that did
+  // not change the detected version.
   const [toolDiagnostics, setToolDiagnostics] = useState<
     Partial<Record<ToolName, ToolInstallation[]>>
   >({});
   const [isDiagnosingAll, setIsDiagnosingAll] = useState(false);
-  // 升级前探测到「多处安装需确认」时暂存：toolNames=本次要升级的全部工具，
-  // plans=其中需要确认的（≥2 处）那些。用户确认后对 toolNames 整体执行升级。
+  // Stash multi-install confirmations before upgrade. `toolNames` contains the
+  // full target set for this run, while `plans` contains only the tools that
+  // require confirmation because two or more installs were found. After user
+  // confirmation, upgrade the full `toolNames` set.
   const [pendingUpgrade, setPendingUpgrade] = useState<{
     toolNames: ToolName[];
     plans: ToolInstallationReport[];
   } | null>(null);
-  // 升级 preflight(probe 阶段)的 in-flight 工具集合。
-  // probeToolInstallations 是个 1-3 秒级别的跨进程探测(对每个工具跑 --version + canonicalize),
-  // 在它返回之前 toolActions / batchAction 都还没被置位 → 按钮不会 disabled → 用户快速双击
-  // 会并发开两轮 probe,各自再触发 executeRun(并发的 `npm i -g` / 官方 installer,写冲突)。
-  // 把 probe 期间的工具登记在这里、纳入 isAnyBusy 派生,关掉这个并发窗口。
-  // 用 Set 而非 boolean:单卡片升级 & 批量升级可能在不同工具上独立 preflight,
-  // 精确反映到各自卡片按钮的 disabled。
+  // Tools currently in upgrade preflight (the probe stage).
+  // `probeToolInstallations` is a 1-3 second cross-process probe that runs
+  // `--version` plus canonicalization for each tool. Before it returns,
+  // `toolActions` and `batchAction` are still unset, so buttons would remain
+  // enabled and a fast double-click could start two concurrent probe rounds and
+  // then two concurrent `executeRun` calls (`npm i -g` or vendor installers
+  // racing on the same writes). Track probe-time tools here and include them in
+  // `isAnyBusy` to close that window. Use a Set instead of a boolean because
+  // single-card and batch upgrades can preflight different tools independently,
+  // and each card's disabled state should stay precise.
   const [preflightTools, setPreflightTools] = useState<Set<ToolName>>(
     () => new Set(),
   );
@@ -281,7 +298,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     ): Promise<ToolVersion[]> => {
       if (toolNames.length === 0) return [];
 
-      // 单工具刷新使用统一后端入口（get_tool_versions）并带工具过滤。
+      // Single-tool refreshes still use the shared backend entry point
+      // (`get_tool_versions`) with a tool filter.
       setLoadingTools((prev) => {
         const next = { ...prev };
         for (const name of toolNames) next[name] = true;
@@ -295,16 +313,20 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         );
 
         setToolVersions((prev) => mergeToolVersions(prev, updated));
-        // 同步进模块缓存，供切 Tab 重挂时复用。时间戳沿用上次「全量加载」的（单工具
-        // 刷新不算全量、不重置 TTL）；缓存为空时以 at=0 起步——0 是「尚未完成全量加载」
-        // 的过期哨兵，确保探测中途切走/切回时，残缺缓存被判过期而触发重查，而非把半套
-        // 数据当成完整结果复用。真实时间戳只由 loadAllToolVersions 的 finally 盖上。
+        // Mirror the result into the module cache so tab switches can reuse it.
+        // Preserve the timestamp from the last full load because a single-tool
+        // refresh does not reset the full-cache TTL. When no cache exists yet,
+        // start with `at = 0`. That sentinel means "no full load has completed"
+        // so an interrupted partial cache is treated as expired and reloaded
+        // instead of being reused as if it were complete. Only the `finally`
+        // block in `loadAllToolVersions` writes a real full-load timestamp.
         toolVersionsCache = {
           data: mergeToolVersions(toolVersionsCache?.data ?? [], updated),
           at: toolVersionsCache?.at ?? 0,
         };
 
-        // 返回刷新结果，调用方可据此判断版本是否真的探到（避免读 state 撞 stale closure）。
+        // Return the refreshed rows so callers can check whether a version was
+        // actually detected without reading stale closure state.
         return updated;
       } catch (error) {
         console.error("[AboutSection] Failed to refresh tools", error);
@@ -323,8 +345,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   const loadAllToolVersions = useCallback(
     async (options?: { force?: boolean }) => {
       const force = options?.force ?? false;
-      // 命中新鲜缓存：切回「关于」Tab 触发的重挂直接复用上次结果，跳过 6 个 `--version`
-      // 子进程 + 6 个 latest 版本网络请求。手动「刷新」传 force 绕过缓存强制重查。
+      // Reuse a fresh cache when the user returns to the About tab so we can
+      // skip six `--version` subprocesses and six latest-version requests.
+      // Manual refresh passes `force` to bypass the cache.
       if (
         !force &&
         toolVersionsCache &&
@@ -336,18 +359,22 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       }
       setIsLoadingTools(true);
       try {
-        // 逐工具并发探测：每个工具一完成就合并进 toolVersions（并写模块缓存）、清掉自己
-        // 的 loadingTools 标志，对应卡片随即独立刷新——而非等全部探测完才一次性显示（后端
-        // 原本对 6 个工具串行 await，总耗时累加；并发后压成「最慢的那一个」）。refreshTool-
-        // Versions 已内建按 name 合并 + per-tool loading + try/catch 兜底（单工具失败返回 []
-        // 不拖累其余），故 Promise.all 永不 reject。Respect current shell/flag overrides.
+        // Probe tools concurrently. As each result arrives, merge it into
+        // `toolVersions`, mirror it into the module cache, and clear that tool's
+        // loading flag so the matching card updates immediately instead of
+        // waiting for all probes to finish. The backend previously awaited six
+        // tools serially; concurrency collapses that into the slowest tool.
+        // `refreshToolVersions` already handles merge-by-name, per-tool loading,
+        // and local try/catch fallback, so `Promise.all` will not reject here.
+        // Respect the current shell and flag overrides.
         await Promise.all(
           TOOL_NAMES.map((toolName) =>
             refreshToolVersions([toolName], wslShellByTool),
           ),
         );
       } finally {
-        // 全量探测结束：把缓存时间戳刷新为现在，标记「刚完成一次全量加载」、重置 TTL。
+        // Full probe finished. Stamp the cache with the current time and reset
+        // the TTL window.
         if (toolVersionsCache) {
           toolVersionsCache = { ...toolVersionsCache, at: Date.now() };
         }
@@ -383,10 +410,12 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
   useEffect(() => {
     let active = true;
 
-    // 本软件自身版本走本地调用（getVersion，无网络，毫秒级），与工具版本探测彼此独立。
-    // 之前两者被塞进同一个 Promise.all，导致 setVersion / setIsLoadingVersion 被压在
-    // 「全部工具检查完成」之后——图标下方的版本徽标因此要干等 6 个工具全检完才显示。
-    // 拆成两条独立链路：应用版本一拿到就立刻显示，工具探测各自渐进刷新，互不阻塞。
+    // Load the app version through a local `getVersion` call. It is separate
+    // from tool probing and does not need network access. These used to share
+    // one Promise.all, which delayed `setVersion` and `setIsLoadingVersion`
+    // until every tool check finished, so the version badge under the icon had
+    // to wait for all six tool probes. Split them into independent paths so the
+    // app version appears immediately and tool cards refresh progressively.
     const loadAppVersion = async () => {
       try {
         const appVersion = await getVersion();
@@ -503,9 +532,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     }
   }, [t]);
 
-  // 升级后自动补诊单个工具：静默后台执行。有冲突写入结果；无冲突则清掉该工具可能残留
-  // 的过期冲突展示（外部卸载/修复后冲突可能已消失，不清会一直显示旧列表）。不弹 toast、
-  // 不报错打扰——与用户主动点的全量诊断区别对待。
+  // After an upgrade, silently re-diagnose a single tool in the background.
+  // Save conflicts when found, or clear any stale conflict UI for that tool
+  // when the issue is gone after an external uninstall or repair. Do not toast
+  // or surface errors here; this is intentionally quieter than the explicit
+  // full diagnostic action.
   const diagnoseToolSilently = useCallback(async (toolName: ToolName) => {
     try {
       const [report] = await settingsApi.probeToolInstallations([toolName]);
@@ -513,7 +544,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         if (report?.is_conflict) {
           return { ...prev, [toolName]: report.installs };
         }
-        // 无冲突：清掉残留;无旧结果则返回同引用，避免无谓 re-render。
+        // No conflict: clear any stale entry. Return the same reference when no
+        // previous result exists so React can skip an unnecessary re-render.
         if (!(toolName in prev)) return prev;
         const next = { ...prev };
         delete next[toolName];
@@ -527,8 +559,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     }
   }, []);
 
-  // 顶部按钮：一次性诊断全部 6 个工具，有冲突的写入各自卡片，
-  // 全部无冲突时给一条 info toast。后端逐工具枚举所有安装并判定分歧。
+  // Top-level action: diagnose all six tools at once. Conflicts are stored on
+  // their matching cards, and a no-conflict run emits one info toast. The
+  // backend enumerates all installs per tool and decides whether they diverge.
   const handleDiagnoseAll = useCallback(async () => {
     setIsDiagnosingAll(true);
     try {
@@ -556,7 +589,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     }
   }, [t]);
 
-  // 实际执行安装/升级的串行循环（已通过任何必要的确认后才调用）。
+  // Run install or upgrade operations serially after any required confirmation.
   const executeRun = useCallback(
     async (toolNames: ToolName[], action: ToolLifecycleAction) => {
       const isBatch = toolNames.length > 1;
@@ -564,10 +597,14 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         setBatchAction(action);
       }
 
-      // 逐工具串行执行：每个工具独立成败、独立刷新版本，一个失败不会连坐
-      // 后续工具（后端把整批拼成单脚本 + set -e，会在首个失败处中止整批）。
-      // soft=true 表示"命令成功执行但结果仍需用户介入"（版本没变/装上却跑不起来），
-      // 与命令本身报错（soft=false）区别对待：前者不算硬失败，toast 降级为 warning。
+      // Execute tools one by one. Each tool succeeds or fails independently and
+      // refreshes its own version, so one failure does not abort later tools.
+      // The backend previously built one `set -e` script for the whole batch,
+      // which stopped on the first failure. `soft=true` means the command ran
+      // successfully but still needs user intervention, such as an unchanged
+      // version or an installed-but-not-runnable tool. That is different from a
+      // hard command failure (`soft=false`) and should downgrade the toast to a
+      // warning.
       const failures: {
         toolName: ToolName;
         detail: string;
@@ -588,7 +625,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             action,
             wslShellByTool,
           );
-          // 静默执行真正结束后刷新该工具版本，卡片立即反映结果。
+          // Refresh the tool version only after the command has fully finished
+          // so the card reflects the final result immediately.
           const refreshed = await refreshToolVersions(
             [toolName],
             wslShellByTool,
@@ -603,8 +641,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               isUpdateAvailable(tool.version, latestVersion);
 
             if (versionUnchangedAfterUpdate) {
-              // 有些上游 updater 会在未实际改动版本时仍返回 0。这里用刷新后的
-              // 当前版本 + latest_version 再确认一次，避免给用户误报升级成功。
+              // Some upstream updaters still return exit code 0 when the version
+              // did not actually change. Re-check the refreshed current version
+              // against `latest_version` here to avoid a false success toast.
               failures.push({
                 toolName,
                 detail: t("settings.toolActionVersionUnchanged", {
@@ -617,16 +656,21 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               void diagnoseToolSilently(toolName);
             } else {
               succeeded += 1;
-              // 升级成功后无条件补诊：版本没变多半被另一处遮蔽，版本变了另一处也可能仍在，
-              // 两种都要刷新冲突展示（diagnoseToolSilently 无冲突时会自动清旧）。
+              // Always re-diagnose after a successful upgrade. If the version
+              // stayed the same, another install may still be shadowing it. If
+              // the version changed, another install may still coexist. In both
+              // cases, refresh the conflict UI. `diagnoseToolSilently` clears
+              // stale results automatically when no conflict remains.
               if (action === "update") {
                 void diagnoseToolSilently(toolName);
               }
             }
           } else {
-            // 命令退出码为 0、但刷新后仍探不到版本：多半是"装上了却跑不起来"
-            // （如 openclaw 要求更高的 Node 版本）。refreshToolVersions 的 merge 已把
-            // version 置空并写入后端 error，这里只需归类为软失败并展示原因。
+            // Exit code 0 but still no version after refresh usually means the
+            // tool installed but cannot run, for example because OpenClaw needs
+            // a newer Node version. `refreshToolVersions` has already merged the
+            // backend error and cleared `version`, so classify this as a soft
+            // failure and surface the reason.
             const detail = tool?.error?.trim() || t("settings.toolNotRunnable");
             failures.push({
               toolName,
@@ -634,7 +678,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               soft: true,
               kind: "notRunnable",
             });
-            // 装了却跑不起来同样可能源于多处安装，自动诊断帮用户定位。
+            // Installed-but-not-runnable can also come from multiple installs,
+            // so auto-diagnose to help the user locate the conflict.
             void diagnoseToolSilently(toolName);
           }
         } catch (error) {
@@ -673,7 +718,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         return;
       }
 
-      // 批量场景每个失败只摘取错误末行（最相关），单工具场景给出完整详情。
+      // In batch mode, keep only the last error line per tool. In single-tool
+      // mode, show the full detail.
       const lastLine = (text: string) => {
         const lines = text.trim().split("\n").filter(Boolean);
         return lines[lines.length - 1] ?? text;
@@ -692,8 +738,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         failures.every((f) => f.soft && f.kind === "versionUnchanged");
 
       if (succeeded === 0 && hardFailures.length === 0) {
-        // 命令均成功执行、但结果需要用户介入（版本没变 / 装上却跑不起来）
-        // → 降级为 warning 并解释原因。
+        // Commands ran successfully, but the result still needs user action
+        // such as an unchanged version or an installed-but-not-runnable tool.
+        // Downgrade to a warning and explain why.
         toast.warning(
           allSoftVersionUnchanged
             ? t("settings.toolActionVersionUnchangedTitle")
@@ -709,7 +756,7 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
           closeButton: true,
         });
       } else {
-        // 部分成功：用 warning 汇总成败数量，详情列出失败的工具。
+        // Partial success: summarize counts in a warning and list failed tools.
         toast.warning(
           t("settings.toolActionPartial", {
             succeeded,
@@ -729,14 +776,16 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
     ],
   );
 
-  // 升级/安装的统一入口锁。所有动作在入口处先登记 preflight、出口处解锁;
-  // 这层锁覆盖三个否则会漏掉的窗口:
-  //   ① update 的 probeToolInstallations 阶段(1-3 秒跨进程,executeRun 之前);
-  //   ② executeRun 内部 setToolActions 落到 React commit 前的几个 microtask;
-  //   ③ install 直接进 executeRun 的同一段 microtask 窗口。
-  // 早退检查避免同一工具在 toolActions / preflight 已登记时被重复入栈——批量场景里
-  // 只要有一个工具被锁,整批不开新一轮,因为后端 set -e 串行的语义假设是「一次性
-  // 单脚本」,跨两次 IPC 并发会破坏它。
+  // Shared entry lock for installs and upgrades. Every action registers
+  // preflight at entry and unlocks on exit. This covers three race windows:
+  //   1. The `probeToolInstallations` phase before update execution.
+  //   2. The microtasks inside `executeRun` before `setToolActions` commits.
+  //   3. The same microtask window for installs that jump straight to
+  //      `executeRun`.
+  // Early return avoids queueing the same tool twice when `toolActions` or
+  // preflight already contains it. In batch mode, if any tool is locked, do
+  // not start a second round because the backend assumes one serial `set -e`
+  // script, and concurrent IPC calls would break that model.
   const handleRunToolAction = useCallback(
     async (toolNames: ToolName[], action: ToolLifecycleAction) => {
       if (toolNames.length === 0) return;
@@ -747,8 +796,10 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
       ) {
         return;
       }
-      // 入栈 preflight,按钮立刻 disabled。new Set(prev) 是不可变更新(直接 mutate
-      // 原 Set 会让 React 复用引用、跳过 re-render);finally 块负责异常路径解锁。
+      // Register preflight immediately so buttons disable at once. `new
+      // Set(prev)` preserves immutable updates; mutating the original Set would
+      // keep the same reference and let React skip the re-render. The `finally`
+      // block handles unlocks on error paths too.
       setPreflightTools((prev) => {
         const next = new Set(prev);
         toolNames.forEach((name) => next.add(name));
@@ -763,7 +814,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
         try {
           reports = await settingsApi.probeToolInstallations(toolNames);
         } catch (error) {
-          // 探测失败不应阻断升级：退回直接执行（等同旧行为）。
+          // Probe failure should not block the upgrade. Fall back to direct
+          // execution to preserve the previous behavior.
           console.error("[AboutSection] probeToolInstallations failed", error);
           await executeRun(toolNames, action);
           return;
@@ -796,10 +848,11 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
 
   const displayVersion = version ?? t("common.unknown");
 
-  // 任一安装/升级进行中（批量或单工具）即视为忙碌：用于禁用所有操作按钮，
-  // 避免并发触发多个 npm/pip 全局写入造成冲突。
-  // preflightTools 覆盖升级前的 probe 阶段——那段在 executeRun 之前、toolActions
-  // 还没置位,如果不算进 busy 会留出 1-3 秒的并发触发窗口。
+  // Treat any install or upgrade, batch or single-tool, as a busy state so all
+  // action buttons can be disabled and concurrent global npm/pip writes do not
+  // collide. `preflightTools` also covers the probe stage before `executeRun`;
+  // without it, there would be a 1-3 second concurrency window before
+  // `toolActions` is set.
   const isAnyBusy =
     Boolean(batchAction) ||
     Object.keys(toolActions).length > 0 ||
@@ -1013,11 +1066,15 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
             const tool = toolVersionByName.get(toolName);
             const appConfig = APP_ICON_MAP[TOOL_APP_IDS[toolName]];
             const displayName = TOOL_DISPLAY_NAMES[toolName];
-            // 单卡片 loading 用「结果是否已到」而非「整批是否结束」驱动，实现渐进式刷新：
-            //   - loadingTools[t]：本工具探测在途（首次加载或单工具刷新）；
-            //   - isLoadingTools && !has(t)：整批进行中且该工具尚未返回——覆盖首帧/刷新时
-            //     未完成卡片的 loading 外观。某工具结果一落进 toolVersions，has(t) 即为 true，
-            //     该卡片立刻脱离 loading（哪怕全局 isLoadingTools 还为 true），其它卡片不受影响。
+            // Drive per-card loading from result availability instead of waiting
+            // for the whole batch to finish so cards can refresh progressively:
+            //   - `loadingTools[t]`: this tool is currently probing.
+            //   - `isLoadingTools && !has(t)`: the batch is still running and
+            //     this tool has not returned yet, which preserves the loading
+            //     appearance for unfinished cards on first render or refresh.
+            // Once a tool lands in `toolVersions`, `has(t)` becomes true and
+            // that card leaves loading immediately even if global
+            // `isLoadingTools` is still true.
             const isToolVersionLoading =
               Boolean(loadingTools[toolName]) ||
               (isLoadingTools && !toolVersionByName.has(toolName));
@@ -1025,10 +1082,13 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
               tool?.version,
               tool?.latest_version,
             );
-            // 已安装却跑不起来（如 Node 版本不达标）：用它区分卡片文案与按钮，避免把
-            // "装了跑不起来"误判成"未安装"而给出无用的安装按钮（重装同一版本解决不了）。
+            // Distinguish installed-but-not-runnable tools, such as cases where
+            // the Node version is too old. That lets the card show the right
+            // copy and hide a useless install button instead of mislabeling the
+            // tool as not installed.
             const installedButBroken = Boolean(tool?.installed_but_broken);
-            // loading 和 broken 都没有可执行动作；其余按是否已装/是否过期选择。
+            // Neither loading nor broken states have an actionable button.
+            // Otherwise choose by installed vs outdated state.
             const action: ToolLifecycleAction | null =
               isToolVersionLoading || installedButBroken
                 ? null
@@ -1063,7 +1123,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                           className={`mt-1 inline-flex w-fit text-[9px] px-1.5 py-0.5 rounded-full border ${ENV_BADGE_CONFIG[tool.env_type].className}`}
                         >
                           {t(ENV_BADGE_CONFIG[tool.env_type].labelKey)}
-                          {tool.wsl_distro ? ` · ${tool.wsl_distro}` : ""}
+                          {tool.wsl_distro
+                            ? ` ${String.fromCharCode(0xb7)} ${tool.wsl_distro}`
+                            : ""}
                         </span>
                       )}
                     </div>
@@ -1159,7 +1221,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                   </div>
                 )}
 
-                {/* 多处安装冲突诊断结果：仅在懒触发后有数据时渲染。 */}
+                {/* Render multi-install conflict diagnostics only after lazy
+                    data has been loaded. */}
                 {conflicts && conflicts.length > 0 && (
                   <div className="space-y-1.5 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-2.5">
                     <div className="text-[11px] font-medium text-yellow-600 dark:text-yellow-400">
@@ -1184,7 +1247,8 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                       {t("common.loading")}
                     </span>
                   ) : installedButBroken ? (
-                    // 已安装但跑不起来：重装无济于事，不给按钮，给一句指向环境的提示。
+                    // Installed but not runnable: reinstalling will not help, so
+                    // show an environment hint instead of a button.
                     <span className="text-xs text-yellow-600 dark:text-yellow-400">
                       {t("settings.toolCheckEnv")}
                     </span>
@@ -1203,8 +1267,9 @@ export function AboutSection({ isPortable }: AboutSectionProps) {
                       ) : (
                         <ArrowUpCircle className="h-3.5 w-3.5" />
                       )}
-                      {/* loading 时文案保持不变、仅图标切换为 spinner，
-                          按钮宽度恒定，避免"升级"→"升级中…"导致的抖动。 */}
+                      {/* Keep the label stable while loading and swap only the
+                          icon to a spinner so the button width stays fixed and
+                          does not jitter between states. */}
                       {action === "install"
                         ? t("settings.toolInstall")
                         : t("settings.toolUpdate")}

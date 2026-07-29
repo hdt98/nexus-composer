@@ -2,8 +2,9 @@ import { useTranslation } from "react-i18next";
 import type { ToolInstallation } from "@/lib/api/settings";
 
 /**
- * 单处工具安装的信息行：来源徽章 + 路径 + 版本（或「无法运行」）+「默认」标记。
- * 冲突诊断列表与升级确认对话框共用，确保两处的视觉与「默认」判定始终一致。
+ * Information row for one tool installation: source badge, path, version or
+ * unavailable status, and default marker. Shared by conflict diagnostics and
+ * update confirmation to keep visuals and default detection consistent.
  */
 export function ToolInstallRow({ inst }: { inst: ToolInstallation }) {
   const { t } = useTranslation();

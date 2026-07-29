@@ -10,7 +10,7 @@ use crate::usage_script;
 
 fn user_facing_usage_error(error: AppError) -> String {
     match error {
-        AppError::Localized { en, .. } => en,
+        AppError::Localized { message, .. } => message,
         other => other.to_string(),
     }
 }
@@ -106,7 +106,7 @@ pub async fn query_usage(
         let provider = providers.get(provider_id).ok_or_else(|| {
             AppError::localized(
                 "provider.not_found",
-                format!("供应商不存在: {provider_id}"),
+                format!("Provider does not exist: {provider_id}"),
                 format!("Provider not found: {provider_id}"),
             )
         })?;
@@ -118,14 +118,14 @@ pub async fn query_usage(
             .ok_or_else(|| {
                 AppError::localized(
                     "provider.usage.script.missing",
-                    "未配置用量查询脚本",
+                    "No usage query script is configured",
                     "Usage script is not configured",
                 )
             })?;
         if !usage_script.enabled {
             return Err(AppError::localized(
                 "provider.usage.disabled",
-                "用量查询未启用",
+                "Usage queries are disabled",
                 "Usage query is disabled",
             ));
         }
@@ -179,7 +179,7 @@ pub async fn test_usage_script(
     let provider = providers.get(provider_id).ok_or_else(|| {
         AppError::localized(
             "provider.not_found",
-            format!("供应商不存在: {provider_id}"),
+            format!("Provider does not exist: {provider_id}"),
             format!("Provider not found: {provider_id}"),
         )
     })?;
@@ -207,7 +207,7 @@ pub(crate) fn validate_usage_script(script: &UsageScript) -> Result<(), AppError
         if interval > 1440 {
             return Err(AppError::localized(
                 "usage_script.interval_too_large",
-                format!("自动查询间隔不能超过 1440 分钟（24小时），当前值: {interval}"),
+                format!("The automatic query interval cannot exceed 1,440 minutes (24 hours); current value: {interval}"),
                 format!(
                     "Auto query interval cannot exceed 1440 minutes (24 hours), current: {interval}"
                 ),
@@ -256,7 +256,7 @@ mod tests {
         assert!(error.starts_with("Data format error:"));
         assert!(!error
             .chars()
-            .any(|character| ('\u{4e00}'..='\u{9fff}').contains(&character)));
+            .any(|character| matches!(character as u32, 0x4e00..=0x9fff)));
     }
 
     #[test]

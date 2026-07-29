@@ -47,7 +47,7 @@ export function RepoManager({
   const parseRepoUrl = (
     url: string,
   ): { owner: string; name: string } | null => {
-    // 支持格式:
+    // Supported formats:
     // - https://github.com/owner/name
     // - owner/name
     // - https://github.com/owner/name.git
@@ -99,15 +99,15 @@ export function RepoManager({
   return (
     <Dialog open={isOpen} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[80vh] flex flex-col p-0">
-        {/* 固定头部 */}
+        {/* Fixed header */}
         <DialogHeader className="flex-shrink-0 border-b border-border-default px-6 py-4">
           <DialogTitle>{t("skills.repo.title")}</DialogTitle>
           <DialogDescription>{t("skills.repo.description")}</DialogDescription>
         </DialogHeader>
 
-        {/* 可滚动内容区域 */}
+        {/* Scrollable content area */}
         <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4">
-          {/* 添加仓库表单 */}
+          {/* Add-repository form */}
           <div className="space-y-5">
             <div className="space-y-2">
               <Label htmlFor="repo-url">{t("skills.repo.url")}</Label>
@@ -141,7 +141,7 @@ export function RepoManager({
               {error && <p className="text-xs text-destructive">{error}</p>}
             </div>
 
-            {/* 仓库列表 */}
+            {/* Repository list */}
             <div className="space-y-3">
               <h4 className="text-sm font-medium">{t("skills.repo.list")}</h4>
               {repos.length === 0 ? (
@@ -174,7 +174,7 @@ export function RepoManager({
                           size="icon"
                           type="button"
                           onClick={() => handleOpenRepo(repo.owner, repo.name)}
-                          title={t("common.view", { defaultValue: "查看" })}
+                          title={t("common.view", { defaultValue: "View" })}
                         >
                           <ExternalLink className="h-4 w-4" />
                         </Button>

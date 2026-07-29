@@ -5,11 +5,11 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("配置错误: {0}")]
+    #[error("Configuration error: {0}")]
     Config(String),
-    #[error("无效输入: {0}")]
+    #[error("Invalid input: {0}")]
     InvalidInput(String),
-    #[error("IO 错误: {path}: {source}")]
+    #[error("I/O error: {path}: {source}")]
     Io {
         path: String,
         #[source]
@@ -21,44 +21,40 @@ pub enum AppError {
         #[source]
         source: std::io::Error,
     },
-    #[error("JSON 解析错误: {path}: {source}")]
+    #[error("JSON parse error: {path}: {source}")]
     Json {
         path: String,
         #[source]
         source: serde_json::Error,
     },
-    #[error("JSON 序列化失败: {source}")]
+    #[error("JSON serialization failed: {source}")]
     JsonSerialize {
         #[source]
         source: serde_json::Error,
     },
-    #[error("TOML 解析错误: {path}: {source}")]
+    #[error("TOML parse error: {path}: {source}")]
     Toml {
         path: String,
         #[source]
         source: toml::de::Error,
     },
-    #[error("锁获取失败: {0}")]
+    #[error("Failed to acquire lock: {0}")]
     Lock(String),
-    #[error("MCP 校验失败: {0}")]
+    #[error("MCP validation failed: {0}")]
     McpValidation(String),
     #[error("{0}")]
     Message(String),
     #[error("HTTP {status}: {body}")]
     HttpStatus { status: u16, body: String },
-    #[error("{zh} ({en})")]
-    Localized {
-        key: &'static str,
-        zh: String,
-        en: String,
-    },
-    #[error("数据库错误: {0}")]
+    #[error("{message}")]
+    Localized { key: &'static str, message: String },
+    #[error("Database error: {0}")]
     Database(String),
-    #[error("OMO 配置文件不存在")]
+    #[error("OMO configuration file does not exist")]
     OmoConfigNotFound,
-    #[error("所有供应商已熔断，无可用渠道")]
+    #[error("Every provider has an open circuit; no channel is available")]
     AllProvidersCircuitOpen,
-    #[error("未配置供应商")]
+    #[error("No provider is configured")]
     NoProvidersConfigured,
 }
 
@@ -84,11 +80,14 @@ impl AppError {
         }
     }
 
-    pub fn localized(key: &'static str, zh: impl Into<String>, en: impl Into<String>) -> Self {
+    pub fn localized(
+        key: &'static str,
+        _legacy_message: impl Into<String>,
+        english_message: impl Into<String>,
+    ) -> Self {
         Self::Localized {
             key,
-            zh: zh.into(),
-            en: en.into(),
+            message: english_message.into(),
         }
     }
 }
@@ -120,7 +119,7 @@ impl serde::Serialize for AppError {
     }
 }
 
-/// 格式化为 JSON 错误字符串，前端可解析为结构化错误
+/// Formats the error as JSON so the renderer can parse structured error data.
 pub fn format_skill_error(
     code: &str,
     context: &[(&str, &str)],
@@ -140,7 +139,7 @@ pub fn format_skill_error(
     });
 
     serde_json::to_string(&error_obj).unwrap_or_else(|_| {
-        // 如果 JSON 序列化失败，返回简单格式
+        // Fall back to a simple representation if JSON serialization fails.
         format!("ERROR:{code}")
     })
 }

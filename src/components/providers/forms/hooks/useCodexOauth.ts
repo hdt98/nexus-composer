@@ -1,9 +1,9 @@
 import { useManagedAuth } from "./useManagedAuth";
 
 /**
- * Codex OAuth (ChatGPT Plus/Pro) 认证 hook
+ * Codex OAuth authentication hook for ChatGPT Plus/Pro.
  *
- * 复用通用 useManagedAuth，仅指定 provider 为 "codex_oauth"
+ * Reuses useManagedAuth with provider set to "codex_oauth".
  */
 export function useCodexOauth() {
   return useManagedAuth("codex_oauth");

@@ -27,21 +27,21 @@ import { copyText } from "@/lib/clipboard";
 
 interface CodexOAuthSectionProps {
   className?: string;
-  /** 当前选中的 ChatGPT 账号 ID */
+  /** Currently selected ChatGPT account ID. */
   selectedAccountId?: string | null;
-  /** 账号选择回调 */
+  /** Called when the selected account changes. */
   onAccountSelect?: (accountId: string | null) => void;
-  /** 是否开启 Codex FAST mode */
+  /** Whether Codex FAST mode is enabled. */
   fastModeEnabled?: boolean;
-  /** FAST mode 切换回调 */
+  /** Called when FAST mode changes. */
   onFastModeChange?: (enabled: boolean) => void;
 }
 
 /**
- * Codex OAuth 认证区块
+ * Codex OAuth authentication section.
  *
- * 通过 OpenAI Device Code 流程登录 ChatGPT Plus/Pro 账号，
- * 用于将 Claude Code 请求反代到 Codex 后端 API。
+ * Signs in to a ChatGPT Plus or Pro account through the OpenAI device-code
+ * flow so Claude Code requests can be proxied to the Codex backend API.
  */
 export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
   className,
@@ -94,9 +94,9 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
 
   return (
     <div className={`space-y-4 ${className || ""}`}>
-      {/* 认证状态标题 */}
+      {/* Authentication status */}
       <div className="flex items-center justify-between">
-        <Label>{t("codexOauth.authStatus", "认证状态")}</Label>
+        <Label>{t("codexOauth.authStatus", "Authentication status")}</Label>
         <Badge
           variant={hasAnyAccount ? "default" : "secondary"}
           className={hasAnyAccount ? "bg-green-500 hover:bg-green-600" : ""}
@@ -104,17 +104,17 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           {hasAnyAccount
             ? t("codexOauth.accountCount", {
                 count: accounts.length,
-                defaultValue: `${accounts.length} 个账号`,
+                defaultValue: `${accounts.length} accounts`,
               })
-            : t("codexOauth.notAuthenticated", "未认证")}
+            : t("codexOauth.notAuthenticated", "Not authenticated")}
         </Badge>
       </div>
 
-      {/* 账号选择器 */}
+      {/* Account selector */}
       {hasAnyAccount && onAccountSelect && (
         <div className="space-y-2">
           <Label className="text-sm text-muted-foreground">
-            {t("codexOauth.selectAccount", "选择账号")}
+            {t("codexOauth.selectAccount", "Select account")}
           </Label>
           <Select
             value={selectedAccountId || "none"}
@@ -124,14 +124,14 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               <SelectValue
                 placeholder={t(
                   "codexOauth.selectAccountPlaceholder",
-                  "选择一个 ChatGPT 账号",
+                  "Select a ChatGPT account",
                 )}
               />
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="none">
                 <span className="text-muted-foreground">
-                  {t("codexOauth.useDefaultAccount", "使用默认账号")}
+                  {t("codexOauth.useDefaultAccount", "Use default account")}
                 </span>
               </SelectItem>
               {accounts.map((account) => (
@@ -168,11 +168,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         </div>
       )}
 
-      {/* 已登录账号列表 */}
+      {/* Signed-in accounts */}
       {hasAnyAccount && (
         <div className="space-y-2">
           <Label className="text-sm text-muted-foreground">
-            {t("codexOauth.loggedInAccounts", "已登录账号")}
+            {t("codexOauth.loggedInAccounts", "Signed-in accounts")}
           </Label>
           <div className="space-y-1">
             {accounts.map((account) => (
@@ -185,12 +185,12 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                   <span className="text-sm font-medium">{account.login}</span>
                   {defaultAccountId === account.id && (
                     <Badge variant="secondary" className="text-xs">
-                      {t("codexOauth.defaultAccount", "默认")}
+                      {t("codexOauth.defaultAccount", "Default")}
                     </Badge>
                   )}
                   {selectedAccountId === account.id && (
                     <Badge variant="outline" className="text-xs">
-                      {t("codexOauth.selected", "已选中")}
+                      {t("codexOauth.selected", "Selected")}
                     </Badge>
                   )}
                 </div>
@@ -204,7 +204,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                       onClick={() => setDefaultAccount(account.id)}
                       disabled={isSettingDefaultAccount}
                     >
-                      {t("codexOauth.setAsDefault", "设为默认")}
+                      {t("codexOauth.setAsDefault", "Set as default")}
                     </Button>
                   )}
                   <Button
@@ -214,7 +214,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                     className="h-7 w-7 text-muted-foreground hover:text-red-500"
                     onClick={(e) => handleRemoveAccount(account.id, e)}
                     disabled={isRemovingAccount}
-                    title={t("codexOauth.removeAccount", "移除账号")}
+                    title={t("codexOauth.removeAccount", "Remove account")}
                   >
                     <X className="h-4 w-4" />
                   </Button>
@@ -225,7 +225,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         </div>
       )}
 
-      {/* 未认证 - 登录按钮 */}
+      {/* Sign-in button when no account is authenticated */}
       {!hasAnyAccount && pollingState === "idle" && (
         <Button
           type="button"
@@ -234,11 +234,11 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           variant="outline"
         >
           <Sparkles className="mr-2 h-4 w-4" />
-          {t("codexOauth.loginWithChatGPT", "使用 ChatGPT 登录")}
+          {t("codexOauth.loginWithChatGPT", "Sign in with ChatGPT")}
         </Button>
       )}
 
-      {/* 已有账号 - 添加更多按钮 */}
+      {/* Add another account */}
       {hasAnyAccount && pollingState === "idle" && (
         <Button
           type="button"
@@ -248,21 +248,21 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           disabled={isAddingAccount}
         >
           <Plus className="mr-2 h-4 w-4" />
-          {t("codexOauth.addAnotherAccount", "添加其他账号")}
+          {t("codexOauth.addAnotherAccount", "Add another account")}
         </Button>
       )}
 
-      {/* 轮询中状态 */}
+      {/* Authorization polling state */}
       {isPolling && deviceCode && (
         <div className="space-y-3 p-4 rounded-lg border border-border bg-muted/50">
           <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            {t("codexOauth.waitingForAuth", "等待授权中...")}
+            {t("codexOauth.waitingForAuth", "Waiting for authorization...")}
           </div>
 
           <div className="text-center">
             <p className="text-xs text-muted-foreground mb-1">
-              {t("codexOauth.enterCode", "在浏览器中输入以下代码：")}
+              {t("codexOauth.enterCode", "Enter this code in your browser:")}
             </p>
             <div className="flex items-center justify-center gap-2">
               <code className="text-2xl font-mono font-bold tracking-wider bg-background px-4 py-2 rounded border">
@@ -273,7 +273,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
                 size="icon"
                 variant="ghost"
                 onClick={copyUserCode}
-                title={t("codexOauth.copyCode", "复制代码")}
+                title={t("codexOauth.copyCode", "Copy code")}
               >
                 {copied ? (
                   <Check className="h-4 w-4 text-green-500" />
@@ -303,13 +303,13 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               size="sm"
               onClick={cancelAuth}
             >
-              {t("common.cancel", "取消")}
+              {t("common.cancel", "Cancel")}
             </Button>
           </div>
         </div>
       )}
 
-      {/* 错误状态 */}
+      {/* Error state */}
       {pollingState === "error" && error && (
         <div className="space-y-2">
           <p className="text-sm text-red-500">{error}</p>
@@ -320,7 +320,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               variant="outline"
               size="sm"
             >
-              {t("codexOauth.retry", "重试")}
+              {t("codexOauth.retry", "Retry")}
             </Button>
             <Button
               type="button"
@@ -328,13 +328,13 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
               variant="ghost"
               size="sm"
             >
-              {t("common.cancel", "取消")}
+              {t("common.cancel", "Cancel")}
             </Button>
           </div>
         </div>
       )}
 
-      {/* 注销所有账号 */}
+      {/* Sign out of all accounts */}
       {hasAnyAccount && accounts.length > 1 && (
         <Button
           type="button"
@@ -343,7 +343,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           className="w-full text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950"
         >
           <LogOut className="mr-2 h-4 w-4" />
-          {t("codexOauth.logoutAll", "注销所有账号")}
+          {t("codexOauth.logoutAll", "Sign out of all accounts")}
         </Button>
       )}
     </div>

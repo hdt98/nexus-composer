@@ -4,7 +4,7 @@ import type { McpServer } from "@/types";
 import type { AppId } from "@/lib/api/types";
 
 /**
- * 查询所有 MCP 服务器（统一管理）
+ * Queries all MCP servers through unified management.
  */
 export function useAllMcpServers() {
   return useQuery({
@@ -14,7 +14,7 @@ export function useAllMcpServers() {
 }
 
 /**
- * 添加或更新 MCP 服务器
+ * Adds or updates an MCP server.
  */
 export function useUpsertMcpServer() {
   const queryClient = useQueryClient();
@@ -27,7 +27,7 @@ export function useUpsertMcpServer() {
 }
 
 /**
- * 切换 MCP 服务器在特定应用的启用状态
+ * Toggles an MCP server for a specific application.
  */
 export function useToggleMcpApp() {
   const queryClient = useQueryClient();
@@ -48,7 +48,7 @@ export function useToggleMcpApp() {
 }
 
 /**
- * 删除 MCP 服务器
+ * Deletes an MCP server.
  */
 export function useDeleteMcpServer() {
   const queryClient = useQueryClient();
@@ -61,7 +61,7 @@ export function useDeleteMcpServer() {
 }
 
 /**
- * 从所有应用导入 MCP 服务器
+ * Imports MCP servers from all applications.
  */
 export function useImportMcpFromApps() {
   const queryClient = useQueryClient();

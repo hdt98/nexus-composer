@@ -1,21 +1,21 @@
-//! 数据库模块 - SQLite 数据持久化
+//! Database module for SQLite persistence.
 //!
-//! 此模块提供应用的核心数据存储功能，包括：
-//! - 供应商配置管理
-//! - MCP 服务器配置
-//! - 提示词管理
-//! - Skills 管理
-//! - 通用设置存储
+//! Provides the application's core storage for:
+//! - Provider configuration.
+//! - MCP server configuration.
+//! - Prompt management.
+//! - Skills management.
+//! - General settings.
 //!
-//! ## 架构设计
+//! ## Architecture
 //!
 //! ```text
 //! database/
-//! ├── mod.rs        - Database 结构体 + 初始化
-//! ├── schema.rs     - 表结构定义 + Schema 迁移
-//! ├── backup.rs     - SQL 导入导出 + 快照备份
-//! ├── migration.rs  - JSON → SQLite 数据迁移
-//! └── dao/          - 数据访问对象
+//! ├── mod.rs        - Database structure and initialization
+//! ├── schema.rs     - Table definitions and schema migrations
+//! ├── backup.rs     - SQL import/export and snapshot backups
+//! ├── migration.rs  - JSON → SQLite data migration
+//! └── dao/          - Data-access objects
 //!     ├── providers.rs
 //!     ├── mcp.rs
 //!     ├── prompts.rs
@@ -31,7 +31,7 @@ mod schema;
 #[cfg(test)]
 mod tests;
 
-// DAO 类型导出供外部使用
+// Export DAO types for external consumers.
 use crate::config::get_app_config_dir;
 use crate::error::AppError;
 pub(crate) use dao::providers_seed::{is_official_seed_id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
@@ -44,10 +44,10 @@ use rusqlite::{hooks::Action, Connection};
 use serde::Serialize;
 use std::sync::Mutex;
 
-// DAO 方法通过 impl Database 提供，无需额外导出
+// DAO methods are exposed through impl Database and need no additional exports.
 
-/// 当前 Schema 版本号
-/// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
+/// Current schema version. Increment this whenever the table structure changes and add the
+/// corresponding migration to schema.rs.
 pub(crate) const SCHEMA_VERSION: i32 = 13;
 
 pub(crate) fn sql_text_is_blank(expression: &str) -> String {
@@ -68,13 +68,13 @@ pub(crate) fn billable_usage_sql(alias: Option<&str>) -> String {
     )
 }
 
-/// 安全地序列化 JSON，避免 unwrap panic
+/// Serializes JSON without an unwrap panic.
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
     serde_json::to_string(value)
         .map_err(|e| AppError::Config(format!("JSON serialization failed: {e}")))
 }
 
-/// 安全地获取 Mutex 锁，避免 unwrap panic
+/// Acquires a mutex lock without an unwrap panic.
 macro_rules! lock_conn {
     ($mutex:expr) => {
         $mutex
@@ -83,13 +83,13 @@ macro_rules! lock_conn {
     };
 }
 
-// 导出宏供子模块使用
+// Export the macro for child modules.
 pub(crate) use lock_conn;
 
-/// 数据库连接封装
+/// Database-connection wrapper.
 ///
-/// 使用 Mutex 包装 Connection 以支持在多线程环境（如 Tauri State）中共享。
-/// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
+/// Wraps Connection in a Mutex for sharing across threads, such as Tauri State.
+/// rusqlite::Connection is not Sync, so this layer is required.
 pub struct Database {
     pub(crate) conn: Mutex<Connection>,
 }
@@ -107,21 +107,21 @@ fn register_db_change_hook(conn: &Connection) {
 }
 
 impl Database {
-    /// 初始化数据库连接并创建表
+    /// Initializes the database connection and creates tables.
     ///
-    /// 数据库文件位于 `~/.cc-switch/cc-switch.db`
+    /// The database file is located at `~/.cc-switch/cc-switch.db`.
     pub fn init() -> Result<Self, AppError> {
         let db_path = get_app_config_dir().join("cc-switch.db");
         let db_exists = db_path.exists();
 
-        // 确保父目录存在
+        // Ensure the parent directory exists.
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 启用外键约束
+        // Enable foreign-key constraints.
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
         if !db_exists {
@@ -187,11 +187,11 @@ impl Database {
         Ok((version > SCHEMA_VERSION).then_some(version))
     }
 
-    /// 创建内存数据库（用于测试）
+    /// Creates an in-memory database for tests.
     pub fn memory() -> Result<Self, AppError> {
         let conn = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
 
-        // 启用外键约束
+        // Enable foreign-key constraints.
         conn.execute("PRAGMA foreign_keys = ON;", [])
             .map_err(|e| AppError::Database(e.to_string()))?;
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
@@ -209,7 +209,7 @@ impl Database {
 
     pub(crate) fn get_auto_vacuum_mode(conn: &Connection) -> Result<i32, AppError> {
         conn.query_row("PRAGMA auto_vacuum;", [], |row| row.get(0))
-            .map_err(|e| AppError::Database(format!("读取 auto_vacuum 失败: {e}")))
+            .map_err(|e| AppError::Database(format!("Failed to read auto_vacuum: {e}")))
     }
 
     fn has_user_tables(conn: &Connection) -> Result<bool, AppError> {
@@ -219,7 +219,7 @@ impl Database {
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| AppError::Database(format!("读取表数量失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to read the table count: {e}")))?;
         Ok(count > 0)
     }
 
@@ -233,16 +233,16 @@ impl Database {
 
         let has_tables = Self::has_user_tables(conn)?;
         conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
-            .map_err(|e| AppError::Database(format!("设置 auto_vacuum 失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to set auto_vacuum: {e}")))?;
 
         if !has_tables {
             return Ok(false);
         }
 
         conn.execute("VACUUM;", [])
-            .map_err(|e| AppError::Database(format!("执行 VACUUM 失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to execute VACUUM: {e}")))?;
         conn.execute("PRAGMA foreign_keys = ON;", [])
-            .map_err(|e| AppError::Database(format!("恢复 foreign_keys 失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to restore foreign_keys: {e}")))?;
         Ok(true)
     }
 
@@ -280,7 +280,7 @@ impl Database {
         Ok(rebuilt)
     }
 
-    /// 检查 MCP 服务器表是否为空
+    /// Returns whether the MCP servers table is empty.
     pub fn is_mcp_table_empty(&self) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
         let count: i64 = conn
@@ -289,7 +289,7 @@ impl Database {
         Ok(count == 0)
     }
 
-    /// 检查提示词表是否为空
+    /// Returns whether the prompts table is empty.
     pub fn is_prompts_table_empty(&self) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
         let count: i64 = conn

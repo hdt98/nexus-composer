@@ -349,11 +349,13 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
             obj.remove("parallel_tool_calls");
         }
     }
-    // OpenAI 兼容上游在流式下默认不在 SSE 里返回 usage，必须显式声明
-    // include_usage 才会在末尾吐 usage chunk。Codex CLI 用 Responses 协议、
-    // 自身不带 stream_options，缺这一注入会导致 kimi/MiniMax 等第三方流式请求的
-    // token/成本/缓存命中率全部漏记（input/output/cache 全为 0）。
-    // 与 Claude→openai_chat 路径共用同一 helper，保证两个客户端方向一致。
+    // OpenAI-compatible upstreams omit usage from streaming SSE by default.
+    // We must explicitly request include_usage so the final usage chunk arrives.
+    // Codex CLI uses the Responses protocol and does not send stream_options,
+    // so without this injection third-party streaming requests such as
+    // kimi/MiniMax lose all token, cost, and cache-hit accounting.
+    // Share the same helper as the Claude -> openai_chat path to keep both
+    // client directions aligned.
     super::transform::inject_openai_stream_include_usage(&mut result);
 
     Ok(result)
@@ -404,7 +406,8 @@ fn apply_reasoning_options(
         }
     }
 
-    // effort_param 在 early return 之前算出：reasoning.effort 形态的「显式关闭」分支要用到。
+    // Compute effort_param before the early return because the explicit-disable
+    // reasoning.effort branch needs it.
     let effort_param = config
         .effort_param
         .as_deref()
@@ -413,13 +416,17 @@ fn apply_reasoning_options(
         .to_ascii_lowercase();
 
     if !reasoning_enabled {
-        // OpenRouter 原生 reasoning.effort 支持显式 "none"（语义：彻底关闭推理）。
-        // 上游显式发 effort=none/off/disabled（或 reasoning=null）时 reasoning_enabled 为 false，
-        // 直接 return 会丢失关闭意图——OpenRouter 部分模型默认开思考，不带字段无法关闭，
-        // 造成行为与成本偏差；故对该形态忠实转发 {"reasoning":{"effort":"none"}}。
-        // 顶层 reasoning_effort 平台的枚举不含 none，仍走上方 thinking 关闭路径、不发 effort。
-        // 注意：完全不带 reasoning 字段时 reasoning_requested 返回 None 已提前 return，
-        // 不会走到这里，故只有上游「显式」表达关闭才透传 none。
+        // OpenRouter's native reasoning.effort supports explicit "none", which
+        // means reasoning is fully disabled.
+        // When upstream sends effort=none/off/disabled or reasoning=null,
+        // reasoning_enabled is false. Returning immediately would drop that
+        // disable intent, while some OpenRouter models enable reasoning by
+        // default and cannot be turned off without the field. Forward
+        // {"reasoning":{"effort":"none"}} exactly for this shape.
+        // Top-level reasoning_effort providers do not allow none, so they still
+        // use the thinking-disable path above without an effort field.
+        // If reasoning is absent entirely, reasoning_requested already returned
+        // None, so only explicit disable signals reach this branch.
         if effort_param == "reasoning.effort" {
             result["reasoning"] = json!({ "effort": "none" });
         }
@@ -438,14 +445,18 @@ fn apply_reasoning_options(
     };
 
     match effort_param.as_str() {
-        // OpenAI 风格顶层字段（DeepSeek 官方、OpenAI o-series 等）。
+        // OpenAI-style top-level field used by providers such as DeepSeek and
+        // OpenAI o-series.
         "reasoning_effort" => {
             result["reasoning_effort"] = json!(mapped);
         }
-        // OpenRouter 原生归一化对象：reasoning.effort 会被 OpenRouter 翻译成各底层模型
-        // （OpenAI/Grok/Gemini/Anthropic）的正确推理参数，覆盖面比顶层 OpenAI 别名更全。
-        // 本转换从空对象构造、不残留原始 reasoning 对象，故不会出现 reasoning 与
-        // reasoning_effort 并存触发 400 的情况（参见 openclaw#24119）。
+        // OpenRouter's native normalized object: reasoning.effort is translated
+        // by OpenRouter into the correct reasoning parameter for each backing
+        // model family (OpenAI/Grok/Gemini/Anthropic), with broader coverage
+        // than the top-level OpenAI alias.
+        // This conversion builds from an empty object and does not retain the
+        // original reasoning object, so reasoning and reasoning_effort cannot
+        // coexist and trigger a 400 (see openclaw#24119).
         "reasoning.effort" => {
             result["reasoning"] = json!({ "effort": mapped });
         }
@@ -479,10 +490,11 @@ fn map_reasoning_effort(effort: &str, mode: Option<&str>) -> Option<&'static str
             "minimal" | "low" => Some("low"),
             _ => Some("high"),
         },
-        // OpenRouter effort 枚举为 xhigh|high|medium|low|minimal（无 max）。max 是
-        // Codex / 部分模型的扩展档位，对 OpenRouter 非法，会触发
-        // `400 reasoning_effort: Invalid option`（见 openclaw#77350）；钳到最高合法档
-        // xhigh，其余合法值透传，未知值丢弃以免被上游拒绝。
+        // OpenRouter allows xhigh|high|medium|low|minimal and does not support
+        // max. max is a Codex or provider-specific extension, so sending it to
+        // OpenRouter causes `400 reasoning_effort: Invalid option`
+        // (see openclaw#77350). Clamp it to xhigh, pass through other valid
+        // values, and drop unknown values to avoid upstream rejection.
         "openrouter" => match effort.as_str() {
             "max" | "xhigh" => Some("xhigh"),
             "high" => Some("high"),
@@ -507,9 +519,10 @@ fn requires_single_leading_system_message(model: &str) -> bool {
     model.to_ascii_lowercase().contains("minimax")
 }
 
-/// MiniMax 严格要求 messages 中只能首条出现 `role=system`，
-/// 否则返回 `invalid params, chat content has invalid message role: system (2013)`。
-/// 把所有 system 消息合并到首位，避免中间 system（如 Codex 的 `developer` 指令）触发该约束；
+/// MiniMax only allows `role=system` on the first message entry, otherwise it
+/// returns `invalid params, chat content has invalid message role: system (2013)`.
+/// Merge all system messages to the front so mid-history system entries such as
+/// Codex `developer` instructions do not trigger this constraint.
 /// Runs only for MiniMax because mid-history developer/system placement is time-sensitive.
 fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     let mut system_chunks: Vec<String> = Vec::new();
@@ -1025,10 +1038,13 @@ fn attach_pending_reasoning_to_assistant(
     }
 }
 
-/// 在所有 input 处理完毕后，对仍缺 `reasoning_content` 的 assistant tool-call 消息补占位。
-/// 必须作为管线末端的最终兜底执行：真实 reasoning 可能以尾随 `reasoning` item 的形式经
-/// `attach_reasoning_to_last_assistant` 回填，过早注入占位会被 `append_reasoning_content`
-/// 追加而污染真实思考。
+/// After all input items are processed, backfill placeholders for assistant
+/// tool-call messages that still lack `reasoning_content`.
+/// This must run as the final pipeline fallback because real reasoning may be
+/// attached later from a trailing `reasoning` item via
+/// `attach_reasoning_to_last_assistant`. Injecting placeholders too early would
+/// let `append_reasoning_content` append onto them and contaminate real
+/// reasoning text.
 fn backfill_tool_call_reasoning_placeholders(messages: &mut [Value]) {
     for message in messages.iter_mut() {
         let is_assistant_tool_call = message.get("role").and_then(|value| value.as_str())
@@ -1043,11 +1059,14 @@ fn backfill_tool_call_reasoning_placeholders(messages: &mut [Value]) {
     }
 }
 
-/// kimi/Moonshot、DeepSeek 等 thinking 模型要求每条带 `tool_calls` 的 assistant
-/// 消息都必须携带非空 `reasoning_content`。跨轮历史恢复 miss（如代理重启丢失内存缓存、
-/// call_id 歧义无法恢复、上游某轮未产出思考）时，这里补一个占位，避免上游返回
-/// `reasoning_content is missing in assistant tool call message`。
-/// 与 `transform::anthropic_to_openai_with_reasoning_content` 的占位行为保持对称。
+/// Thinking models such as kimi/Moonshot and DeepSeek require every assistant
+/// message with `tool_calls` to include non-empty `reasoning_content`.
+/// When cross-turn history restoration misses, for example after proxy restart,
+/// ambiguous call_id recovery, or an upstream turn with no reasoning output,
+/// inject a placeholder here to avoid
+/// `reasoning_content is missing in assistant tool call message`.
+/// Keep this symmetric with the placeholder behavior in
+/// `transform::anthropic_to_openai_with_reasoning_content`.
 fn ensure_tool_call_reasoning_content(message: &mut Value) {
     let Some(obj) = message.as_object_mut() else {
         return;
@@ -1852,15 +1871,17 @@ pub(crate) fn response_status_from_finish_reason(finish_reason: Option<&str>) ->
     }
 }
 
-/// 把 Chat Completions 上游的错误体规整成 OpenAI Responses API 风格的错误对象。
+/// Normalize upstream Chat Completions error bodies into an OpenAI Responses
+/// API-style error object.
 ///
-/// 兼容三类输入：
-/// 1. 标准 OpenAI 形式 `{"error": {"message": "...", "type": "...", "code": ...}}`
-/// 2. MiniMax 等非标形式（如 `{"base_resp": {"status_code": 2013, "status_msg": "..."}}`）
-/// 3. 顶层只有 `message` / `detail` / 裸字符串的最小错误
+/// Supports three input shapes:
+/// 1. Standard OpenAI form `{"error": {"message": "...", "type": "...", "code": ...}}`
+/// 2. Non-standard forms such as MiniMax
+///    `{"base_resp": {"status_code": 2013, "status_msg": "..."}}`
+/// 3. Minimal top-level `message`, `detail`, or bare string errors
 ///
-/// 输出统一为 `{"error": {"message", "type", "code", "param"}}`，与 OpenAI Responses
-/// API 错误响应一致；Codex 客户端的错误处理只识别这个形状。
+/// Always returns `{"error": {"message", "type", "code", "param"}}` to
+/// match the OpenAI Responses API error shape expected by the Codex client.
 pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
     let Some(value) = body else {
         return json!({
@@ -1895,7 +1916,8 @@ pub fn chat_error_to_response_error(body: Option<&Value>) -> Value {
         .map(ToString::to_string)
         .or_else(|| source.as_str().map(ToString::to_string))
         .unwrap_or_else(|| {
-            // 没法从字段提取出文本，就把整个 JSON 序列化回去，方便用户排查。
+            // If no text field is extractable, serialize the full JSON so the
+            // user can inspect the upstream payload.
             serde_json::to_string(source).unwrap_or_else(|_| "Upstream error".to_string())
         });
 
@@ -2174,7 +2196,8 @@ mod tests {
 
         let result = responses_to_chat_completions(input).unwrap();
 
-        // 既补上 include_usage，又保留客户端原有的 stream_options 字段。
+        // Inject include_usage while preserving the client's existing
+        // stream_options fields.
         assert_eq!(result["stream_options"]["include_usage"], true);
         assert_eq!(result["stream_options"]["continuous_usage_stats"], true);
     }
@@ -2504,8 +2527,8 @@ mod tests {
 
     #[test]
     fn responses_request_to_chat_maps_openrouter_to_native_reasoning_object() {
-        // OpenRouter 平台形态：原生 reasoning:{effort} 对象 + "openrouter" 值映射
-        // （与 infer_aggregator_platform_config 推断出的配置保持一致）。
+        // OpenRouter shape: native reasoning:{effort} plus "openrouter" value
+        // mapping, aligned with infer_aggregator_platform_config.
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(false),
             supports_effort: Some(true),
@@ -2515,8 +2538,9 @@ mod tests {
             output_format: Some("auto".to_string()),
         };
 
-        // max 不在 OpenRouter 枚举内（见 openclaw#77350），必须钳成 xhigh，
-        // 且写进原生 reasoning 对象，而非顶层 reasoning_effort 别名。
+        // max is not valid in the OpenRouter enum (see openclaw#77350), so it
+        // must be clamped to xhigh and written to the native reasoning object
+        // rather than the top-level reasoning_effort alias.
         let input = json!({
             "model": "deepseek/deepseek-chat-v3.1",
             "input": "hello",
@@ -2526,11 +2550,12 @@ mod tests {
 
         assert_eq!(result["reasoning"]["effort"], "xhigh");
         assert!(result.get("reasoning_effort").is_none());
-        // thinking_param=none：即使 supports_effort 把 supports_thinking 带成 true，
-        // 也不写任何 thinking 字段（OpenRouter 不认 thinking:{type}）。
+        // With thinking_param=none, do not emit any thinking field even if
+        // supports_effort makes supports_thinking true. OpenRouter does not
+        // accept thinking:{type}.
         assert!(result.get("thinking").is_none());
 
-        // 合法档位原样透传。
+        // Pass through valid effort values unchanged.
         let input_high = json!({
             "model": "deepseek/deepseek-chat-v3.1",
             "input": "hello",
@@ -2544,9 +2569,10 @@ mod tests {
 
     #[test]
     fn responses_request_to_chat_passes_explicit_none_through_for_openrouter() {
-        // OpenRouter 原生 reasoning 对象支持显式关闭：effort=none 应忠实转发为
-        // {"reasoning":{"effort":"none"}}，而非被吞掉——否则默认开思考的模型无法关闭，
-        // 带来行为与成本偏差。
+        // OpenRouter's native reasoning object supports explicit disable, so
+        // effort=none must be forwarded as {"reasoning":{"effort":"none"}}
+        // instead of being dropped. Otherwise models that default reasoning on
+        // cannot be disabled, changing both behavior and cost.
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(false),
             supports_effort: Some(true),
@@ -2564,16 +2590,19 @@ mod tests {
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
         assert_eq!(result["reasoning"]["effort"], "none");
-        // none 不是 OpenAI 顶层 reasoning_effort 的合法枚举，不写顶层别名；也不写 thinking。
+        // none is not a valid OpenAI top-level reasoning_effort enum value, so
+        // do not emit the alias or any thinking field.
         assert!(result.get("reasoning_effort").is_none());
         assert!(result.get("thinking").is_none());
     }
 
     #[test]
     fn responses_request_to_chat_drops_explicit_none_for_top_level_effort_provider() {
-        // 对照：顶层 reasoning_effort 平台（DeepSeek/OpenAI 风格）的 effort 枚举不含 none，
-        // 显式 none 不应透传成 reasoning_effort:"none"（会被上游拒），仅走 thinking 关闭路径。
-        // 锁定「none 透传仅限 reasoning.effort 形态」的边界，防止回归。
+        // Contrast case: top-level reasoning_effort providers in the
+        // DeepSeek/OpenAI style do not allow none, so explicit none must not be
+        // forwarded as reasoning_effort:"none" because upstream rejects it.
+        // It should only drive the thinking-disable path. This locks the
+        // boundary that none passthrough is limited to reasoning.effort.
         let config = CodexChatReasoningConfig {
             supports_thinking: Some(true),
             supports_effort: Some(true),
@@ -2590,7 +2619,8 @@ mod tests {
         });
         let result = responses_to_chat_completions_with_reasoning(input, Some(&config)).unwrap();
 
-        // thinking 关闭信号照发；但不写 reasoning_effort，也不写原生 reasoning 对象。
+        // Still emit the thinking disable signal, but do not emit
+        // reasoning_effort or the native reasoning object.
         assert_eq!(result["thinking"]["type"], "disabled");
         assert!(result.get("reasoning_effort").is_none());
         assert!(result.get("reasoning").is_none());
@@ -2751,10 +2781,10 @@ mod tests {
             "input": [
                 {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Permissions block"}]},
                 {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "AGENTS.md"}]},
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "你好"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "xin chào"}]},
                 {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": "Collaboration Mode: Default"}]},
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "你好"}]},
-                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "你好"}]}
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "xin chào"}]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "xin chào"}]}
             ]
         });
 
@@ -2991,8 +3021,9 @@ mod tests {
 
     #[test]
     fn responses_request_to_chat_injects_placeholder_reasoning_for_bare_tool_call() {
-        // 历史恢复 miss 时，带 tool_calls 的 assistant 消息没有任何可用 reasoning，
-        // 必须补占位，否则 kimi/Moonshot thinking 模型会拒绝整个请求。
+        // When history restoration misses and an assistant tool-call message
+        // has no usable reasoning, inject a placeholder or kimi/Moonshot
+        // thinking models reject the entire request.
         let input = json!({
             "model": "kimi-k2-thinking",
             "input": [
@@ -3454,7 +3485,8 @@ mod tests {
 
     #[test]
     fn chat_error_to_response_error_normalizes_minimax_base_resp() {
-        // MiniMax 把错误塞在 base_resp 里，code 是数字而不是字符串
+        // MiniMax places the error under base_resp, and code is numeric rather
+        // than a string.
         let input = json!({
             "base_resp": {
                 "status_code": 2013,
@@ -3469,7 +3501,8 @@ mod tests {
             "invalid params, chat content has invalid message role: system"
         );
         assert_eq!(result["error"]["code"], 2013);
-        // type 没有显式给出，应该回落到 upstream_error
+        // type is not provided explicitly, so it should fall back to
+        // upstream_error.
         assert_eq!(result["error"]["type"], "upstream_error");
     }
 
@@ -3498,7 +3531,8 @@ mod tests {
 
     #[test]
     fn chat_error_to_response_error_falls_back_to_detail_field() {
-        // 部分中转把错误塞在顶层 detail 字段（OpenAI 兼容层常见）
+        // Some gateways place the error in the top-level detail field, which is
+        // common in OpenAI-compatible layers.
         let input = json!({
             "detail": "rate limit exceeded"
         });

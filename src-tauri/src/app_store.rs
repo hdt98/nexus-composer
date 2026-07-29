@@ -5,10 +5,10 @@ use tauri_plugin_store::StoreExt;
 
 use crate::error::AppError;
 
-/// Store 中的键名
+/// Store key.
 const STORE_KEY_APP_CONFIG_DIR: &str = "app_config_dir_override";
 
-/// 缓存当前的 app_config_dir 覆盖路径，避免存储 AppHandle
+/// Caches the current app_config_dir override without retaining an AppHandle.
 static APP_CONFIG_DIR_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
 
 fn override_cache() -> &'static RwLock<Option<PathBuf>> {
@@ -21,7 +21,7 @@ fn update_cached_override(value: Option<PathBuf>) {
     }
 }
 
-/// 获取缓存中的 app_config_dir 覆盖路径
+/// Returns the cached app_config_dir override.
 pub fn get_app_config_dir_override() -> Option<PathBuf> {
     override_cache().read().ok()?.clone()
 }
@@ -30,7 +30,7 @@ fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
     let store = match app.store_builder("app_paths.json").build() {
         Ok(store) => store,
         Err(e) => {
-            log::warn!("无法创建 Store: {e}");
+            log::warn!("Failed to create Store: {e}");
             return None;
         }
     };
@@ -46,31 +46,31 @@ fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
 
             if !path.exists() {
                 log::warn!(
-                    "Store 中配置的 app_config_dir 不存在: {path:?}\n\
-                     将使用默认路径。"
+                    "The app_config_dir configured in Store does not exist: {path:?}\n\
+                     The default path will be used."
                 );
                 return None;
             }
 
-            log::info!("使用 Store 中的 app_config_dir: {path:?}");
+            log::info!("Using app_config_dir from Store: {path:?}");
             Some(path)
         }
         Some(_) => {
-            log::warn!("Store 中的 {STORE_KEY_APP_CONFIG_DIR} 类型不正确，应为字符串");
+            log::warn!("{STORE_KEY_APP_CONFIG_DIR} in Store has the wrong type; expected a string");
             None
         }
         None => None,
     }
 }
 
-/// 从 Store 刷新 app_config_dir 覆盖值并更新缓存
+/// Refreshes the app_config_dir override from Store and updates the cache.
 pub fn refresh_app_config_dir_override(app: &tauri::AppHandle) -> Option<PathBuf> {
     let value = read_override_from_store(app);
     update_cached_override(value.clone());
     value
 }
 
-/// 写入 app_config_dir 到 Tauri Store
+/// Writes app_config_dir to Tauri Store.
 pub fn set_app_config_dir_to_store(
     app: &tauri::AppHandle,
     path: Option<&str>,
@@ -78,34 +78,34 @@ pub fn set_app_config_dir_to_store(
     let store = app
         .store_builder("app_paths.json")
         .build()
-        .map_err(|e| AppError::Message(format!("创建 Store 失败: {e}")))?;
+        .map_err(|e| AppError::Message(format!("Failed to create Store: {e}")))?;
 
     match path {
         Some(p) => {
             let trimmed = p.trim();
             if !trimmed.is_empty() {
                 store.set(STORE_KEY_APP_CONFIG_DIR, Value::String(trimmed.to_string()));
-                log::info!("已将 app_config_dir 写入 Store: {trimmed}");
+                log::info!("Wrote app_config_dir to Store: {trimmed}");
             } else {
                 store.delete(STORE_KEY_APP_CONFIG_DIR);
-                log::info!("已从 Store 中删除 app_config_dir 配置");
+                log::info!("Removed app_config_dir from Store");
             }
         }
         None => {
             store.delete(STORE_KEY_APP_CONFIG_DIR);
-            log::info!("已从 Store 中删除 app_config_dir 配置");
+            log::info!("Removed app_config_dir from Store");
         }
     }
 
     store
         .save()
-        .map_err(|e| AppError::Message(format!("保存 Store 失败: {e}")))?;
+        .map_err(|e| AppError::Message(format!("Failed to save Store: {e}")))?;
 
     refresh_app_config_dir_override(app);
     Ok(())
 }
 
-/// 解析路径，支持 ~ 开头的相对路径
+/// Resolves a path, including paths beginning with `~`.
 fn resolve_path(raw: &str) -> PathBuf {
     if raw == "~" {
         if let Some(home) = dirs::home_dir() {
@@ -124,11 +124,11 @@ fn resolve_path(raw: &str) -> PathBuf {
     PathBuf::from(raw)
 }
 
-/// 从旧的 settings.json 迁移 app_config_dir 到 Store
+/// Legacy entry point for migrating app_config_dir from settings.json to Store.
 pub fn migrate_app_config_dir_from_settings(app: &tauri::AppHandle) -> Result<(), AppError> {
-    // app_config_dir 已从 settings.json 移除，此函数保留但不再执行迁移
-    // 如果用户在旧版本设置过 app_config_dir，需要在 Store 中手动配置
-    log::info!("app_config_dir 迁移功能已移除，请在设置中重新配置");
+    // app_config_dir has been removed from settings.json. This function remains for compatibility
+    // but no longer migrates. Users of an older override must configure it again in Store.
+    log::info!("app_config_dir migration has been removed; configure it again in settings");
 
     let _ = refresh_app_config_dir_override(app);
     Ok(())

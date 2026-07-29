@@ -1,15 +1,15 @@
-//! 模型列表获取服务
+//! Model list fetching service
 //!
-//! 通过 OpenAI 兼容的 GET /v1/models 端点获取供应商可用模型列表。
-//! 主要面向第三方聚合站（硅基流动、OpenRouter 等），以及把 Anthropic
-//! 协议挂在兼容子路径上的官方供应商（DeepSeek、Kimi、智谱 GLM 等）。
+//! Fetches provider models from an OpenAI-compatible GET /v1/models endpoint.
+//! Supports aggregators such as SiliconFlow and OpenRouter, plus providers such as DeepSeek,
+//! Kimi, and Zhipu GLM that expose Anthropic compatibility under a subpath.
 
 use reqwest::header::{HeaderValue, USER_AGENT};
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// 获取到的模型信息
+/// Fetched model information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchedModel {
@@ -17,7 +17,7 @@ pub struct FetchedModel {
     pub owned_by: Option<String>,
 }
 
-/// OpenAI 兼容的 /v1/models 响应格式
+/// OpenAI-compatible /v1/models response.
 #[derive(Debug, Deserialize)]
 struct ModelsResponse {
     data: Option<Vec<ModelEntry>>,
@@ -31,11 +31,11 @@ struct ModelEntry {
 
 const FETCH_TIMEOUT_SECS: u64 = 15;
 
-/// 404/405 响应体截断长度：避免把几十 KB HTML 404 页整页保留到错误串里。
+/// Maximum retained 404/405 response body length.
 const ERROR_BODY_MAX_CHARS: usize = 512;
 
-/// 已知的「Anthropic 协议兼容子路径」后缀；按长度降序，最长前缀优先匹配。
-/// baseURL 命中这些后缀时，候选列表会追加「剥离后缀再拼 /v1/models / /models」的版本。
+/// Known Anthropic-compatible subpath suffixes, ordered longest first.
+/// Matching base URLs also produce candidates with the suffix removed before /v1/models or /models.
 const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
     "/api/claudecode",
     "/api/anthropic",
@@ -48,9 +48,9 @@ const KNOWN_COMPAT_SUFFIXES: &[&str] = &[
     "/claude",
 ];
 
-/// 获取供应商的可用模型列表
+/// Fetch available models from a provider.
 ///
-/// 使用 OpenAI 兼容的 GET /v1/models 端点，按候选列表顺序尝试。
+/// Tries OpenAI-compatible GET /v1/models endpoints in candidate order.
 pub async fn fetch_models(
     base_url: &str,
     api_key: &str,
@@ -72,8 +72,8 @@ pub async fn fetch_models(
             .get(url)
             .header("Authorization", format!("Bearer {api_key}"))
             .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS));
-        // 自定义 User-Agent：部分 /models 端点同样有 UA 白名单（如 Kimi Coding Plan），
-        // 与转发 / 检测路径共用同一 UA，避免"代理可用但取模型失败"。
+        // Some /models endpoints, such as Kimi Coding Plan, allowlist user agents. Reuse the
+        // forwarding and health-check user agent so model fetching follows the same policy.
         if let Some(ua) = &user_agent {
             request = request.header(USER_AGENT, ua.clone());
         }
@@ -122,16 +122,17 @@ pub async fn fetch_models(
     ))
 }
 
-/// 构造「模型列表端点」的候选 URL 列表
+/// Build candidate model-list endpoint URLs.
 ///
-/// 候选顺序：
-/// 1. `models_url_override` 非空 → 只返回它
-/// 2. baseURL 拼 `/v1/models`；若已以版本段 `/v{N}` 结尾（`/v1`、智谱
-///    `/api/coding/paas/v4` 等），版本号已在路径里，改拼 `/models`
-/// 3. 版本段非 `/v1`（如 `/v4`）时再追加 `/v1/models` 作为兜底次候选
-/// 4. 若 baseURL 命中 [`KNOWN_COMPAT_SUFFIXES`]，剥离后缀再拼 `/v1/models`、`/models`
+/// Candidate order:
+/// 1. Return only a non-empty `models_url_override`.
+/// 2. Append `/v1/models` to baseURL, or `/models` when it ends in `/v{N}` such as `/v1` or
+///    Zhipu's `/api/coding/paas/v4`.
+/// 3. For version segments other than `/v1`, also append `/v1/models` as a fallback.
+/// 4. If baseURL matches [`KNOWN_COMPAT_SUFFIXES`], strip the suffix and append `/v1/models`
+///    and `/models`.
 ///
-/// 结果已去重且保持首次出现顺序。
+/// Results are deduplicated while preserving first-seen order.
 pub fn build_models_url_candidates(
     base_url: &str,
     is_full_url: bool,
@@ -166,12 +167,11 @@ pub fn build_models_url_candidates(
         return Ok(candidates);
     }
 
-    // baseURL 已以版本段 /v{N} 结尾时（如 `/v1`、智谱 `/api/coding/paas/v4`），
-    // OpenAI 惯例的模型端点是 `{base}/models`，不能再补 `/v1`
-    // （否则 .../coding/paas/v4/v1/models → 404）。
+    // When baseURL ends in `/v{N}`, such as `/v1` or Zhipu's `/api/coding/paas/v4`, the
+    // conventional OpenAI model endpoint is `{base}/models`; adding `/v1` would produce a 404.
     if ends_with_version_segment(trimmed) {
         candidates.push(format!("{trimmed}/models"));
-        // 版本段非 /v1 时，保留旧的 /v1/models 作为兜底次候选（正确路径已在前）。
+        // Retain `/v1/models` as a secondary fallback for version segments other than `/v1`.
         if !trimmed.ends_with("/v1") {
             candidates.push(format!("{trimmed}/v1/models"));
         }
@@ -187,7 +187,7 @@ pub fn build_models_url_candidates(
         }
     }
 
-    // 候选最多 3 条，线性去重即可，不值得上 HashSet。
+    // At most three candidates are expected, so linear deduplication is sufficient.
     let mut unique: Vec<String> = Vec::with_capacity(candidates.len());
     for url in candidates {
         if !unique.iter().any(|u| u == &url) {
@@ -198,7 +198,7 @@ pub fn build_models_url_candidates(
     Ok(unique)
 }
 
-/// 截断响应体到 [`ERROR_BODY_MAX_CHARS`] 字符，避免 HTML 404 页占用错误串。
+/// Truncate response bodies to [`ERROR_BODY_MAX_CHARS`] characters.
 fn truncate_body(body: String) -> String {
     if body.chars().count() <= ERROR_BODY_MAX_CHARS {
         body
@@ -209,10 +209,10 @@ fn truncate_body(body: String) -> String {
     }
 }
 
-/// 若 baseURL 以任一已知兼容子路径结尾，返回剥离后的剩余部分；否则 `None`。
+/// Strip a known compatibility suffix from baseURL, or return `None`.
 ///
-/// 依赖 [`KNOWN_COMPAT_SUFFIXES`] 按长度降序排列，确保最长前缀优先命中
-/// （否则 `/anthropic` 会提前匹配掉 `/api/anthropic` 的场景）。
+/// [`KNOWN_COMPAT_SUFFIXES`] must remain longest-first so `/api/anthropic` matches before
+/// `/anthropic`.
 fn strip_compat_suffix(base_url: &str) -> Option<&str> {
     for suffix in KNOWN_COMPAT_SUFFIXES {
         if base_url.ends_with(*suffix) {
@@ -222,9 +222,8 @@ fn strip_compat_suffix(base_url: &str) -> Option<&str> {
     None
 }
 
-/// 判断 baseURL 是否以 OpenAI 风格的版本段 `/v{N}` 结尾（`N` 为一个或多个数字），
-/// 例如 `/v1`、`.../paas/v4`。这类 URL 版本号已在路径中，模型端点应为
-/// `{base}/models`，不能再补 `/v1`（智谱 Coding Plan 即 `.../coding/paas/v4`）。
+/// Return whether baseURL ends in an OpenAI-style `/v{N}` version segment.
+/// For URLs such as `/v1` or `.../paas/v4`, use `{base}/models` without adding `/v1`.
 fn ends_with_version_segment(url: &str) -> bool {
     let last = url.rsplit('/').next().unwrap_or("");
     last.strip_prefix('v')
@@ -255,8 +254,8 @@ mod tests {
 
     #[test]
     fn test_candidates_zhipu_coding_paas_v4() {
-        // 智谱 Coding Plan 端点以 /v4 版本段结尾：模型端点是 {base}/models，
-        // 正确路径必须排在 .../v4/v1/models（404）之前。
+        // Zhipu Coding Plan ends in `/v4`, so `{base}/models` must precede the 404 fallback
+        // `.../v4/v1/models`.
         let c =
             build_models_url_candidates("https://open.bigmodel.cn/api/coding/paas/v4", false, None)
                 .unwrap();
@@ -422,8 +421,7 @@ mod tests {
 
     #[test]
     fn test_candidates_longer_suffix_wins() {
-        // baseURL 以 /api/anthropic 结尾时，应剥离整个 /api/anthropic，
-        // 而不是只剥离 /anthropic（那样会得到残缺的 https://.../api 根）。
+        // Strip all of `/api/anthropic`, not only `/anthropic`, to avoid an invalid `/api` root.
         let c = build_models_url_candidates("https://api.z.ai/api/anthropic", false, None).unwrap();
         assert_eq!(
             c,
@@ -443,7 +441,7 @@ mod tests {
 
     #[test]
     fn test_candidates_deduplicate() {
-        // 虚构 case：baseURL 就是 "scheme://host"，剥不出子路径，应只有一个候选。
+        // A bare `scheme://host` has no subpath to strip and should produce one candidate.
         let c = build_models_url_candidates("https://host.example.com", false, None).unwrap();
         assert_eq!(c.len(), 1);
     }

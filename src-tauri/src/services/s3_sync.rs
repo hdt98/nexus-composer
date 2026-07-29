@@ -103,7 +103,7 @@ pub async fn download(
         .ok_or_else(|| {
             localized(
                 "s3.sync.remote_empty",
-                "远端没有可下载的同步数据",
+                "No synchronization data is available to download from the remote",
                 "No downloadable sync data found on the remote.",
             )
         })?;
@@ -193,7 +193,7 @@ async fn download_and_verify(
     let meta = artifacts.get(artifact_name).ok_or_else(|| {
         localized(
             "s3.sync.manifest_missing_artifact",
-            format!("manifest 中缺少 artifact: {artifact_name}"),
+            format!("Artifact is missing from the manifest: {artifact_name}"),
             format!("Manifest missing artifact: {artifact_name}"),
         )
     })?;
@@ -205,7 +205,7 @@ async fn download_and_verify(
         .ok_or_else(|| {
             localized(
                 "s3.sync.remote_missing_artifact",
-                format!("远端缺少 artifact 文件: {artifact_name}"),
+                format!("Artifact file is missing from the remote: {artifact_name}"),
                 format!("Remote artifact file missing: {artifact_name}"),
             )
         })?;

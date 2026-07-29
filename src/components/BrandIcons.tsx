@@ -3,7 +3,7 @@ interface IconProps {
   className?: string;
 }
 
-// 导入本地 SVG 图标
+// Import local SVG icons.
 import ClaudeSvg from "@/icons/extracted/claude.svg?url";
 import OpenAISvg from "@/icons/extracted/openai.svg?url";
 import GeminiSvg from "@/icons/extracted/gemini.svg?url";

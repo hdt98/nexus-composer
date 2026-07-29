@@ -6,7 +6,7 @@ use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::gemini_config::get_gemini_settings_path;
 
-/// 获取 Gemini MCP 配置文件路径（~/.gemini/settings.json）
+/// Return the Gemini MCP configuration path at ~/.gemini/settings.json.
 fn user_config_path() -> PathBuf {
     get_gemini_settings_path()
 }
@@ -29,12 +29,12 @@ fn write_json_value(path: &Path, value: &Value) -> Result<(), AppError> {
     atomic_write(path, json.as_bytes())
 }
 
-/// 读取 Gemini settings.json 中的 mcpServers 映射
+/// Read the mcpServers map from Gemini settings.json.
 ///
-/// 执行反向格式转换以保持与统一 MCP 结构的兼容性：
+/// Converts Gemini fields back into the unified MCP structure:
 /// - httpUrl → url + type: "http"
-/// - 仅有 url 字段 → 补齐 type: "sse"（Gemini 以字段名推断传输类型）
-/// - 仅有 command 字段 → 补齐 type: "stdio"
+/// - url only → type: "sse"
+/// - command only → type: "stdio"
 pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>, AppError> {
     let path = user_config_path();
     if !path.exists() {
@@ -48,7 +48,7 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
         .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
         .unwrap_or_default();
 
-    // 反向格式转换：Gemini 特有格式 → 统一 MCP 格式
+    // Convert Gemini-specific fields to the unified MCP format.
     for (_, spec) in servers.iter_mut() {
         if let Some(obj) = spec.as_object_mut() {
             // httpUrl → url + type: "http"
@@ -57,7 +57,7 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
                 obj.insert("type".to_string(), Value::String("http".to_string()));
             }
 
-            // Gemini CLI 不使用 type 字段：这里补齐成统一结构，便于校验与导入
+            // Gemini CLI infers transport from fields; restore type for validation and import.
             if obj.get("type").is_none() {
                 if obj.contains_key("command") {
                     obj.insert("type".to_string(), Value::String("stdio".to_string()));
@@ -71,8 +71,8 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
     Ok(servers)
 }
 
-/// 将给定的启用 MCP 服务器映射写入到 Gemini settings.json 的 mcpServers 字段
-/// 仅覆盖 mcpServers，其他字段保持不变
+/// Write enabled MCP servers to mcpServers in Gemini settings.json.
+/// Replaces only mcpServers and preserves all other fields.
 pub fn set_mcp_servers_map(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
@@ -83,38 +83,38 @@ pub fn set_mcp_servers_map(
         serde_json::json!({})
     };
 
-    // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
+    // Build mcpServers with protocol fields only, removing UI metadata.
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
         let mut obj = if let Some(map) = spec.as_object() {
             map.clone()
         } else {
             return Err(AppError::McpValidation(format!(
-                "MCP 服务器 '{id}' 不是对象"
+                "MCP server '{id}' is not an object"
             )));
         };
 
-        // 提取 server 字段（如果存在）
+        // Extract the nested server field when present.
         if let Some(server_val) = obj.remove("server") {
             let server_obj = server_val.as_object().cloned().ok_or_else(|| {
-                AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
+                AppError::McpValidation(format!("MCP server '{id}' server field is not an object"))
             })?;
             obj = server_obj;
         }
 
-        // Gemini CLI 格式转换：
-        // - Gemini 不使用 "type" 字段（从字段名推断传输类型）
-        // - HTTP 使用 "httpUrl" 字段，SSE 使用 "url" 字段
+        // Convert to Gemini CLI format:
+        // - Gemini infers transport type instead of using "type".
+        // - HTTP uses "httpUrl" while SSE uses "url".
         let transport_type = obj.get("type").and_then(|v| v.as_str());
         if transport_type == Some("http") {
-            // HTTP streaming: 将 "url" 重命名为 "httpUrl"
+            // Rename "url" to "httpUrl" for HTTP streaming.
             if let Some(url_value) = obj.remove("url") {
                 obj.insert("httpUrl".to_string(), url_value);
             }
         }
-        // SSE 保持 "url" 字段不变
+        // Keep "url" unchanged for SSE.
 
-        // 移除 UI 辅助字段和 type 字段（Gemini 不需要）
+        // Remove UI metadata and the unused type field.
         obj.remove("type");
         obj.remove("enabled");
         obj.remove("source");
@@ -125,9 +125,8 @@ pub fn set_mcp_servers_map(
         obj.remove("homepage");
         obj.remove("docs");
 
-        // Timeout 转换：Claude/Codex 使用 startup_timeout_sec/tool_timeout_sec
-        // Gemini CLI 只支持 timeout（单位 ms）
-        // 默认值：startup=10s, tool=60s
+        // Convert Claude/Codex startup and tool timeouts to Gemini's single millisecond timeout.
+        // Defaults: startup=10s, tool=60s.
         const DEFAULT_STARTUP_MS: u64 = 10_000;
         const DEFAULT_TOOL_MS: u64 = 60_000;
 
@@ -140,7 +139,7 @@ pub fn set_mcp_servers_map(
                 })
             };
 
-        // 分别收集 startup 和 tool timeout，未设置时使用默认值
+        // Read startup and tool timeouts, using defaults when absent.
         let startup_ms = extract_timeout(&mut obj, "startup_timeout_sec", 1000)
             .or_else(|| extract_timeout(&mut obj, "startup_timeout_ms", 1))
             .unwrap_or(DEFAULT_STARTUP_MS);
@@ -148,7 +147,7 @@ pub fn set_mcp_servers_map(
             .or_else(|| extract_timeout(&mut obj, "tool_timeout_ms", 1))
             .unwrap_or(DEFAULT_TOOL_MS);
 
-        // 取最大值作为 Gemini timeout
+        // Use the larger value as the Gemini timeout.
         let final_timeout = startup_ms.max(tool_ms);
         obj.insert("timeout".to_string(), Value::Number(final_timeout.into()));
 
@@ -156,9 +155,9 @@ pub fn set_mcp_servers_map(
     }
 
     {
-        let obj = root
-            .as_object_mut()
-            .ok_or_else(|| AppError::Config("~/.gemini/settings.json 根必须是对象".into()))?;
+        let obj = root.as_object_mut().ok_or_else(|| {
+            AppError::Config("~/.gemini/settings.json root must be an object".into())
+        })?;
         obj.insert("mcpServers".into(), Value::Object(out));
     }
 

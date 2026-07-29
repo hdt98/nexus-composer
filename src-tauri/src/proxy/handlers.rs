@@ -1,11 +1,12 @@
-//! 请求处理器
+//! Request handlers.
 //!
-//! 处理各种API端点的HTTP请求
+//! Handles HTTP requests for the supported API endpoints.
 //!
-//! 重构后的结构：
-//! - 通用逻辑提取到 `handler_context` 和 `response_processor` 模块
-//! - 各 handler 只保留独特的业务逻辑
-//! - Claude 的格式转换逻辑保留在此文件（用于 OpenRouter 旧接口回退）
+//! Refactored structure:
+//! - Common behavior lives in `handler_context` and `response_processor`.
+//! - Each handler retains only endpoint-specific business logic.
+//! - Claude protocol transformation remains here as a fallback for the legacy
+//!   OpenRouter interface.
 
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
@@ -56,10 +57,10 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 // ============================================================================
-// 健康检查和状态查询（简单端点）
+// Health and status endpoints.
 // ============================================================================
 
-/// 健康检查
+/// Health check.
 pub async fn health_check() -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
@@ -70,7 +71,7 @@ pub async fn health_check() -> (StatusCode, Json<Value>) {
     )
 }
 
-/// 获取服务状态
+/// Returns service status.
 pub async fn get_status(State(state): State<ProxyState>) -> Result<Json<ProxyStatus>, ProxyError> {
     let status = state.status.read().await.clone();
     Ok(Json(status))
@@ -112,14 +113,16 @@ pub async fn handle_models() -> Result<Json<Value>, ProxyError> {
 }
 
 // ============================================================================
-// Claude API 处理器（包含格式转换逻辑）
+// Claude API handler with protocol transformation.
 // ============================================================================
 
-/// 处理 /v1/messages 请求（Claude API）
+/// Handles Claude API `/v1/messages` requests.
 ///
-/// Claude 处理器包含独特的格式转换逻辑：
-/// - 过去用于 OpenRouter 的 OpenAI Chat Completions 兼容接口（Anthropic ↔ OpenAI 转换）
-/// - 现在 OpenRouter 已推出 Claude Code 兼容接口，默认不再启用该转换（逻辑保留以备回退）
+/// Claude has endpoint-specific transformation behavior:
+/// - It previously adapted Anthropic to OpenAI Chat Completions for OpenRouter's
+///   compatibility endpoint.
+/// - OpenRouter now has a Claude Code-compatible endpoint, so this transformation is
+///   disabled by default but retained as a fallback.
 pub async fn handle_messages(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -198,7 +201,7 @@ async fn handle_messages_for_app(
         .and_then(|s| s.as_bool())
         .unwrap_or(false);
 
-    // 转发请求
+    // Forward the request.
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
         .forward_with_retry(
@@ -234,11 +237,11 @@ async fn handle_messages_for_app(
         .to_string();
     let response = result.response;
 
-    // 检查是否需要格式转换（OpenRouter 等中转服务）
+    // Check whether a relay such as OpenRouter requires protocol transformation.
     let adapter = get_adapter(&app_type);
     let needs_transform = record_usage && adapter.needs_transform(&ctx.provider);
 
-    // Claude 特有：格式转换处理
+    // Claude-specific protocol transformation.
     if needs_transform {
         return handle_claude_transform(
             response,
@@ -264,7 +267,7 @@ async fn handle_messages_for_app(
         .await;
     }
 
-    // 通用响应处理（透传模式）
+    // Common response processing in passthrough mode.
     process_response(
         response,
         &ctx,
@@ -333,12 +336,12 @@ fn validate_claude_desktop_gateway_auth(
         .map_err(|e| ProxyError::AuthError(e.to_string()))?;
     let Some(value) = headers.get(axum::http::header::AUTHORIZATION) else {
         return Err(ProxyError::AuthError(
-            "Claude Desktop gateway 缺少 Authorization 头".to_string(),
+            "Claude Desktop gateway is missing the Authorization header".to_string(),
         ));
     };
     let value = value
         .to_str()
-        .map_err(|_| ProxyError::AuthError("Authorization 头格式无效".to_string()))?;
+        .map_err(|_| ProxyError::AuthError("Invalid Authorization header format".to_string()))?;
     let token = value
         .strip_prefix("Bearer ")
         .or_else(|| value.strip_prefix("bearer "))
@@ -346,7 +349,7 @@ fn validate_claude_desktop_gateway_auth(
         .trim();
     if token != expected {
         return Err(ProxyError::AuthError(
-            "Claude Desktop gateway token 无效".to_string(),
+            "Invalid Claude Desktop gateway token".to_string(),
         ));
     }
     Ok(())
@@ -366,9 +369,9 @@ fn chat_protocol_error(error: ProtocolError, anthropic: bool) -> ProxyError {
     }
 }
 
-/// Claude 格式转换处理（独有逻辑）
+/// Claude-specific protocol transformation.
 ///
-/// 支持 OpenAI Chat Completions 和 Responses API 两种格式的转换
+/// Supports both OpenAI Chat Completions and Responses API formats.
 fn should_emit_anthropic_reasoning(body: &Value, normalize_chat: bool) -> bool {
     !normalize_chat
         || matches!(
@@ -396,11 +399,12 @@ async fn handle_claude_transform(
         .as_ref()
         .and_then(|meta| meta.provider_type.as_deref())
         == Some("codex_oauth");
-    // Codex OAuth 会把 openai_responses 响应强制升级为 SSE，即使客户端发的是 stream:false。
-    // should_use_claude_transform_streaming 默认会把这个组合路由到流式转换器——虽然能避免
-    // JSON parse 报 422，但会让非流客户端收到 text/event-stream，违反 Anthropic 非流语义。
-    // 这里为这个特定组合打开 override：把上游 SSE 聚合成 Anthropic JSON 回给客户端，其它
-    // 场景（任意上游 is_sse、非 Codex OAuth 等）仍沿用原有流式兜底。
+    // Codex OAuth upgrades openai_responses replies to SSE even for stream:false.
+    // should_use_claude_transform_streaming normally routes that combination through
+    // the streaming transformer. Although this avoids a JSON parse 422, it gives a
+    // non-streaming client text/event-stream and violates Anthropic semantics. Override
+    // this exact combination by aggregating upstream SSE into Anthropic JSON. Other SSE
+    // upstreams and non-Codex OAuth cases retain the existing streaming fallback.
     let aggregate_codex_oauth_responses_sse =
         !is_stream && is_codex_oauth && api_format == "openai_responses";
     let use_streaming = if aggregate_codex_oauth_responses_sse {
@@ -417,7 +421,7 @@ async fn handle_claude_transform(
     let tool_schema_hints = (!tool_schema_hints.is_empty()).then_some(tool_schema_hints);
 
     if use_streaming {
-        // 根据 api_format 选择流式转换器
+        // Select the streaming transformer for api_format.
         let stream = normalize_sse_stream(response.bytes_stream(), normalize_chat, emit_reasoning);
         let sse_stream: Box<
             dyn futures::Stream<Item = Result<Bytes, std::io::Error>> + Send + Unpin,
@@ -439,13 +443,16 @@ async fn handle_claude_transform(
             Box::new(Box::pin(create_anthropic_sse_stream(stream)))
         };
 
-        // 创建使用量收集器；关闭 usage logging 时不要再解析转换后的 SSE。
+        // Create a usage collector. Do not parse transformed SSE when usage logging is
+        // disabled.
         let usage_collector = if usage_logging_enabled(state) {
             let state = state.clone();
             let provider_id = ctx.provider.id.clone();
             let request_model = ctx.request_model.clone();
-            // 上游/转换层未回显模型时，优先用映射后的出站模型兜底（路由接管真值），
-            // 其次才是客户端请求别名。空字符串视为缺失（转换器对无回显上游会合成 ""）。
+            // If upstream or the transformer omits the model, prefer the mapped outbound
+            // model, which is the takeover truth, then the client request alias. Treat an
+            // empty string as missing because transformers synthesize "" when upstream
+            // does not echo a model.
             let fallback_model = ctx
                 .outbound_model
                 .clone()
@@ -454,8 +461,8 @@ async fn handle_claude_transform(
             let start_time = ctx.start_time;
             let session_id = ctx.session_id.clone();
             let correlation_id = ctx.correlation_id();
-            // 用 ctx 的 app_type：Claude Desktop 网关也走此转换路径，硬编码
-            // "claude" 会把 claude-desktop 的行错记到 claude 名下
+            // Use ctx.app_type because the Claude Desktop gateway also takes this path.
+            // Hard-coding "claude" would attribute claude-desktop rows to Claude.
             let app_type_str = ctx.app_type_str;
 
             Some(SseUsageCollector::new(
@@ -502,7 +509,7 @@ async fn handle_claude_transform(
             None
         };
 
-        // 获取流式超时配置
+        // Read streaming timeout configuration.
         let timeout_config = ctx.streaming_timeout_config();
 
         let logged_stream = create_logged_passthrough_stream(
@@ -527,7 +534,7 @@ async fn handle_claude_transform(
         return Ok((headers, body).into_response());
     }
 
-    // 非流式响应转换 (OpenAI/Responses → Anthropic)
+    // Non-streaming response transformation: OpenAI/Responses to Anthropic.
     let body_timeout =
         if ctx.app_config.auto_failover_enabled && ctx.app_config.non_streaming_timeout > 0 {
             std::time::Duration::from_secs(ctx.app_config.non_streaming_timeout as u64)
@@ -547,17 +554,19 @@ async fn handle_claude_transform(
                 normalize_chat_value(value, true)?
             }
             Ok(value) => value,
-            // 兜底嗅探（#2234）：部分网关对 stream:false 强制返回 SSE 体，却把
-            // Content-Type 标成 application/json 等，is_sse() 的 header 检查失效。
-            // 此时按 SSE 聚合成单个 JSON 再走既有非流转换器，客户端仍收到
-            // Anthropic JSON，非流语义不变。gemini_native 暂无聚合器，落诊断错误。
+            // Fallback sniffing (#2234): some gateways force SSE for stream:false while
+            // labeling the body application/json, defeating is_sse() header detection.
+            // Aggregate that SSE into one JSON value and use the existing non-streaming
+            // transformer so the client still receives Anthropic JSON. gemini_native has
+            // no aggregator yet and falls through to the diagnostic error.
             Err(_) if body_looks_like_sse(&body_str) && api_format != "gemini_native" => {
                 log::warn!(
-                    "[Claude] 上游对非流请求返回未标记的 SSE 体（api_format={api_format}），按 SSE 聚合兜底"
+                    "[Claude] Upstream returned unlabeled SSE for a non-streaming request (api_format={api_format}); using SSE aggregation fallback"
                 );
-                // 聚合也失败时：保留全量 body 服务端日志，并给客户端错误附带同款
-                // 现场诊断（content-type/body 摘要），否则命中嗅探臂的用户只拿到
-                // 裸聚合错误、丢失非嗅探臂已有的诊断增强（C7）
+                // If aggregation also fails, keep the complete body in server logs and
+                // attach matching diagnostics (content type and body summary) to the
+                // client error. Otherwise the sniffing branch would lose the richer
+                // diagnostics already present on the regular parse-error path (C7).
                 let value = if api_format == "openai_chat" {
                     normalize_chat_fallback(&body_str, &response_headers, normalize, true)
                 } else {
@@ -572,7 +581,7 @@ async fn handle_claude_transform(
                 value
             }
             Err(e) => {
-                log::error!("[Claude] 解析上游响应失败: {e}, body: {body_str}");
+                log::error!("[Claude] Failed to parse upstream response: {e}, body: {body_str}");
                 return Err(upstream_body_parse_error(
                     "Failed to parse upstream response",
                     &e,
@@ -582,7 +591,7 @@ async fn handle_claude_transform(
             }
         }
     };
-    // 根据 api_format 选择非流式转换器
+    // Select the non-streaming transformer for api_format.
     let anthropic_response = if api_format == "openai_responses" {
         transform_responses::responses_to_anthropic(upstream_response)
     } else if api_format == "gemini_native" {
@@ -597,18 +606,18 @@ async fn handle_claude_transform(
         transform::openai_to_anthropic_with_thinking(upstream_response, emit_reasoning)
     }
     .map_err(|e| {
-        log::error!("[Claude] 转换响应失败: {e}");
+        log::error!("[Claude] Failed to transform response: {e}");
         e
     })?;
 
-    // 记录使用量
-    // 全 0 usage 不落账（对齐 Codex 流式收集器的 skip）：SSE 聚合兜底救回的流
-    // 在上游缺 stream_options.include_usage 时没有 usage，写入只会产生无意义空行
+    // Record usage. Skip all-zero usage, matching the Codex streaming collector. An SSE
+    // aggregation fallback has no usage when upstream omits stream_options.include_usage,
+    // and persisting it would create a meaningless empty row.
     if let Some(usage) =
         TokenUsage::from_claude_response(&anthropic_response).filter(|u| u.has_billable_tokens())
     {
-        // 转换后的响应缺失/合成空 model 时，回退到映射后的出站模型（接管真值），
-        // 再回退到客户端请求别名
+        // If the transformed response omits or synthesizes an empty model, fall back to
+        // the mapped outbound model (takeover truth), then the client request alias.
         let model = anthropic_response
             .get("model")
             .and_then(|m| m.as_str())
@@ -651,11 +660,11 @@ async fn handle_claude_transform(
         });
     }
 
-    // 构建响应
+    // Build the response.
     let mut builder = axum::response::Response::builder().status(status);
     strip_entity_headers_for_rebuilt_body(&mut response_headers);
     strip_hop_by_hop_response_headers(&mut response_headers);
-    // Builder::header 是 append 语义；不先 remove 会和上游 Content-Type 双发。
+    // Builder::header appends, so remove upstream Content-Type to avoid duplicates.
     response_headers.remove(axum::http::header::CONTENT_TYPE);
 
     for (key, value) in response_headers.iter() {
@@ -668,13 +677,13 @@ async fn handle_claude_transform(
     );
 
     let response_body = serde_json::to_vec(&anthropic_response).map_err(|e| {
-        log::error!("[Claude] 序列化响应失败: {e}");
+        log::error!("[Claude] Failed to serialize response: {e}");
         ProxyError::TransformError(format!("Failed to serialize response: {e}"))
     })?;
 
     let body = axum::body::Body::from(response_body);
     builder.body(body).map_err(|e| {
-        log::error!("[Claude] 构建响应失败: {e}");
+        log::error!("[Claude] Failed to build response: {e}");
         ProxyError::Internal(format!("Failed to build response: {e}"))
     })
 }
@@ -686,10 +695,11 @@ fn endpoint_with_query(uri: &axum::http::Uri, endpoint: &str) -> String {
     }
 }
 
-/// Codex 客户端（尤其 Desktop 登录态）可能对请求体启用 zstd 压缩，使得后续
-/// `serde_json::from_slice` 直接解析失败。这里在解析前解压，并剥掉已失真的实体头
-/// （content-encoding / content-length / transfer-encoding）——转发层会基于解压后的
-/// 明文 JSON 重新生成正确的头。
+/// Codex clients, especially an authenticated Desktop, may zstd-compress request
+/// bodies, causing a direct `serde_json::from_slice` call to fail. Decompress before
+/// parsing and remove stale entity headers (content-encoding, content-length, and
+/// transfer-encoding). The forwarding layer rebuilds correct headers from the decoded
+/// JSON bytes.
 fn decode_codex_request_body(
     headers: &mut axum::http::HeaderMap,
     body_bytes: Bytes,
@@ -704,18 +714,18 @@ fn decode_codex_request_body(
         )));
     }
 
-    log::debug!("[Codex] 解压请求体: content-encoding={encoding}");
+    log::debug!("[Codex] Decompressing request body: content-encoding={encoding}");
     let decompressed = match decompress_body(&encoding, &body_bytes) {
         Ok(Some(decompressed)) => decompressed,
-        // is_supported_content_encoding 已确保编码受支持，正常不会返回 None；
-        // 防御性兜底：宁可报错，也不能把压缩字节当 JSON 透传下去。
+        // is_supported_content_encoding already validates the encoding, so None should
+        // not occur. Fail defensively rather than forwarding compressed bytes as JSON.
         Ok(None) => {
             return Err(ProxyError::InvalidRequest(format!(
                 "Unsupported request content-encoding: {encoding}"
             )));
         }
         Err(e) => {
-            log::warn!("[Codex] 请求体解压失败 ({encoding}): {e}");
+            log::warn!("[Codex] Failed to decompress request body ({encoding}): {e}");
             return Err(ProxyError::InvalidRequest(format!(
                 "Failed to decompress request body ({encoding}): {e}"
             )));
@@ -730,10 +740,10 @@ fn decode_codex_request_body(
 }
 
 // ============================================================================
-// Codex API 处理器
+// Codex API handlers.
 // ============================================================================
 
-/// 处理 /v1/chat/completions 请求（OpenAI Chat Completions API - Codex CLI）
+/// Handles Codex CLI OpenAI Chat Completions requests at `/v1/chat/completions`.
 pub async fn handle_chat_completions(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -799,7 +809,7 @@ pub async fn handle_chat_completions(
     .await
 }
 
-/// 处理 /v1/responses 请求（OpenAI Responses API - Codex CLI 透传）
+/// Handles passthrough Codex CLI OpenAI Responses requests at `/v1/responses`.
 pub async fn handle_responses(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -901,7 +911,7 @@ pub async fn handle_responses(
     .await
 }
 
-/// 处理 /v1/responses/compact 请求（OpenAI Responses Compact API - Codex CLI 透传）
+/// Handles passthrough Codex CLI Responses Compact requests at `/v1/responses/compact`.
 pub async fn handle_responses_compact(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
@@ -1075,9 +1085,10 @@ async fn handle_codex_chat_to_responses_transform(
     let status = response.status();
 
     if !status.is_success() {
-        // 上游 Chat 错误体形状与 Responses 不一致（如 MiniMax 的 base_resp、自定义 detail 字段）；
-        // 直接透传会让 Codex 客户端无法识别错误码。这里统一转换为 Responses 风格
-        // `{"error": {message, type, code, param}}`，保留原始 HTTP 状态码。
+        // Upstream Chat error bodies differ from Responses, for example MiniMax
+        // base_resp or custom detail fields. Direct passthrough prevents Codex from
+        // recognizing the error code. Normalize to the Responses shape
+        // `{"error": {message, type, code, param}}` while preserving HTTP status.
         return handle_codex_chat_error_response(response, ctx, status).await;
     }
 
@@ -1105,7 +1116,8 @@ async fn handle_codex_chat_to_responses_transform(
             let state = state.clone();
             let provider_id = ctx.provider.id.clone();
             let request_model = ctx.request_model.clone();
-            // 接管/模型覆写场景的归因兜底：出站真值优先于客户端请求别名
+            // For takeover or model overrides, attribute to the outbound truth before
+            // the client request alias.
             let fallback_model = ctx
                 .outbound_model
                 .clone()
@@ -1196,11 +1208,12 @@ async fn handle_codex_chat_to_responses_transform(
     let chat_response: Value = match serde_json::from_slice(&body_bytes) {
         Ok(value) if normalize => normalize_chat_value(value, false)?,
         Ok(value) => value,
-        // 与 Claude 侧 handle_claude_transform 对称的兜底嗅探（#2234）：
-        // 上游对 stream:false 返回未标记 Content-Type 的 SSE 体时按 SSE 聚合。
+        // Fallback sniffing symmetric with Claude's handle_claude_transform (#2234):
+        // aggregate an unlabeled SSE body returned for stream:false.
         Err(_) if body_looks_like_sse(&body_str) => {
-            log::warn!("[Codex] 上游对非流请求返回未标记的 SSE 体，按 Chat SSE 聚合兜底");
-            // 聚合也失败时：保留全量 body 服务端日志，并给客户端错误附带现场诊断（C7）
+            log::warn!("[Codex] Upstream returned unlabeled SSE for a non-streaming request; using Chat SSE aggregation fallback");
+            // If aggregation also fails, keep the complete body in server logs and
+            // attach diagnostics to the client error (C7).
             let value = normalize_chat_fallback(&body_str, &response_headers, normalize, false)
                 .map_err(|error| {
                     log::error!(
@@ -1211,7 +1224,7 @@ async fn handle_codex_chat_to_responses_transform(
             value
         }
         Err(e) => {
-            log::error!("[Codex] 解析 Chat 上游响应失败: {e}, body: {body_str}");
+            log::error!("[Codex] Failed to parse upstream Chat response: {e}, body: {body_str}");
             return Err(upstream_body_parse_error(
                 "Failed to parse upstream chat response",
                 &e,
@@ -1227,7 +1240,7 @@ async fn handle_codex_chat_to_responses_transform(
         &tool_context,
     )
     .map_err(|e| {
-        log::error!("[Codex] Chat → Responses 响应转换失败: {e}");
+        log::error!("[Codex] Failed to transform Chat response to Responses: {e}");
         e
     })?;
     if let (Some(context), Some(mut progress)) = (continuation.as_ref(), initial_progress) {
@@ -1282,10 +1295,12 @@ async fn handle_codex_chat_to_responses_transform(
         .record_response(&responses_response)
         .await;
 
-    // 上游非流式 Chat 省略 usage 时，chat_usage_to_responses_usage 会合成全 0 usage
-    // (transform_codex_chat.rs:1581)，from_codex_response 对 input/output 字段存在(哪怕=0)
-    // 即返回 Some。用 has_billable_tokens 闸门跳过全 0，避免空行虚增请求数——与流式分支
-    // 及 Claude transform handler 的 skip 行为对齐。
+    // When a non-streaming upstream Chat response omits usage,
+    // chat_usage_to_responses_usage synthesizes all-zero usage
+    // (transform_codex_chat.rs:1581), and from_codex_response returns Some whenever
+    // input/output fields exist, even when zero. Gate with has_billable_tokens to avoid
+    // empty rows inflating request counts, matching the streaming branch and Claude
+    // transform handler.
     if let Some(usage) = TokenUsage::from_codex_response_auto(&responses_response)
         .filter(TokenUsage::has_billable_tokens)
     {
@@ -1332,7 +1347,7 @@ async fn handle_codex_chat_to_responses_transform(
 
     strip_entity_headers_for_rebuilt_body(&mut response_headers);
     strip_hop_by_hop_response_headers(&mut response_headers);
-    // Builder::header 是 append 语义；不先 remove 会和上游 Content-Type 双发。
+    // Builder::header appends, so remove upstream Content-Type to avoid duplicates.
     response_headers.remove(axum::http::header::CONTENT_TYPE);
 
     let mut builder = axum::response::Response::builder().status(status);
@@ -1345,24 +1360,24 @@ async fn handle_codex_chat_to_responses_transform(
     );
 
     let response_body = serde_json::to_vec(&responses_response).map_err(|e| {
-        log::error!("[Codex] 序列化 Responses 响应失败: {e}");
+        log::error!("[Codex] Failed to serialize Responses response: {e}");
         ProxyError::TransformError(format!("Failed to serialize responses response: {e}"))
     })?;
 
     builder
         .body(axum::body::Body::from(response_body))
         .map_err(|e| {
-            log::error!("[Codex] 构建 Responses 响应失败: {e}");
+            log::error!("[Codex] Failed to build Responses response: {e}");
             ProxyError::Internal(format!("Failed to build response: {e}"))
         })
 }
 
-/// 把上游 Chat Completions 的错误响应转换为 Responses API 错误形状。
+/// Transforms an upstream Chat Completions error into the Responses API error shape.
 ///
-/// 与正常响应分支配套：正常响应已经被改写成 Responses 形式，错误响应若仍保留
-/// Chat 错误体（如 MiniMax 的 `{"base_resp": {"status_code": 2013}}`），Codex
-/// 客户端的错误处理就无法对齐字段。这里读取上游 body、规整成
-/// `{"error": {message, type, code, param}}` 并保留原始 HTTP 状态码。
+/// The success branch already rewrites responses to Responses format. Leaving a Chat
+/// error body such as MiniMax's `{"base_resp": {"status_code": 2013}}` would prevent
+/// Codex from matching fields. Read the upstream body, normalize it to
+/// `{"error": {message, type, code, param}}`, and preserve the HTTP status.
 async fn handle_codex_chat_error_response(
     response: super::hyper_client::ProxyResponse,
     ctx: &RequestContext,
@@ -1377,8 +1392,8 @@ async fn handle_codex_chat_error_response(
     let (mut response_headers, _status, body_bytes) =
         read_decoded_body(response, ctx.tag, body_timeout).await?;
 
-    // 非 JSON 上游错误体（Cloudflare HTML、纯文本 "Unauthorized" 等）若丢成 None，
-    // 客户端就看不到原始诊断信息；包成 Value::String 走转换函数的字符串分支。
+    // Preserve non-JSON upstream errors such as Cloudflare HTML or plain-text
+    // Unauthorized as Value::String. Dropping them to None would hide diagnostics.
     let parsed_value: Value = match serde_json::from_slice::<Value>(&body_bytes) {
         Ok(value) => value,
         Err(_) => {
@@ -1393,7 +1408,9 @@ async fn handle_codex_chat_error_response(
             } else {
                 lossy.into_owned()
             };
-            log::warn!("[Codex] Chat 错误响应不是合法 JSON，按文本透传: {truncated}");
+            log::warn!(
+                "[Codex] Chat error response is not valid JSON; preserving as text: {truncated}"
+            );
             Value::String(truncated)
         }
     };
@@ -1402,7 +1419,7 @@ async fn handle_codex_chat_error_response(
 
     strip_entity_headers_for_rebuilt_body(&mut response_headers);
     strip_hop_by_hop_response_headers(&mut response_headers);
-    // Builder::header 是 append 语义；不先 remove 会和上游 Content-Type 双发。
+    // Builder::header appends, so remove upstream Content-Type to avoid duplicates.
     response_headers.remove(axum::http::header::CONTENT_TYPE);
 
     let mut builder = axum::response::Response::builder().status(status);
@@ -1415,25 +1432,27 @@ async fn handle_codex_chat_error_response(
     );
 
     let body = serde_json::to_vec(&responses_error).map_err(|e| {
-        log::error!("[Codex] 序列化 Responses 错误体失败: {e}");
+        log::error!("[Codex] Failed to serialize Responses error body: {e}");
         ProxyError::TransformError(format!("Failed to serialize responses error: {e}"))
     })?;
 
     builder.body(axum::body::Body::from(body)).map_err(|e| {
-        log::error!("[Codex] 构建 Responses 错误响应失败: {e}");
+        log::error!("[Codex] Failed to build Responses error response: {e}");
         ProxyError::Internal(format!("Failed to build response: {e}"))
     })
 }
 
-/// 把转发层（非上游响应）的失败构造成富化的 Codex 错误响应。
+/// Builds an enriched Codex error response for a forwarding-layer failure.
 ///
-/// 与 `handle_codex_chat_error_response`（处理上游真实错误响应、复制上游头）不同，
-/// 这里没有上游响应可参照，只产出一个 `application/json` 错误体。状态码走
-/// `map_proxy_error_to_status`，该函数已与 `ProxyError::into_response` 对齐。
+/// Unlike `handle_codex_chat_error_response`, which copies a real upstream error and
+/// its headers, this path has no upstream response and emits only an `application/json`
+/// body. `map_proxy_error_to_status` supplies a status aligned with
+/// `ProxyError::into_response`.
 ///
-/// 注意：`endpoint` 经 `endpoint_with_query` 可能携带 query（如 `?beta=true`）并被
-/// 原样写入错误体。当前 Codex 端点不在 query 里放凭证，故安全；若将来复用到
-/// query 携带密钥的端点（如 Gemini 的 `?key=`），需先脱敏再回显。
+/// `endpoint_with_query` may include a query such as `?beta=true`, which is echoed in
+/// the error body. Current Codex endpoints carry no credentials in the query, so this
+/// is safe. Redact before reuse with credential-bearing endpoints such as Gemini
+/// `?key=`.
 fn build_codex_proxy_error_response(
     ctx: &RequestContext,
     endpoint: &str,
@@ -1443,7 +1462,7 @@ fn build_codex_proxy_error_response(
         .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     let body = codex_proxy_error_json(&ctx.provider.name, &ctx.request_model, endpoint, error);
     let body = serde_json::to_vec(&body).map_err(|e| {
-        log::error!("[Codex] 序列化代理错误体失败: {e}");
+        log::error!("[Codex] Failed to serialize proxy error body: {e}");
         ProxyError::Internal(format!("Failed to serialize proxy error: {e}"))
     })?;
 
@@ -1455,7 +1474,7 @@ fn build_codex_proxy_error_response(
         )
         .body(axum::body::Body::from(body))
         .map_err(|e| {
-            log::error!("[Codex] 构建代理错误响应失败: {e}");
+            log::error!("[Codex] Failed to build proxy error response: {e}");
             ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
         })
 }
@@ -1497,10 +1516,10 @@ fn codex_proxy_error_json(
     };
 
     let message = if upstream_status == Some(413) {
-        // 413 来自上游渠道商的网关（典型是 nginx 的 client_max_body_size），不是 CC
-        // Switch 本地代理的限制（本地 DefaultBodyLimit 已放到 200MB）。上游响应体往往是
-        // 一整段 nginx HTML，对用户毫无价值，这里替换成明确指向上游 + 可操作的指引，
-        // 避免「以为是 Nexus Composer 封装了 nginx / 是本地代理的锅」这种反复出现的误解。
+        // A 413 comes from the upstream gateway, typically nginx client_max_body_size,
+        // not the local proxy, whose DefaultBodyLimit is 200 MB. Upstream often returns
+        // an unhelpful nginx HTML page. Replace it with actionable upstream guidance to
+        // avoid incorrectly blaming Nexus Composer or the local proxy.
         format!(
             concat!(
                 "Upstream provider rejected the request with HTTP 413 (Payload Too Large). ",
@@ -1563,7 +1582,8 @@ fn codex_proxy_error_json(
         "model".to_string(),
         Value::String(request_model.to_string()),
     );
-    // 仅用于 Codex 本地路由；不要复用到 query 可能携带凭证的端点。
+    // Codex local routing only. Do not reuse for endpoints whose query may contain
+    // credentials.
     error_obj.insert("endpoint".to_string(), Value::String(endpoint.to_string()));
     if let Some(status) = upstream_status {
         error_obj.insert(
@@ -1615,10 +1635,10 @@ fn compact_error_message(message: &str, max_chars: usize) -> String {
 }
 
 // ============================================================================
-// Gemini API 处理器
+// Gemini API handler.
 // ============================================================================
 
-/// 处理 Gemini API 请求（透传，包括查询参数）
+/// Handles passthrough Gemini API requests, including query parameters.
 pub async fn handle_gemini(
     State(state): State<ProxyState>,
     uri: axum::http::Uri,
@@ -1633,8 +1653,8 @@ pub async fn handle_gemini(
         .await
         .map_err(|e| ProxyError::Internal(format!("Failed to read request body: {e}")))?
         .to_bytes();
-    // GET 类只读端点（/v1beta/models、/v1beta/models/<model> 等）没有请求体，
-    // 不能强制 parse 为 JSON —— 否则空 body 会被拒绝。
+    // Read-only GET endpoints such as /v1beta/models and /v1beta/models/<model> have no
+    // body. Do not force JSON parsing or an empty body will be rejected.
     let body: Value = if body_bytes.is_empty() {
         Value::Null
     } else {
@@ -1642,12 +1662,12 @@ pub async fn handle_gemini(
             .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?
     };
 
-    // Gemini 的模型名称在 URI 中
+    // Gemini carries the model name in the URI.
     let mut ctx = RequestContext::new(&state, &body, &headers, AppType::Gemini, "Gemini", "gemini")
         .await?
         .with_model_from_uri(&uri);
 
-    // 提取完整的路径和查询参数
+    // Extract the full path and query string.
     let endpoint = uri
         .path_and_query()
         .map(|pq| pq.as_str())
@@ -1705,22 +1725,23 @@ fn should_use_claude_transform_streaming(
     requested_streaming || upstream_is_sse || (is_codex_oauth && api_format == "openai_responses")
 }
 
-/// 把 OpenAI Responses SSE 流聚合成一个完整的 Responses JSON 对象，供下游转成 Anthropic
-/// 非流响应。仅在 Codex OAuth 把 `stream:false` 强制升级为 SSE 的场景下调用。
+/// Aggregates an OpenAI Responses SSE stream into one complete Responses JSON object
+/// for downstream Anthropic non-streaming transformation. Used only when Codex OAuth
+/// forces `stream:false` to SSE.
 ///
-/// 复用 `proxy::sse` 的 `take_sse_block`/`strip_sse_field`：`take_sse_block` 同时支持
-/// `\n\n` 与 `\r\n\r\n` 两种分隔符，`strip_sse_field` 兼容带/不带空格的字段写法。
+/// Reuses `proxy::sse` helpers: `take_sse_block` supports both `\n\n` and
+/// `\r\n\r\n`; `strip_sse_field` accepts fields with or without a following space.
 fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     let mut buffer = body.trim_start_matches('\u{feff}').to_string();
     let mut completed_response: Option<Value> = None;
     let mut output_items = Vec::new();
 
-    // strict=false 用于残余尾块：截断的半截 JSON 忽略而非报错，避免破坏
-    // 已聚合好的完整响应（codex_oauth 聚合路径也复用本函数）
+    // strict=false handles a residual tail block: ignore truncated JSON instead of
+    // invalidating an already complete aggregate. The Codex OAuth path also uses this.
     let mut process_block = |block: &str, strict: bool| -> Result<(), ProxyError> {
-        // 残余尾块（strict=false）在已拿到 completed 后整体跳过——codex_oauth 聚合
-        // 路径也复用本函数，已完成后再执行残余里的完整 response.failed/杂事件会把
-        // 成功响应翻成 422（C8）。
+        // Once completed is available, skip a residual tail block entirely. Processing
+        // a complete response.failed or unrelated event after completion would turn a
+        // successful Codex OAuth aggregate into 422 (C8).
         if !strict && completed_response.is_some() {
             return Ok(());
         }
@@ -1779,9 +1800,9 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     while let Some(block) = take_sse_block(&mut buffer) {
         process_block(&block, true)?;
     }
-    // 最后一个事件后可能没有空行分隔（错标 SSE 兜底/非规范上游常见）：
-    // 残余 buffer 当最后一块处理，否则尾部的 response.completed 会被丢掉。
-    // 已完成时的跳过判定在闭包内（C8）。
+    // A mislabeled or nonconforming SSE stream may omit the blank line after its final
+    // event. Process the residual buffer as the last block or response.completed would
+    // be lost. The closure owns the post-completion skip check (C8).
     process_block(&buffer, false)?;
 
     let mut response = completed_response.ok_or_else(|| {
@@ -1801,11 +1822,11 @@ fn responses_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     Ok(response)
 }
 
-/// 判断响应体是否"看起来像" SSE 文本（#2234 兜底嗅探）。
+/// Detects whether a response body looks like SSE text (#2234 fallback sniffing).
 ///
-/// 仅在 JSON 解析已失败后调用：合法 JSON 不可能以这些前缀开头，误判面为零。
-/// 覆盖 SSE 规范的全部四种字段行；包含 ":" 是因为 OpenRouter 等会在流前发
-/// `: PROCESSING` 注释行。
+/// Called only after JSON parsing fails. Valid JSON cannot begin with these prefixes,
+/// so false positives are avoided. Covers all four SSE field lines plus `:` because
+/// gateways such as OpenRouter may emit a `: PROCESSING` comment first.
 fn body_looks_like_sse(body: &str) -> bool {
     let trimmed = body.trim_start_matches('\u{feff}').trim_start();
     ["data:", "event:", "id:", "retry:", ":"]
@@ -1813,9 +1834,10 @@ fn body_looks_like_sse(body: &str) -> bool {
         .any(|prefix| trimmed.starts_with(prefix))
 }
 
-/// 构造带现场诊断的上游解析错误：附 content-type / content-encoding 与 body
-/// 前缀摘要，让客户端收到的报错自带根因判别（"data:"=错标 SSE、"<"=HTML
-/// 拦截页、� 乱码=未解压二进制），不再依赖向用户索要服务端日志。
+/// Builds an upstream parse error with content-type, content-encoding, and a body-prefix
+/// summary. The client can distinguish mislabeled SSE (`data:`), an HTML interception
+/// page (`<`), or undecompressed binary data (replacement characters) without needing
+/// server logs.
 fn upstream_body_parse_error(
     prefix: &str,
     err: &serde_json::Error,
@@ -1828,9 +1850,10 @@ fn upstream_body_parse_error(
     ))
 }
 
-/// SSE 聚合兜底失败时，给聚合器内部错误附加同款现场诊断（content-type/
-/// content-encoding/body 摘要），使命中 #2234 嗅探臂的客户端也拿到根因线索，
-/// 而非仅 "No chat completion choices in upstream SSE" 这类无 header/body 的裸消息。
+/// Adds the same content-type, content-encoding, and body diagnostics when SSE
+/// aggregation fallback fails. Clients on the #2234 sniffing path receive root-cause
+/// evidence instead of a bare message such as "No chat completion choices in upstream
+/// SSE" without headers or body context.
 fn aggregate_fallback_error(
     err: ProxyError,
     headers: &axum::http::HeaderMap,
@@ -1866,7 +1889,7 @@ fn normalize_chat_value(mut value: Value, anthropic: bool) -> Result<Value, Prox
     Ok(value)
 }
 
-/// 现场诊断后缀：content-type、content-encoding 与 body 前 120 字符摘要。
+/// Diagnostic suffix containing content-type, content-encoding, and the first 120 body characters.
 fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> String {
     let header_str = |name: &str| {
         headers
@@ -1882,8 +1905,9 @@ fn body_diagnostics_suffix(headers: &axum::http::HeaderMap, body: &str) -> Strin
     )
 }
 
-/// 取 body 前 `max_chars` 个字符的单行摘要：\r 丢弃、\n 折叠为字面 \n、
-/// 其余控制字符替换为 �，超长加省略号。
+/// Returns a one-line summary of the first `max_chars` body characters: discard `\r`,
+/// render `\n` literally, replace other control characters with the replacement
+/// character, and append an ellipsis when truncated.
 fn body_snippet(body: &str, max_chars: usize) -> String {
     let mut snippet = String::new();
     for c in body.chars().take(max_chars) {
@@ -1900,9 +1924,10 @@ fn body_snippet(body: &str, max_chars: usize) -> String {
     snippet
 }
 
-/// 解析单个 SSE 块的 event 名与 data 负载（多行 data 按规范以 \n 连接）。
-/// 行首允许前导空白后再匹配字段名——与 body_looks_like_sse 的 trim 宽容度对齐，
-/// 否则缩进的 `  data:` 行被嗅探接受却在此静默丢失（C4）。返回 None 表示无 data 行。
+/// Parses the event name and data payload from one SSE block, joining multiline data
+/// with `\n`. Allow leading whitespace before field names to match body_looks_like_sse's
+/// trimming tolerance; otherwise sniffing would accept an indented `  data:` line that
+/// parsing silently drops (C4). Returns None when no data line exists.
 pub(crate) fn sse_block_parts(block: &str, strip_bom: bool) -> Option<(String, String)> {
     let mut event_name = String::new();
     let mut data_lines: Vec<&str> = Vec::new();
@@ -1922,17 +1947,16 @@ pub(crate) fn sse_block_parts(block: &str, strip_bom: bool) -> Option<(String, S
     (!data_lines.is_empty()).then(|| (event_name, data_lines.join("\n")))
 }
 
-/// 把 Chat Completions 流式 SSE 聚合为单个 chat.completion JSON（#2234 兜底）。
+/// Aggregates Chat Completions SSE into one chat.completion JSON value (#2234 fallback).
 ///
-/// 专供非流式分支使用：上游对 stream:false 返回了 SSE 体但 Content-Type 没标
-/// text/event-stream，header 检查（is_sse）失效。聚合后喂给既有非流转换器
-/// （Claude 侧 openai_to_anthropic、Codex 侧 chat_completion_to_response_with_context），
-/// 客户端拿到的仍是合法 JSON，非流语义不变。
-/// 增量合并语义与 providers/streaming.rs 对齐：tool_calls 按 delta.index 定位，
-/// id/name 出现即覆盖、arguments 字符串拼接；reasoning 各形态（reasoning_content /
-/// reasoning / reasoning_details）经 codex_chat_common 公共提取器并入同一累加器；
-/// finish_reason 首个非 null 即锁定（kimi-k2.6 会在 tool_use 后再发带
-/// finish_reason 的尾块，见 streaming.rs）。
+/// Used by non-streaming branches when upstream returns SSE for stream:false without a
+/// text/event-stream Content-Type, defeating is_sse. Feed the aggregate to existing
+/// non-streaming transformers (`openai_to_anthropic` for Claude and
+/// `chat_completion_to_response_with_context` for Codex), preserving JSON semantics.
+/// Incremental merge behavior matches providers/streaming.rs: locate tool calls by
+/// delta.index, replace id/name when present, append argument fragments, combine all
+/// reasoning aliases through codex_chat_common, and lock the first non-null
+/// finish_reason. Kimi-k2.6 may send another finish_reason after tool_use.
 fn chat_sse_to_response_value(body: &str) -> Result<Value, ProxyError> {
     chat_sse_to_response_value_with_mode(body, false)
 }
@@ -1944,8 +1968,8 @@ pub(crate) fn chat_sse_to_response_value_for_normalization(
 }
 
 fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<Value, ProxyError> {
-    // 剥 BOM：嗅探器接受 BOM 开头，但 strip_sse_field 按行首精确匹配，
-    // 不剥会让首个 data 行静默丢失
+    // Strip the BOM. Sniffing accepts it, but strip_sse_field matches at line start and
+    // would otherwise silently lose the first data line.
     let mut buffer = body.trim_start_matches('\u{feff}').to_string();
 
     let mut id = Value::Null;
@@ -1953,9 +1977,9 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
     let mut model = Value::Null;
     let mut content = String::new();
     let mut reasoning_content = String::new();
-    // tool_calls 以 BTreeMap 按 index 聚合：上游可控的 index（u64）不会 densify
-    // 数组——旧的 `while len() <= index { push }` 写法遇到 index=4e9 会 OOM 整个
-    // 进程（C1）。BTreeMap 既免去无界分配，又天然保持 index 有序输出。
+    // Aggregate tool_calls by index in a BTreeMap. An upstream-controlled u64 index
+    // must not densify an array; the old `while len() <= index { push }` could OOM on
+    // index=4e9 (C1). BTreeMap avoids unbounded allocation and preserves index order.
     let mut tool_calls: std::collections::BTreeMap<usize, Value> =
         std::collections::BTreeMap::new();
     let mut legacy_calls = std::collections::BTreeMap::new();
@@ -1964,9 +1988,9 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
     let mut saw_choice = false;
     let mut saw_done = false;
 
-    // strict=false 用于残余尾块：截断的半截 JSON 忽略而非报错，与
-    // responses_sse_to_response_value 的残余处理对称（C2），否则一个被掐断的
-    // 尾块会把已聚合完整的响应误杀成 422。
+    // strict=false ignores truncated JSON in a residual tail, symmetric with
+    // responses_sse_to_response_value (C2). A severed tail must not turn an already
+    // complete aggregate into 422.
     let mut process_event =
         |event_name: &str, data_str: &str, strict: bool| -> Result<(), ProxyError> {
             let trimmed = data_str.trim();
@@ -1987,9 +2011,9 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                 }
             };
 
-            // `event: error` 事件：错误由事件名标记，data 体未必有 error 键（直接是
-            // 错误对象）。即便此前已聚合完整 choice 也要据此判失败，否则会把网关的
-            // 配额/限流错误伪装成成功（C18）。
+            // `event: error` marks failure by event name and its data may be the error
+            // object without an error key. Fail even after a complete choice or gateway
+            // quota/rate-limit errors could be disguised as success (C18).
             if event_name.eq_ignore_ascii_case("error") {
                 let message = chunk
                     .get("error")
@@ -1998,9 +2022,10 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                     .unwrap_or_else(|| "upstream error event in SSE stream".to_string());
                 return Err(ProxyError::TransformError(message));
             }
-            // 网关把错误作为普通 data chunk 下发（{"error":{...}}）：仅在 error 含
-            // 可报告消息时判失败。空对象 / 空消息 / null / false 等占位形状（部分
-            // OpenAI 兼容网关每 chunk 都带）不能据此误杀成功流（C12）。
+            // A gateway may send an error in an ordinary data chunk. Fail only when the
+            // error has a reportable message. Empty objects/messages, null, or false are
+            // placeholders emitted on every chunk by some compatible gateways and must
+            // not invalidate a successful stream (C12).
             if let Some(message) = chunk
                 .get("error")
                 .filter(|e| !e.is_null())
@@ -2009,8 +2034,8 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                 return Err(ProxyError::TransformError(message));
             }
 
-            // 首个"有意义"的值锁定 envelope。Azure 的 content-filter 前置块带
-            // ""/0 占位（streaming.rs 有同款空串守卫），不能让占位值冻结字段
+            // The first meaningful value locks each envelope field. Azure content-filter
+            // prelude chunks carry ""/0 placeholders, which must not freeze fields.
             for (slot, key) in [
                 (&mut id, "id"),
                 (&mut created, "created"),
@@ -2022,7 +2047,7 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                     }
                 }
             }
-            // OpenAI 语义：usage 只在最终 chunk 非 null
+            // OpenAI emits non-null usage only on the final chunk.
             if let Some(u) = chunk.get("usage").filter(|u| !u.is_null()) {
                 usage = u.clone();
             }
@@ -2043,22 +2068,23 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                 return Ok(());
             };
 
-            // "见过响应"的证据必须是 choice payload：metadata/usage-only chunk +
-            // [DONE] 的流（全程无 choice）若也算数，会绕过下方两道守卫、
-            // 包装出空内容假成功
+            // Only a choice payload proves that a response was observed. Treating a
+            // metadata/usage-only stream plus [DONE] as evidence would bypass completion
+            // guards and fabricate an empty success.
             saw_choice = true;
 
-            // finish_reason 首个非 null 即锁定（对齐 streaming.rs 的 first-wins：
-            // 多 finish_reason 上游的尾块 "stop" 不能覆盖先到的 "tool_calls"）
+            // Lock the first non-null finish_reason, matching streaming.rs first-wins.
+            // A trailing "stop" must not override an earlier "tool_calls".
             if finish_reason.is_null() {
                 if let Some(fr) = choice.get("finish_reason").filter(|v| !v.is_null()) {
                     finish_reason = fr.clone();
                 }
             }
-            // payload 选择：正常增量走 delta；但假流式中转会把完整 chat.completion
-            // 包成单事件（message 而非 delta），有的还附带空 delta:{}。delta 为空对象
-            // 且存在 message 时改用 message 快照（覆盖此前累计的增量，防混合形态双计），
-            // 否则内容被静默丢弃、完成性守卫又被其 finish_reason 击穿 → 空内容假成功（C3）。
+            // Normal streaming uses delta, but fake-streaming relays may wrap a complete
+            // chat.completion as one message event, sometimes with an empty delta. When
+            // delta is empty and message exists, use the message snapshot and replace
+            // prior deltas to avoid double counting. Otherwise content could be silently
+            // dropped while finish_reason bypasses completion checks (C3).
             let (payload, is_full_message) = if normalize {
                 let payload = choice
                     .get("delta")
@@ -2102,16 +2128,17 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                 }
                 _ => {}
             }
-            // refusal：OpenAI 官方拒绝形态（delta.refusal / message.refusal 字符串）。
-            // 两个下游转换器都把 refusal 当可见内容，漏读会让拒绝响应变空消息假成功（C15）。
+            // Official OpenAI refusal strings appear as delta.refusal or message.refusal.
+            // Both downstream transformers treat them as visible content, so omitting
+            // them would turn a refusal into an empty false success (C15).
             if !normalize {
                 if let Some(refusal) = payload.get("refusal").and_then(|r| r.as_str()) {
                     content.push_str(refusal);
                 }
             }
-            // reasoning 字段穷举提取直接复用 codex_chat_common（reasoning_content >
-            // reasoning 字符串/对象 > reasoning_details），避免第三份手写实现漏档：
-            // MiMo/OpenRouter 等只发 reasoning_details 的 provider 否则会丢思考内容
+            // Reuse codex_chat_common to exhaustively extract reasoning_content,
+            // reasoning string/object, then reasoning_details. A third implementation
+            // could miss reasoning_details-only providers such as MiMo/OpenRouter.
             if let Some(text) = extract_reasoning_field_text(payload) {
                 reasoning_content.push_str(&text);
             }
@@ -2125,9 +2152,9 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
                 .then(|| payload.get("function_call").filter(|v| !v.is_null()))
                 .flatten();
             if let Some(fc) = legacy {
-                // legacy function_call（2023 弃用但仍有中转回传）→ 当单个 tool_call。
-                // 两个下游转换器都支持 function_call，漏读会让 finish_reason
-                // "function_call"→stop_reason "tool_use" 却零工具块、卡死 agent 循环（C17）。
+                // Convert a legacy function_call, deprecated in 2023 but still emitted
+                // by relays, into one tool_call. Otherwise function_call maps to tool_use
+                // with no tool block and stalls the agent loop (C17).
                 let synthetic = json!({
                     "index": 0,
                     "id": fc.get("id").and_then(|v| v.as_str()).unwrap_or(""),
@@ -2148,8 +2175,8 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
             process_event(&event, &data, true)?;
         }
     }
-    // 最后一个事件后可能没有空行分隔（半截流/非规范上游）：残余 buffer 当最后一块
-    // 处理，strict=false 容忍被掐断的尾块（C2）。
+    // A partial or nonconforming stream may omit the final blank separator. Process the
+    // residual buffer as the last block with strict=false to tolerate a severed tail (C2).
     if let Some((event, data)) = sse_block_parts(&buffer, false) {
         process_event(&event, &data, false)?;
     }
@@ -2159,19 +2186,19 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
             "No chat completion choices in upstream SSE".to_string(),
         ));
     }
-    // 完成性守卫：close-delimited 响应的中途截断在字节层不可检测，缺少
-    // finish_reason 与 [DONE] 两个完成证据时按截断处理，避免把半截内容
-    // 包装成"看起来成功"的响应静默返回（比 422 更难诊断的失败形态）。
+    // A close-delimited response can be truncated undetectably at the byte layer. If
+    // both finish_reason and [DONE] are absent, treat it as truncated rather than
+    // silently wrapping partial content as an apparent success.
     if finish_reason.is_null() && !saw_done {
         return Err(ProxyError::TransformError(
             "Upstream SSE stream appears truncated (no finish_reason or [DONE] marker)".to_string(),
         ));
     }
 
-    // tool_calls 终结化：全空壳（index 空洞或未收到任何字段）直接丢弃（避免幽灵
-    // tool_use）；缺 id/name 的按原始 index 回填合成值（对齐 streaming.rs 的
-    // tool_call_{idx}/unknown_tool）——空 id 会破坏 Claude 的 tool_use_id ↔
-    // tool_result 回程
+    // Finalize tool_calls by discarding empty shells from index gaps or missing fields.
+    // Backfill missing id/name from the original index, matching streaming.rs
+    // tool_call_{idx}/unknown_tool. An empty ID breaks Claude's tool_use_id-to-tool_result
+    // round trip.
     let tool_calls: Vec<Value> = tool_calls
         .into_iter()
         .filter_map(|(index, mut tool)| {
@@ -2217,8 +2244,9 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
         }
     }
 
-    // 上游未回传有效 id 时合成 UUID：留 null/"" 会让下游 dedup_request_id 退化为
-    // 常量 "session:" 全局碰撞，INSERT OR REPLACE 静默覆盖前序 usage 行、少计成本（C9）。
+    // Synthesize a UUID when upstream omits a valid ID. Null or empty IDs reduce
+    // downstream dedup_request_id to the constant "session:", causing global collisions
+    // and INSERT OR REPLACE to overwrite earlier usage rows (C9).
     let id = if envelope_value_meaningful(&id) {
         id
     } else {
@@ -2242,8 +2270,9 @@ fn chat_sse_to_response_value_with_mode(body: &str, normalize: bool) -> Result<V
     Ok(response)
 }
 
-/// envelope 字段是否"有意义"：过滤 null、空串与数值 0（含浮点 0.0——Azure
-/// content-filter 前置块的占位值），避免占位值抢先冻结 id/model/created。
+/// Returns whether an envelope value is meaningful. Filters null, empty strings, and
+/// numeric zero (including Azure content-filter's 0.0 placeholder) so placeholders do
+/// not freeze id/model/created.
 fn envelope_value_meaningful(v: &Value) -> bool {
     match v {
         Value::Null => false,
@@ -2253,9 +2282,10 @@ fn envelope_value_meaningful(v: &Value) -> bool {
     }
 }
 
-/// 合并单条 tool_calls 增量到按 index 聚合的 BTreeMap：OpenAI 流式把 id/name 放
-/// 首个增量、arguments 分片下发，按 delta.index 定位目标；缺 index 时退到所在数组
-/// 中的位置（message 形态的完整 tool_calls 常不带 index，按 0 会互相覆盖）。
+/// Merges one tool_calls delta into a BTreeMap keyed by index. OpenAI streaming sends
+/// id/name in the first delta and fragments arguments. Use delta.index when present,
+/// otherwise the array position; complete message tool_calls often omit index and would
+/// overwrite one another if all defaulted to zero.
 fn merge_tool_call_delta(
     tool_calls: &mut std::collections::BTreeMap<usize, Value>,
     delta: &Value,
@@ -2288,9 +2318,9 @@ fn merge_tool_call_delta(
         {
             target["function"]["name"] = json!(name);
         }
-        // arguments：string 直接拼接；object/array 序列化后拼接——非流 message
-        // 快照常把 arguments 作对象回传（OpenAI 兼容偏差），只认 string 会丢参数
-        // 致工具空输入执行（C16）
+        // Append string arguments directly; serialize object/array arguments first.
+        // Non-streaming message snapshots often return an object as a compatibility
+        // deviation, and accepting only strings would execute tools with empty input (C16).
         match func.get("arguments") {
             Some(Value::String(args)) => {
                 if let Some(existing) = target["function"]["arguments"].as_str() {
@@ -2309,7 +2339,7 @@ fn merge_tool_call_delta(
 }
 
 // ============================================================================
-// 使用量记录（保留用于 Claude 转换逻辑）
+// Usage recording retained for Claude transformation.
 // ============================================================================
 
 fn log_forward_error(
@@ -2336,14 +2366,14 @@ fn log_forward_error(
         Some(ctx.session_id.clone()),
         None,
     ) {
-        log::warn!("记录失败请求日志失败: {e}");
+        log::warn!("Failed to log failed request: {e}");
     }
 }
 
-/// 记录请求使用量
+/// Records request usage.
 ///
-/// `outbound_model` 是「按请求计价」模式的锚点：实际发往上游的模型
-/// （路由接管映射后的真值，无映射时等于 request_model）。
+/// `outbound_model` anchors per-request pricing to the model actually sent upstream.
+/// It is the post-takeover mapped truth, or `request_model` when no mapping applies.
 #[allow(clippy::too_many_arguments)]
 async fn log_usage(
     state: &ProxyState,
@@ -2397,7 +2427,7 @@ async fn log_usage(
         None, // provider_type
         is_streaming,
     ) {
-        log::warn!("[USG-001] 记录使用量失败: {e}");
+        log::warn!("[USG-001] Failed to record usage: {e}");
     }
 }
 
@@ -2617,16 +2647,16 @@ mod tests {
     fn body_looks_like_sse_detects_unlabeled_sse_prefixes() {
         assert!(body_looks_like_sse("data: {\"id\":\"1\"}\n\n"));
         assert!(body_looks_like_sse("event: message\ndata: {}\n\n"));
-        // SSE 规范的另两种字段行也可能打头
+        // The other two SSE field-line types may also appear first.
         assert!(body_looks_like_sse("id: 1\ndata: {}\n\n"));
         assert!(body_looks_like_sse("retry: 3000\ndata: {}\n\n"));
-        // OpenRouter 会在流前发注释行
+        // OpenRouter may emit a comment before the stream.
         assert!(body_looks_like_sse(
             ": OPENROUTER PROCESSING\n\ndata: {}\n\n"
         ));
-        // BOM + 前导空白
+        // BOM plus leading whitespace.
         assert!(body_looks_like_sse("\u{feff}\n  data: {}\n\n"));
-        // HTML 拦截页与普通文本不应误判为 SSE
+        // Do not misclassify HTML interception pages or ordinary text as SSE.
         assert!(!body_looks_like_sse("<html><body>blocked</body></html>"));
         assert!(!body_looks_like_sse("Bad Gateway"));
         assert!(!body_looks_like_sse(""));
@@ -2674,7 +2704,7 @@ mod tests {
 
     #[test]
     fn chat_sse_to_response_value_collects_reasoning_alias() {
-        // OpenRouter/Kimi 用 reasoning（字符串），部分网关用对象形态
+        // OpenRouter/Kimi use a reasoning string; some gateways use an object.
         let sse = "data: {\"id\":\"c1\",\"model\":\"kimi-k2.6\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"think\"},\"finish_reason\":null}]}\n\n\
 data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":{\"content\":\"ing\"},\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -2689,8 +2719,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":{\"conte
 
     #[test]
     fn chat_sse_to_response_value_collects_reasoning_details() {
-        // MiMo/OpenRouter 等只发 reasoning_details（数组形态）的 provider，
-        // 经公共提取器兜底，不能丢思考内容
+        // Providers such as MiMo/OpenRouter may emit only reasoning_details arrays.
+        // The shared extractor must preserve that reasoning.
         let sse = "data: {\"id\":\"c1\",\"model\":\"mimo\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"think\"}]},\"finish_reason\":null}]}\n\n\
 data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"ing\"}],\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -2705,7 +2735,7 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_details\":
 
     #[test]
     fn responses_sse_to_response_value_handles_missing_trailing_blank_line() {
-        // 错标 SSE 兜底/非规范上游：最后的 response.completed 后没有空行分隔
+        // Mislabeled or nonconforming SSE may omit the blank line after response.completed.
         let sse = "event: response.completed\n\
 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tail\",\"status\":\"completed\",\"model\":\"gpt-5.4\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n";
 
@@ -2716,7 +2746,8 @@ data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_tail\",\"stat
 
     #[test]
     fn responses_sse_to_response_value_ignores_truncated_trailing_block() {
-        // 截断的残余尾块不能破坏已聚合好的完整响应（codex_oauth 路径复用本函数）
+        // A truncated residual tail must not invalidate an already complete aggregate.
+        // The Codex OAuth path reuses this function.
         let sse = "event: response.completed\n\
 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"model\":\"gpt-5.4\",\"output\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":1}}}\n\
 \n\
@@ -2730,7 +2761,8 @@ data: {\"type\":\"resp";
 
     #[test]
     fn chat_sse_to_response_value_skips_azure_placeholder_envelope() {
-        // Azure content-filter 前置块带 ""/0 占位，不能冻结 envelope 字段
+        // Azure content-filter preludes carry ""/0 placeholders that must not freeze
+        // envelope fields.
         let sse = "data: {\"id\":\"\",\"model\":\"\",\"created\":0,\"object\":\"\",\"choices\":[],\"prompt_filter_results\":[]}\n\n\
 data: {\"id\":\"chatcmpl-real\",\"model\":\"gpt-5.4\",\"created\":42,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -2743,7 +2775,8 @@ data: {\"id\":\"chatcmpl-real\",\"model\":\"gpt-5.4\",\"created\":42,\"choices\"
 
     #[test]
     fn chat_sse_to_response_value_tolerates_null_error_field() {
-        // one-api 系网关每个 chunk 都带 "error": null，不能误判为上游错误
+        // one-api gateways may attach `"error": null` to every chunk; it is not an
+        // upstream error.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"error\":null,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -2753,8 +2786,8 @@ data: {\"id\":\"chatcmpl-real\",\"model\":\"gpt-5.4\",\"created\":42,\"choices\"
 
     #[test]
     fn chat_sse_to_response_value_first_finish_reason_wins() {
-        // kimi-k2.6 等会在 tool_use 后再发带 finish_reason 的尾块，
-        // 尾块 "stop" 不能覆盖先到的 "tool_calls"（对齐 streaming.rs first-wins）
+        // Kimi-k2.6 may send a trailing finish_reason after tool_use. Its `stop` must not
+        // override the earlier `tool_calls`, matching streaming.rs first-wins.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n\
 data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -2765,7 +2798,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"
 
     #[test]
     fn chat_sse_to_response_value_unwraps_message_shaped_fake_stream() {
-        // 假流式中转把完整 chat.completion 包成单个 SSE 事件（message 而非 delta）
+        // A fake-streaming relay wraps a complete chat.completion in one SSE message
+        // event rather than a delta.
         let sse = "data: {\"id\":\"c1\",\"object\":\"chat.completion\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"full answer\"},\"finish_reason\":\"stop\"}]}\n\n\
 data: [DONE]\n\n";
 
@@ -2777,7 +2811,8 @@ data: [DONE]\n\n";
 
     #[test]
     fn chat_sse_to_response_value_message_snapshot_overrides_deltas() {
-        // 混合形态：先发增量再发完整 message 快照时，快照覆盖增量（防双计）
+        // In a mixed stream, a complete message snapshot after deltas replaces those
+        // deltas to prevent double counting.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par\"},\"finish_reason\":null}]}\n\n\
 data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"full\"},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -2788,7 +2823,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant
 
     #[test]
     fn chat_sse_to_response_value_backfills_sparse_tool_call_ids() {
-        // index 空洞的空壳被丢弃；缺 id 的按原始 index 回填 tool_call_{idx}
+        // Discard shells from index gaps and backfill a missing ID as tool_call_{idx}
+        // using its original index.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"function\":{\"name\":\"f2\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -2796,14 +2832,19 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant
         let tool_calls = response["choices"][0]["message"]["tool_calls"]
             .as_array()
             .unwrap();
-        assert_eq!(tool_calls.len(), 1, "index 0 的空壳应被丢弃");
+        assert_eq!(
+            tool_calls.len(),
+            1,
+            "The empty shell at index 0 should be discarded"
+        );
         assert_eq!(tool_calls[0]["id"], "tool_call_1");
         assert_eq!(tool_calls[0]["function"]["name"], "f2");
     }
 
     #[test]
     fn chat_sse_to_response_value_strips_bom_before_parsing() {
-        // 嗅探器接受 BOM，块解析也必须剥掉它，否则首个 data 行静默丢失
+        // Sniffing accepts a BOM, so block parsing must strip it or silently lose the
+        // first data line.
         let sse = "\u{feff}data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -2819,7 +2860,7 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant
         );
         let long = "a".repeat(200);
         let snippet = body_snippet(&long, 120);
-        assert_eq!(snippet.chars().count(), 121); // 120 个字符 + 省略号
+        assert_eq!(snippet.chars().count(), 121); // 120 characters plus the ellipsis.
         assert!(snippet.ends_with('…'));
     }
 
@@ -2873,7 +2914,7 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":
 
     #[test]
     fn chat_sse_to_response_value_handles_missing_trailing_blank_line() {
-        // 非规范上游/半截流：最后一个事件后没有空行分隔
+        // A nonconforming or partial stream may omit the blank line after its last event.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -2883,7 +2924,7 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":
 
     #[test]
     fn chat_sse_to_response_value_handles_crlf_delimiters() {
-        // 真实 HTTP SSE 按规范使用 \r\n\r\n 分隔事件
+        // Real HTTP SSE separates events with `\r\n\r\n`.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\r\n\
 \r\n\
 data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\r\n\
@@ -2910,8 +2951,9 @@ data: [DONE]\r\n\
 
     #[test]
     fn chat_sse_to_response_value_rejects_truncated_stream() {
-        // 只有内容增量、无 finish_reason 也无 [DONE]：close-delimited 截断不可
-        // 在字节层检测，必须按截断报错而非静默返回半截内容
+        // A content delta without finish_reason or [DONE] is an undetectable
+        // close-delimited truncation at the byte layer. Report truncation rather than
+        // silently returning partial content.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"par\"},\"finish_reason\":null}]}\n\n";
 
         let err = chat_sse_to_response_value(sse).unwrap_err();
@@ -2923,7 +2965,8 @@ data: [DONE]\r\n\
 
     #[test]
     fn chat_sse_to_response_value_accepts_done_marker_without_finish_reason() {
-        // 非规范上游可能不发 finish_reason 但正常收尾 [DONE]：视为完成
+        // A nonconforming upstream may omit finish_reason but end with [DONE]; accept it
+        // as complete.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n\
 data: [DONE]\n\n";
 
@@ -2949,8 +2992,8 @@ data: [DONE]\n\n";
 
     #[test]
     fn chat_sse_to_response_value_rejects_choiceless_stream_despite_done() {
-        // metadata/usage-only chunk + [DONE]、全程无 choice payload：
-        // 不能凭 [DONE] 包装成空内容假成功（saw_choice 必须以 choice 为证据）
+        // A metadata/usage-only chunk plus [DONE] has no choice payload. [DONE] alone
+        // must not fabricate an empty success; saw_choice requires choice evidence.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":0,\"total_tokens\":1}}\n\n\
 data: [DONE]\n\n";
 
@@ -2965,8 +3008,8 @@ data: [DONE]\n\n";
 
     #[test]
     fn chat_sse_to_response_value_huge_tool_call_index_does_not_oom() {
-        // C1：上游可控的巨大 index 不得 densify 数组（旧实现会 OOM 整个进程）；
-        // BTreeMap 只占一个槽，且原始 index 用于回填合成 id
+        // C1: an upstream-controlled huge index must not densify an array and OOM the
+        // process. BTreeMap uses one slot and retains the index for synthesized IDs.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":4000000000,\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -2980,8 +3023,8 @@ data: [DONE]\n\n";
 
     #[test]
     fn chat_sse_to_response_value_empty_delta_falls_back_to_message_snapshot() {
-        // C3：同一 choice 同时带空 delta:{} 与完整 message 快照——不能因 delta 键
-        // 存在就短路到空 delta、丢掉 message 内容（finish_reason 还会击穿守卫）
+        // C3: when a choice has both empty delta:{} and a complete message snapshot, the
+        // delta key must not discard message content while finish_reason bypasses guards.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{},\"message\":{\"role\":\"assistant\",\"content\":\"full answer\"},\"finish_reason\":\"stop\"}]}\n\n\
 data: [DONE]\n\n";
 
@@ -3010,8 +3053,8 @@ data: [DONE]\n\n";
 
     #[test]
     fn chat_sse_to_response_value_empty_delta_scaffold_does_not_wipe_real_content() {
-        // C3 反向陷阱：每个 chunk 都带真内容 delta + 空 message 壳时，不能让空
-        // message 触发 clear 抹掉累计内容（delta 非空则优先 delta，不走快照覆盖）
+        // C3 inverse trap: when every chunk has a real delta plus an empty message shell,
+        // the shell must not clear accumulated content. Prefer a non-empty delta.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"message\":{},\"finish_reason\":null}]}\n\n\
 data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"},\"message\":{},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -3021,7 +3064,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"
 
     #[test]
     fn chat_sse_to_response_value_object_form_tool_arguments_preserved() {
-        // C16：message 快照里 arguments 作对象回传时序列化保留，不能丢成空输入
+        // C16: serialize object-valued arguments in a message snapshot instead of
+        // dropping them to empty tool input.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"get_weather\",\"arguments\":{\"city\":\"SF\"}}}]},\"finish_reason\":\"tool_calls\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -3034,7 +3078,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"
 
     #[test]
     fn chat_sse_to_response_value_collects_refusal() {
-        // C15：delta.refusal 字符串并入可见内容，避免拒绝响应变空消息假成功
+        // C15: include delta.refusal in visible content so a refusal does not become an
+        // empty false success.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"refusal\":\"I can't help with that.\"},\"finish_reason\":\"stop\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -3046,8 +3091,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"
 
     #[test]
     fn chat_sse_to_response_value_maps_legacy_function_call() {
-        // C17：legacy function_call → 单个 tool_call，避免 finish_reason
-        // function_call 映射成 tool_use 却零工具块卡死 agent
+        // C17: map legacy function_call to one tool_call. Mapping finish_reason to
+        // tool_use without a tool block would stall the agent.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":null,\"function_call\":{\"name\":\"get_weather\",\"arguments\":\"{\\\"city\\\":\\\"SF\\\"}\"}},\"finish_reason\":\"function_call\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -3058,8 +3103,8 @@ data: {\"id\":\"c1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" there\"
 
     #[test]
     fn chat_sse_to_response_value_event_error_fails_even_after_complete_choice() {
-        // C18：event:error（data 无 error 键）即便跟在完整 choice 后也判失败，
-        // 不能伪装成成功
+        // C18: event:error must fail even after a complete choice when data has no error
+        // key; do not disguise it as success.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"stop\"}]}\n\n\
 event: error\n\
 data: {\"message\":\"insufficient_user_quota\",\"code\":429}\n\n";
@@ -3075,7 +3120,8 @@ data: {\"message\":\"insufficient_user_quota\",\"code\":429}\n\n";
 
     #[test]
     fn chat_sse_to_response_value_tolerates_empty_error_placeholder() {
-        // C12：error 为空对象 / 空消息等占位形状不得误杀成功流
+        // C12: empty-object or empty-message error placeholders must not invalidate a
+        // successful stream.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"error\":{},\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -3084,7 +3130,8 @@ data: {\"message\":\"insufficient_user_quota\",\"code\":429}\n\n";
 
     #[test]
     fn chat_sse_to_response_value_tolerates_truncated_residual_after_complete() {
-        // C2：完整 finish_reason 块后尾块被掐断（半截 JSON），不能误杀已完整的聚合
+        // C2: truncated JSON after a complete finish_reason block must not invalidate
+        // the completed aggregate.
         let sse = "data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n\
 data: {\"usage\":{\"prompt_to";
 
@@ -3094,7 +3141,8 @@ data: {\"usage\":{\"prompt_to";
 
     #[test]
     fn chat_sse_to_response_value_float_zero_does_not_freeze_envelope() {
-        // C14：浮点 0.0 占位的 created 不得冻结 envelope，真值应能覆盖
+        // C14: a 0.0 created placeholder must not freeze the envelope; a real value may
+        // replace it.
         let sse = "data: {\"id\":\"\",\"model\":\"\",\"created\":0.0,\"choices\":[]}\n\n\
 data: {\"id\":\"chatcmpl-real\",\"model\":\"m\",\"created\":42,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
@@ -3105,7 +3153,8 @@ data: {\"id\":\"chatcmpl-real\",\"model\":\"m\",\"created\":42,\"choices\":[{\"i
 
     #[test]
     fn chat_sse_to_response_value_synthesizes_id_when_absent() {
-        // C9：上游无 id 时合成非空唯一 id，避免下游 dedup 退化成常量碰撞覆盖
+        // C9: synthesize a unique non-empty ID when upstream omits one to prevent
+        // downstream dedup from collapsing to a constant collision.
         let sse = "data: {\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
         let r1 = chat_sse_to_response_value(sse).unwrap();
@@ -3113,12 +3162,16 @@ data: {\"id\":\"chatcmpl-real\",\"model\":\"m\",\"created\":42,\"choices\":[{\"i
         let id1 = r1["id"].as_str().unwrap();
         let id2 = r2["id"].as_str().unwrap();
         assert!(!id1.is_empty());
-        assert_ne!(id1, id2, "两次无 id 聚合应产出不同 id 以避免 dedup 碰撞");
+        assert_ne!(
+            id1, id2,
+            "Separate ID-less aggregates need distinct IDs to avoid dedup collisions"
+        );
     }
 
     #[test]
     fn chat_sse_to_response_value_accepts_indented_data_lines() {
-        // C4：行首缩进的 data 行（嗅探器宽容接受）也应能被聚合，不静默丢失
+        // C4: indented data lines accepted by sniffing must also aggregate instead of
+        // disappearing silently.
         let sse = "  data: {\"id\":\"c1\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"stop\"}]}\n\n";
 
         let response = chat_sse_to_response_value(sse).unwrap();
@@ -3127,8 +3180,8 @@ data: {\"id\":\"chatcmpl-real\",\"model\":\"m\",\"created\":42,\"choices\":[{\"i
 
     #[test]
     fn responses_sse_completed_then_trailing_failed_keeps_success() {
-        // C8：已拿到 response.completed 后，残余里的完整 response.failed 不得翻车
-        // （codex_oauth 聚合路径复用本函数，此前该尾块被忽略=成功）
+        // C8: after response.completed, a complete response.failed in the residual tail
+        // must not overturn success. The Codex OAuth aggregate path reuses this behavior.
         let sse = "event: response.completed\n\
 data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_ok\",\"status\":\"completed\",\"model\":\"gpt-5.4\",\"output\":[]}}\n\n\
 event: response.failed\n\
@@ -3140,7 +3193,8 @@ data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"boom\
 
     #[test]
     fn aggregated_chat_sse_round_trips_through_openai_to_anthropic() {
-        // 全链路：错标 Content-Type 的 SSE 体 → 聚合 → 既有非流转换器 → Anthropic JSON
+        // End-to-end: mislabeled SSE Content-Type -> aggregate -> existing non-streaming
+        // transformer -> Anthropic JSON.
         let sse = "data: {\"id\":\"chatcmpl-9\",\"created\":1,\"model\":\"gpt-5.4\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hi\"},\"finish_reason\":null}]}\n\n\
 data: {\"id\":\"chatcmpl-9\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":1,\"total_tokens\":5}}\n\n\
 data: [DONE]\n\n";
@@ -3203,8 +3257,9 @@ data: {"type":"response.completed","response":{"id":"resp_1","status":"completed
 
     #[test]
     fn responses_sse_to_response_value_handles_crlf_delimiters() {
-        // 真实 HTTP SSE 按规范使用 \r\n\r\n 分隔事件；take_sse_block 必须同时处理两种分隔符，
-        // 否则此路径在任何标准上游（含 Codex OAuth HTTPS 后端）下都会 TransformError。
+        // Real HTTP SSE separates events with `\r\n\r\n`. take_sse_block must support
+        // both delimiter styles or every standards-compliant upstream, including the
+        // Codex OAuth HTTPS backend, would fail with TransformError.
         let sse = "event: response.output_item.done\r\n\
 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}}\r\n\
 \r\n\
@@ -3241,7 +3296,7 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
 
     #[test]
     fn codex_proxy_forward_error_includes_context_and_cause() {
-        let error = ProxyError::ForwardFailed("连接失败: dns lookup failed".to_string());
+        let error = ProxyError::ForwardFailed("Connection failed: dns lookup failed".to_string());
         let body = codex_proxy_error_json("DeepSeek", "deepseek-chat", "/responses", &error);
 
         let message = body["error"]["message"].as_str().unwrap();
@@ -3275,8 +3330,8 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
 
     #[test]
     fn codex_proxy_413_points_to_upstream_not_local_proxy() {
-        // 模拟上游渠道商 nginx 因 client_max_body_size 返回的 413 HTML 页面
-        // （见 issue #666：长上下文 / 大图 / 大日志撞上游体积上限）
+        // Simulate an upstream nginx 413 HTML page caused by client_max_body_size
+        // (issue #666: long context, large images, or large logs exceed the body limit).
         let error = ProxyError::UpstreamError {
             status: 413,
             body: Some(
@@ -3289,16 +3344,16 @@ data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\"}}\n
         let body = codex_proxy_error_json("HCAI", "gpt-5.5", "/responses", &error);
 
         let message = body["error"]["message"].as_str().unwrap();
-        // 不再误导成「本地代理失败」
+        // Do not mislabel this as a local proxy failure.
         assert!(!message.contains("Nexus Composer local proxy failed"));
-        // 明确指向上游 + 体积超限 + 可操作指引
+        // Identify upstream, the size limit, and an actionable recovery step.
         assert!(message.contains("413"));
         assert!(message.to_lowercase().contains("upstream"));
         assert!(message.contains("/compact"));
-        // 关键：不把整段 nginx HTML 回显给用户
+        // Do not echo the entire nginx HTML page to the user.
         assert!(!message.contains("<html>"));
         assert!(!message.contains("nginx/1.29.6"));
-        // 结构化字段仍然保留，便于程序化消费 / UI 呈现
+        // Preserve structured fields for programmatic consumption and UI rendering.
         assert_eq!(body["error"]["upstream_status"], 413);
         assert_eq!(body["error"]["provider"], "HCAI");
         assert_eq!(body["error"]["model"], "gpt-5.5");

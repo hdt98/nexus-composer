@@ -1,4 +1,4 @@
-//! Usage Logger - 记录 API 请求使用情况
+//! Usage logger for API requests.
 
 use super::calculator::{CostBreakdown, CostCalculator, ModelPricing};
 use super::parser::TokenUsage;
@@ -8,7 +8,7 @@ use crate::services::usage_stats::{find_model_pricing_row, is_placeholder_pricin
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
-/// 请求日志
+/// Request log.
 #[derive(Debug, Clone)]
 pub struct RequestLog {
     pub request_id: String,
@@ -17,10 +17,10 @@ pub struct RequestLog {
     pub app_type: String,
     pub model: String,
     pub request_model: String,
-    /// 写入时实际用于计价的模型名（pricing_model_source 解析后的结果）。
-    /// 落库供回填使用：缺价行补价后必须按写入时的基准重算，而不是
-    /// 用 model/request_model 猜——路由接管下三者可能各不相同。
-    /// 错误行（未计价）为空字符串。
+    /// Model actually used for pricing after resolving `pricing_model_source`.
+    /// Persisted for later backfill: rows missing prices must be recalculated against the
+    /// original basis, not inferred from `model` or `request_model`, because route takeover
+    /// can make all three differ. Empty for unpriced error rows.
     pub pricing_model: String,
     pub usage: TokenUsage,
     pub cost: Option<CostBreakdown>,
@@ -29,15 +29,15 @@ pub struct RequestLog {
     pub status_code: u16,
     pub error_message: Option<String>,
     pub session_id: Option<String>,
-    /// 供应商类型 (claude, claude_auth, codex, gemini, gemini_cli, openrouter)
+    /// Provider type: claude, claude_auth, codex, gemini, gemini_cli, or openrouter.
     pub provider_type: Option<String>,
-    /// 是否为流式请求
+    /// Whether the request is streaming.
     pub is_streaming: bool,
-    /// 成本倍数
+    /// Cost multiplier.
     pub cost_multiplier: String,
 }
 
-/// 使用量记录器
+/// Usage logger.
 pub struct UsageLogger<'a> {
     db: &'a Database,
 }
@@ -47,7 +47,7 @@ impl<'a> UsageLogger<'a> {
         Self { db }
     }
 
-    /// 记录成功的请求
+    /// Records a successful request.
     pub fn log_request(&self, log: &RequestLog) -> Result<(), AppError> {
         let conn = crate::database::lock_conn!(self.db.conn);
 
@@ -109,17 +109,17 @@ impl<'a> UsageLogger<'a> {
                 created_at,
             ],
         )
-        .map_err(|e| AppError::Database(format!("记录请求日志失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to record request log: {e}")))?;
 
-        // 通知前端使用统计有更新（200ms 防抖合并，不阻塞写入路径）
+        // Notify the frontend after a 200 ms debounce without blocking the write path.
         crate::usage_events::notify_log_recorded();
 
         Ok(())
     }
 
-    /// 记录失败的请求
+    /// Records a failed request.
     ///
-    /// 用于记录无法从上游获取 usage 信息的失败请求
+    /// Used when usage data cannot be obtained from upstream.
     #[allow(dead_code, clippy::too_many_arguments)]
     pub fn log_error(
         &self,
@@ -139,7 +139,7 @@ impl<'a> UsageLogger<'a> {
             app_type,
             model,
             request_model,
-            // 错误行未经过计价，留空（回填的 has_usage 闸门也不会碰全 0 行）
+            // Error rows are unpriced. Backfill also skips all-zero rows through `has_usage`.
             pricing_model: String::new(),
             usage: TokenUsage::default(),
             cost: None,
@@ -156,9 +156,9 @@ impl<'a> UsageLogger<'a> {
         self.log_request(&log)
     }
 
-    /// 记录失败的请求（带更多上下文信息）
+    /// Records a failed request with additional context.
     ///
-    /// 相比 log_error，这个方法接受更多参数以提供完整的请求上下文
+    /// Accepts more parameters than `log_error` to preserve complete request context.
     #[allow(clippy::too_many_arguments)]
     pub fn log_error_with_context(
         &self,
@@ -182,7 +182,7 @@ impl<'a> UsageLogger<'a> {
             app_type,
             model,
             request_model,
-            // 错误行未经过计价，留空（回填的 has_usage 闸门也不会碰全 0 行）
+            // Error rows are unpriced. Backfill also skips all-zero rows through `has_usage`.
             pricing_model: String::new(),
             usage: TokenUsage::default(),
             cost: None,
@@ -199,7 +199,7 @@ impl<'a> UsageLogger<'a> {
         self.log_request(&log)
     }
 
-    /// 获取模型定价
+    /// Returns model pricing.
     pub fn get_model_pricing(&self, model_id: &str) -> Result<Option<ModelPricing>, AppError> {
         let conn = crate::database::lock_conn!(self.db.conn);
         let row = find_model_pricing_row(&conn, model_id)?;
@@ -207,21 +207,22 @@ impl<'a> UsageLogger<'a> {
             Some((input, output, cache_read, cache_creation)) => {
                 ModelPricing::from_strings(&input, &output, &cache_read, &cache_creation)
                     .map(Some)
-                    .map_err(|e| AppError::Database(format!("解析定价数据失败: {e}")))
+                    .map_err(|e| AppError::Database(format!("Failed to parse pricing data: {e}")))
             }
             None => Ok(None),
         }
     }
 
-    /// 获取有效的倍率与计费模式来源（供应商优先，未配置则回退全局默认）
+    /// Resolves the effective multiplier and pricing model source.
+    /// Provider settings take priority over global defaults.
     pub async fn resolve_pricing_config(
         &self,
         provider_id: &str,
         app_type: &str,
     ) -> (Decimal, String) {
-        // Claude Desktop 网关没有独立的全局计费配置（proxy_config 的 CHECK 仅
-        // 允许 claude/codex/gemini，前端也只暴露三项），全局默认继承 claude；
-        // 供应商级 meta 覆盖仍按 claude-desktop 查找（providers 表按该 app_type 存）。
+        // Claude Desktop has no separate global pricing configuration because `proxy_config`
+        // and the frontend expose only claude, codex, and gemini. It inherits Claude defaults,
+        // while provider metadata overrides still use `claude-desktop`, matching stored rows.
         let default_app_type = if app_type == "claude-desktop" {
             "claude"
         } else {
@@ -231,7 +232,9 @@ impl<'a> UsageLogger<'a> {
             match self.db.get_default_cost_multiplier(default_app_type).await {
                 Ok(value) => value,
                 Err(e) => {
-                    log::warn!("[USG-003] 获取默认倍率失败 (app_type={app_type}): {e}");
+                    log::warn!(
+                        "[USG-003] Failed to load default multiplier (app_type={app_type}): {e}"
+                    );
                     "1".to_string()
                 }
             };
@@ -239,7 +242,7 @@ impl<'a> UsageLogger<'a> {
             Ok(value) => value,
             Err(e) => {
                 log::warn!(
-                    "[USG-003] 默认倍率解析失败 (app_type={app_type}): {default_multiplier_raw} - {e}"
+                    "[USG-003] Failed to parse default multiplier (app_type={app_type}): {default_multiplier_raw} - {e}"
                 );
                 Decimal::from(1)
             }
@@ -249,7 +252,9 @@ impl<'a> UsageLogger<'a> {
             match self.db.get_pricing_model_source(default_app_type).await {
                 Ok(value) => value,
                 Err(e) => {
-                    log::warn!("[USG-003] 获取默认计费模式失败 (app_type={app_type}): {e}");
+                    log::warn!(
+                    "[USG-003] Failed to load default pricing source (app_type={app_type}): {e}"
+                );
                     PRICING_SOURCE_RESPONSE.to_string()
                 }
             };
@@ -259,7 +264,7 @@ impl<'a> UsageLogger<'a> {
             default_pricing_source_raw
         } else {
             log::warn!(
-                "[USG-003] 默认计费模式无效 (app_type={app_type}): {default_pricing_source_raw}"
+                "[USG-003] Invalid default pricing source (app_type={app_type}): {default_pricing_source_raw}"
             );
             PRICING_SOURCE_RESPONSE.to_string()
         };
@@ -286,7 +291,7 @@ impl<'a> UsageLogger<'a> {
                 Ok(parsed) => parsed,
                 Err(e) => {
                     log::warn!(
-                        "[USG-003] 供应商倍率解析失败 (provider_id={provider_id}): {value} - {e}"
+                        "[USG-003] Failed to parse provider multiplier (provider_id={provider_id}): {value} - {e}"
                     );
                     default_multiplier
                 }
@@ -299,7 +304,7 @@ impl<'a> UsageLogger<'a> {
                 value.to_string()
             }
             Some(value) => {
-                log::warn!("[USG-003] 供应商计费模式无效 (provider_id={provider_id}): {value}");
+                log::warn!("[USG-003] Invalid provider pricing source (provider_id={provider_id}): {value}");
                 default_pricing_source.clone()
             }
             None => default_pricing_source.clone(),
@@ -308,7 +313,7 @@ impl<'a> UsageLogger<'a> {
         (cost_multiplier, pricing_model_source)
     }
 
-    /// 计算并记录请求
+    /// Calculates cost and records the request.
     #[allow(clippy::too_many_arguments)]
     pub fn log_with_calculation(
         &self,
@@ -337,7 +342,7 @@ impl<'a> UsageLogger<'a> {
             || usage.cache_creation_tokens > 0;
 
         if pricing.is_none() && has_usage && !is_placeholder_pricing_model(&pricing_model) {
-            log::warn!("[USG-002] 模型定价未找到，成本将记录为 0: {pricing_model}");
+            log::warn!("[USG-002] Model pricing not found; recording zero cost: {pricing_model}");
         }
 
         let cost = CostCalculator::try_calculate_for_app(
@@ -379,7 +384,7 @@ mod tests {
     fn test_log_request() -> Result<(), AppError> {
         let db = Database::memory()?;
 
-        // 插入测试定价
+        // Insert test pricing.
         {
             let conn = crate::database::lock_conn!(db.conn);
             conn.execute(
@@ -420,7 +425,7 @@ mod tests {
             false,
         )?;
 
-        // 验证记录已插入
+        // Verify that the record was inserted.
         let conn = crate::database::lock_conn!(db.conn);
         let (count, request_model, correlation_id, duration_ms): (
             i64,
@@ -521,7 +526,7 @@ mod tests {
             50,
         )?;
 
-        // 验证错误记录已插入
+        // Verify that the error record was inserted.
         let conn = crate::database::lock_conn!(db.conn);
         let (status, error, duration_ms): (i64, Option<String>, Option<i64>) = conn
             .query_row(

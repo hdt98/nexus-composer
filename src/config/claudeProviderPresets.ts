@@ -1,5 +1,5 @@
 /**
- * 预设供应商配置模板
+ * Provider preset configuration templates.
  */
 import { ProviderCategory, type LocalProxyRequestOverrides } from "../types";
 import {
@@ -23,14 +23,14 @@ export interface TemplateValueConfig {
 }
 
 /**
- * 预设供应商的视觉主题配置
+ * Visual theme configuration for a provider preset.
  */
 export interface PresetTheme {
-  /** 图标类型：'claude' | 'codex' | 'gemini' | 'generic' */
+  /** Icon type: 'claude' | 'codex' | 'gemini' | 'generic'. */
   icon?: "claude" | "codex" | "gemini" | "generic";
-  /** 背景色（选中状态），支持 Tailwind 类名或 hex 颜色 */
+  /** Selected-state background color as a Tailwind class or hex value. */
   backgroundColor?: string;
-  /** 文字色（选中状态），支持 Tailwind 类名或 hex 颜色 */
+  /** Selected-state text color as a Tailwind class or hex value. */
   textColor?: string;
 }
 
@@ -38,53 +38,54 @@ export interface ProviderPreset {
   name: string;
   nameKey?: string; // i18n key for localized display name
   websiteUrl: string;
-  // 新增：第三方/聚合等可单独配置获取 API Key 的链接
+  // Optional API key URL for third-party or aggregator providers.
   apiKeyUrl?: string;
   settingsConfig: object;
-  isOfficial?: boolean; // 标识是否为官方预设
-  isPartner?: boolean; // 标识是否为商业合作伙伴
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
-  partnerPromotionKey?: string; // 合作伙伴促销信息的 i18n key
-  category?: ProviderCategory; // 新增：分类
-  // 新增：指定该预设所使用的 API Key 字段名（默认 ANTHROPIC_AUTH_TOKEN）
+  isOfficial?: boolean; // Whether this is an official preset.
+  isPartner?: boolean; // Whether this is a commercial partner.
+  primePartner?: boolean; // Featured top-tier partner whose badge uses a heart.
+  partnerPromotionKey?: string; // i18n key for partner promotional text.
+  category?: ProviderCategory; // Provider category.
+  // API key field used by this preset; defaults to ANTHROPIC_AUTH_TOKEN.
   apiKeyField?: "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
-  // 新增：模板变量定义，用于动态替换配置中的值
-  templateValues?: Record<string, TemplateValueConfig>; // editorValue 存储编辑器中的实时输入值
-  // 新增：请求地址候选列表（用于地址管理/测速）
+  // Template variables for dynamically substituting configuration values.
+  templateValues?: Record<string, TemplateValueConfig>; // editorValue stores the current editor input.
+  // Candidate request endpoints used for endpoint management and speed tests.
   endpointCandidates?: string[];
-  // 新增：视觉主题配置
+  // Visual theme configuration.
   theme?: PresetTheme;
-  // 图标配置
-  icon?: string; // 图标名称
-  iconColor?: string; // 图标颜色
+  // Icon configuration.
+  icon?: string; // Icon name.
+  iconColor?: string; // Icon color.
 
-  // Claude API 格式（仅 Claude 供应商使用）
-  // - "anthropic" (默认): Anthropic Messages API 格式，直接透传
-  // - "openai_chat": OpenAI Chat Completions 格式，需要格式转换
-  // - "openai_responses": OpenAI Responses API 格式，需要格式转换
-  // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
+  // Claude API format, used only by Claude providers.
+  // - "anthropic" (default): pass through Anthropic Messages API requests.
+  // - "openai_chat": convert to the OpenAI Chat Completions format.
+  // - "openai_responses": convert to the OpenAI Responses API format.
+  // - "gemini_native": convert to the Gemini Native generateContent format.
   apiFormat?:
     | "anthropic"
     | "openai_chat"
     | "openai_responses"
     | "gemini_native";
 
-  // 供应商类型标识（用于特殊供应商检测）
-  // - "github_copilot": GitHub Copilot 供应商（需要 OAuth 认证）
-  // - "codex_oauth": OpenAI Codex via ChatGPT Plus/Pro 反代（需要 OAuth 认证）
+  // Provider type identifier for providers requiring special handling.
+  // - "github_copilot": GitHub Copilot provider requiring OAuth.
+  // - "codex_oauth": OpenAI Codex proxy through ChatGPT Plus/Pro requiring OAuth.
   providerType?: "github_copilot" | "codex_oauth" | "nexus";
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
   managedNexusPresetVersion?: number;
   apiKeyOptional?: boolean;
 
-  // 是否需要 OAuth 认证（而非 API Key）
+  // Whether this provider requires OAuth instead of an API key.
   requiresOAuth?: boolean;
 
-  // 是否在 UI 中隐藏该预设（预设仍存在，仅不在列表中显示）
+  // Whether to hide this preset in the UI while retaining its definition.
   hidden?: boolean;
 
-  // 获取模型列表使用的完整 URL（覆写自动候选逻辑）
-  // 缺省时后端基于 baseURL 自动尝试 /v1/models、/models 以及剥离已知兼容子路径后的变体。
+  // Full model-list URL overriding automatic candidate resolution.
+  // By default, the backend derives candidates from baseURL using /v1/models, /models,
+  // and variants with known compatibility subpaths removed.
   modelsUrl?: string;
 }
 

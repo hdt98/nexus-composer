@@ -1,5 +1,5 @@
 /**
- * Codex 预设供应商配置模板
+ * Codex provider preset configuration templates.
  */
 import { ProviderCategory } from "../types";
 import type {
@@ -24,26 +24,26 @@ export interface CodexProviderPreset {
   name: string;
   nameKey?: string; // i18n key for localized display name
   websiteUrl: string;
-  // 第三方供应商可提供单独的获取 API Key 链接
+  // Third-party providers may expose a separate API key URL.
   apiKeyUrl?: string;
-  auth: Record<string, any>; // 将写入 ~/.codex/auth.json
-  config: string; // 将写入 ~/.codex/config.toml（TOML 字符串）
-  isOfficial?: boolean; // 标识是否为官方预设
-  isPartner?: boolean; // 标识是否为商业合作伙伴
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
-  partnerPromotionKey?: string; // 合作伙伴促销信息的 i18n key
-  category?: ProviderCategory; // 新增：分类
-  isCustomTemplate?: boolean; // 标识是否为自定义模板
-  // 新增：请求地址候选列表（用于地址管理/测速）
+  auth: Record<string, any>; // Written to ~/.codex/auth.json.
+  config: string; // TOML string written to ~/.codex/config.toml.
+  isOfficial?: boolean; // Whether this is an official preset.
+  isPartner?: boolean; // Whether this is a commercial partner.
+  primePartner?: boolean; // Featured top-tier partner whose badge uses a heart.
+  partnerPromotionKey?: string; // i18n key for partner promotional text.
+  category?: ProviderCategory; // Provider category.
+  isCustomTemplate?: boolean; // Whether this is a custom template.
+  // Candidate request endpoints used for endpoint management and speed tests.
   endpointCandidates?: string[];
-  // 新增：视觉主题配置
+  // Visual theme configuration.
   theme?: PresetTheme;
-  // 图标配置
-  icon?: string; // 图标名称
-  iconColor?: string; // 图标颜色
-  // Codex API 格式
+  // Icon configuration.
+  icon?: string; // Icon name.
+  iconColor?: string; // Icon color.
+  // Codex API format.
   apiFormat?: CodexApiFormat;
-  // Codex Chat 本地路由模式下的模型目录
+  // Model catalog for Codex Chat local routing mode.
   modelCatalog?: CodexCatalogModel[];
   // Codex Responses -> Chat Completions reasoning capability defaults
   codexChatReasoning?: CodexChatReasoning;
@@ -54,7 +54,7 @@ export interface CodexProviderPreset {
 }
 
 /**
- * 生成第三方供应商的 auth.json
+ * Generate auth.json for a third-party provider.
  */
 export function generateThirdPartyAuth(apiKey: string): Record<string, any> {
   return {
@@ -63,7 +63,7 @@ export function generateThirdPartyAuth(apiKey: string): Record<string, any> {
 }
 
 /**
- * 生成第三方供应商的 config.toml
+ * Generate config.toml for a third-party provider.
  */
 export function generateThirdPartyConfig(
   providerName: string,

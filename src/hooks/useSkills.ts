@@ -17,9 +17,9 @@ import type { AppId } from "@/lib/api/types";
 import { mergeImportedSkills } from "@/hooks/useSkills.helpers";
 
 /**
- * 查询所有已安装的 Skills
- * 使用 staleTime: Infinity 和 placeholderData: keepPreviousData
- * 实现首次进入使用缓存，只有刷新时才重新获取
+ * Query all installed skills.
+ * staleTime: Infinity and placeholderData: keepPreviousData reuse cached data
+ * on initial entry and fetch again only when explicitly refreshed.
  */
 export function useInstalledSkills() {
   return useQuery({
@@ -49,9 +49,9 @@ export function useDeleteSkillBackup() {
 }
 
 /**
- * 发现可安装的 Skills（从仓库获取）
- * 使用 staleTime: Infinity 和 placeholderData: keepPreviousData
- * 实现首次进入使用缓存，只有刷新时才重新获取
+ * Discover installable skills from repositories.
+ * staleTime: Infinity and placeholderData: keepPreviousData reuse cached data
+ * on initial entry and fetch again only when explicitly refreshed.
  */
 export function useDiscoverableSkills() {
   return useQuery({
@@ -63,8 +63,7 @@ export function useDiscoverableSkills() {
 }
 
 /**
- * 安装 Skill
- * 成功后直接更新缓存，不触发重新加载/刷新
+ * Install a skill and update the cache directly without reloading or refetching.
  */
 export function useInstallSkill() {
   const queryClient = useQueryClient();
@@ -78,7 +77,7 @@ export function useInstallSkill() {
     }) => skillsApi.installUnified(skill, currentApp),
     onSuccess: (installedSkill, _vars, _ctx) => {
       const { skill } = _vars;
-      // 直接更新 installed 缓存
+      // Update the installed cache directly.
       queryClient.setQueryData<InstalledSkill[]>(
         ["skills", "installed"],
         (oldData) => {
@@ -87,7 +86,7 @@ export function useInstallSkill() {
         },
       );
 
-      // 更新 discoverable 缓存中对应技能的 installed 状态
+      // Update the matching skill's installation state in the discoverable cache.
       const installName =
         skill.directory.split(/[/\\]/).pop()?.toLowerCase() ||
         skill.directory.toLowerCase();
@@ -110,8 +109,7 @@ export function useInstallSkill() {
 }
 
 /**
- * 卸载 Skill
- * 成功后直接更新缓存，不触发重新加载/刷新
+ * Uninstall a skill and update the cache directly without reloading or refetching.
  */
 export function useUninstallSkill() {
   const queryClient = useQueryClient();
@@ -121,7 +119,7 @@ export function useUninstallSkill() {
         .uninstallUnified(id)
         .then((result) => ({ ...result, skillKey })),
     onSuccess: ({ skillKey }, _vars) => {
-      // 直接更新 installed 缓存，移除该 skill
+      // Remove the skill directly from the installed cache.
       queryClient.setQueryData<InstalledSkill[]>(
         ["skills", "installed"],
         (oldData) => {
@@ -130,7 +128,7 @@ export function useUninstallSkill() {
         },
       );
 
-      // 更新 discoverable 缓存中对应技能的 installed 状态
+      // Update the matching skill's installation state in the discoverable cache.
       queryClient.setQueryData<DiscoverableSkill[]>(
         ["skills", "discoverable"],
         (oldData) => {
@@ -165,7 +163,7 @@ export function useRestoreSkillBackup() {
 }
 
 /**
- * 切换 Skill 在特定应用的启用状态
+ * Toggle a skill for a specific application.
  */
 export function useToggleSkillApp() {
   const queryClient = useQueryClient();
@@ -186,12 +184,13 @@ export function useToggleSkillApp() {
 }
 
 /**
- * 扫描未管理的 Skills
+ * Scan for unmanaged skills.
  *
- * - 传 { enabled: true }（Skill 面板挂载时）会在进入页面时自动静默扫描一次，
- *   30s 内复用结果，避免来回切页时重复磁盘 IO。
- * - 默认 enabled: false：仅订阅共享缓存（如顶栏「导入」按钮的绿点提示），
- *   不主动触发扫描。两者共用同一 queryKey，面板扫描完成后绿点会自动亮起。
+ * - Passing { enabled: true } when the Skills panel mounts performs one silent
+ *   scan on entry and reuses the result for 30 seconds to avoid repeated disk I/O.
+ * - The default enabled: false only subscribes to the shared cache, such as for
+ *   the import button's status indicator, without starting a scan. Both modes
+ *   share one queryKey, so the indicator updates after the panel scan completes.
  */
 export function useScanUnmanagedSkills(options?: { enabled?: boolean }) {
   return useQuery({
@@ -204,8 +203,8 @@ export function useScanUnmanagedSkills(options?: { enabled?: boolean }) {
 }
 
 /**
- * 从应用目录导入 Skills
- * 成功后直接更新缓存，不触发重新加载/刷新
+ * Import skills from application directories and update the cache directly
+ * without reloading or refetching.
  */
 export function useImportSkillsFromApps() {
   const queryClient = useQueryClient();
@@ -213,19 +212,19 @@ export function useImportSkillsFromApps() {
     mutationFn: (imports: ImportSkillSelection[]) =>
       skillsApi.importFromApps(imports),
     onSuccess: (importedSkills) => {
-      // 直接更新 installed 缓存
+      // Update the installed cache directly.
       queryClient.setQueryData<InstalledSkill[]>(
         ["skills", "installed"],
         (oldData) => mergeImportedSkills(oldData, importedSkills),
       );
-      // 刷新 unmanaged 列表（已被导入的应该移除）
+      // Refresh the unmanaged list so imported skills are removed.
       queryClient.invalidateQueries({ queryKey: ["skills", "unmanaged"] });
     },
   });
 }
 
 /**
- * 获取仓库列表
+ * Get configured skill repositories.
  */
 export function useSkillRepos() {
   return useQuery({
@@ -235,7 +234,7 @@ export function useSkillRepos() {
 }
 
 /**
- * 添加仓库
+ * Add a skill repository.
  */
 export function useAddSkillRepo() {
   const queryClient = useQueryClient();
@@ -249,7 +248,7 @@ export function useAddSkillRepo() {
 }
 
 /**
- * 删除仓库
+ * Remove a skill repository.
  */
 export function useRemoveSkillRepo() {
   const queryClient = useQueryClient();
@@ -264,8 +263,8 @@ export function useRemoveSkillRepo() {
 }
 
 /**
- * 从 ZIP 文件安装 Skills
- * 成功后直接更新缓存，不触发重新加载/刷新
+ * Install skills from a ZIP file and update the cache directly without
+ * reloading or refetching.
  */
 export function useInstallSkillsFromZip() {
   const queryClient = useQueryClient();
@@ -278,7 +277,7 @@ export function useInstallSkillsFromZip() {
       currentApp: AppId;
     }) => skillsApi.installFromZip(filePath, currentApp),
     onSuccess: (installedSkills) => {
-      // 直接更新 installed 缓存
+      // Update the installed cache directly.
       queryClient.setQueryData<InstalledSkill[]>(
         ["skills", "installed"],
         (oldData) => {
@@ -290,10 +289,10 @@ export function useInstallSkillsFromZip() {
   });
 }
 
-// ========== 更新检测 ==========
+// Update detection.
 
 /**
- * 检查 Skills 更新（手动触发）
+ * Check for skill updates on demand.
  */
 export function useCheckSkillUpdates() {
   return useQuery({
@@ -305,7 +304,7 @@ export function useCheckSkillUpdates() {
 }
 
 /**
- * 更新单个 Skill
+ * Update a single skill.
  */
 export function useUpdateSkill() {
   const queryClient = useQueryClient();
@@ -332,11 +331,11 @@ export function useUpdateSkill() {
   });
 }
 
-// ========== skills.sh 搜索 ==========
+// skills.sh search.
 
 /**
- * 搜索 skills.sh 公共目录
- * 使用 300ms staleTime 和 keepPreviousData 实现平滑搜索体验
+ * Search the public skills.sh directory.
+ * A 300 ms stale time and keepPreviousData provide a smooth search experience.
  */
 export function useSearchSkillsSh(
   query: string,
@@ -352,7 +351,7 @@ export function useSearchSkillsSh(
   });
 }
 
-// ========== 辅助类型 ==========
+// Helper types.
 
 export type {
   InstalledSkill,

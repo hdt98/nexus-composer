@@ -70,9 +70,9 @@ describe("Codex TOML utils", () => {
       "",
       "[model_providers.custom]",
       'name = "custom"',
-      "base_url = \"https://su'us.codes/v1\"",
+      'base_url = "https://su\'us.codes/v1"',
       'wire_api = "responses"',
-      'requires_openai_auth = true',
+      "requires_openai_auth = true",
       "",
     ].join("\n");
 
@@ -93,7 +93,7 @@ describe("Codex TOML utils", () => {
       'base_url = "https://old.example/v1"',
       'base_url = "https://older.example/v1"',
       'wire_api = "responses"',
-      'requires_openai_auth = true',
+      "requires_openai_auth = true",
       "",
     ].join("\n");
 
@@ -316,7 +316,7 @@ describe("Codex TOML utils", () => {
     expect(output).not.toMatch(/^\s*goals\s*=/m);
   });
 
-  // P3 回归: 不能在 config 没用 bearer token 模式时, 误为它新增一行
+  // P3 regression: do not add a line when config does not use bearer-token mode.
   it("updateCodexExperimentalBearerToken leaves config without the token alone", () => {
     const input = [
       'model_provider = "openai"',
@@ -328,7 +328,8 @@ describe("Codex TOML utils", () => {
     expect(updateCodexExperimentalBearerToken(input, "")).toBe(input);
   });
 
-  // P3 回归: bearer 模式下清空 API key 必须真正擦掉 token, 让 pickCodexApiKey 的 fallback 找不到
+  // P3 regression: clearing the API key in bearer mode must remove the token so
+  // pickCodexApiKey cannot find it through fallback.
   it("updateCodexExperimentalBearerToken removes the token line when set to empty", () => {
     const input = [
       'model_provider = "thirdparty"',

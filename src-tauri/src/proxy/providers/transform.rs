@@ -1,7 +1,7 @@
-//! 格式转换模块
+//! Format conversion module.
 //!
-//! 实现 Anthropic ↔ OpenAI 格式转换，用于 OpenRouter 支持
-//! 参考: anthropic-proxy-rs
+//! Converts between Anthropic and OpenAI formats for OpenRouter support.
+//! Based on anthropic-proxy-rs.
 
 use crate::proxy::{error::ProxyError, json_canonical::canonical_json_string};
 use serde_json::{json, Value};
@@ -111,10 +111,11 @@ pub fn resolve_reasoning_effort(body: &Value) -> Option<&'static str> {
     }
 }
 
-/// Anthropic 请求 → OpenAI Chat Completions 请求
+/// Converts an Anthropic request to an OpenAI Chat Completions request.
 ///
-/// 转换工具库 API：当前无生产调用方（连通性检查不再发真实请求，曾是其唯一 crate 内
-/// 消费者），但保留其转换逻辑与下方测试套件，供代理转换路径复用 / 未来接线。
+/// This conversion utility currently has no production caller because connectivity checks
+/// no longer send real requests. Its logic and tests remain available for proxy conversion
+/// reuse or future integration.
 #[allow(dead_code)]
 pub fn anthropic_to_openai(body: Value) -> Result<Value, ProxyError> {
     anthropic_to_openai_with_reasoning_content(body, false)
@@ -127,11 +128,11 @@ pub(crate) enum ReasoningHistoryPolicy {
     FillMissing,
 }
 
-/// Anthropic 请求 → OpenAI Chat Completions 请求
+/// Converts an Anthropic request to an OpenAI Chat Completions request.
 ///
-/// `preserve_reasoning_content` 仅用于明确需要 Moonshot/Kimi/DeepSeek
-/// `reasoning_content` 兼容字段的 provider。默认转换保持通用 OpenAI-compatible
-/// 请求体，避免向严格后端发送未知字段。
+/// `preserve_reasoning_content` is only for providers that explicitly require the
+/// Moonshot/Kimi/DeepSeek-compatible `reasoning_content` field. The default conversion
+/// remains generic OpenAI-compatible JSON so strict backends receive no unknown fields.
 pub fn anthropic_to_openai_with_reasoning_content(
     body: Value,
     preserve_reasoning_content: bool,
@@ -152,14 +153,14 @@ pub(crate) fn anthropic_to_openai_with_reasoning_history(
 ) -> Result<Value, ProxyError> {
     let mut result = json!({});
 
-    // NOTE: 模型映射由上游统一处理（proxy::model_mapper），格式转换层只做结构转换。
+    // Model mapping is centralized in `proxy::model_mapper`; this layer converts structure only.
     if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
         result["model"] = json!(model);
     }
 
     let mut messages = Vec::new();
 
-    // 处理 system prompt
+    // Convert the system prompt.
     if let Some(system) = body.get("system") {
         if let Some(text) = system.as_str() {
             let text = strip_leading_anthropic_billing_header(text);
@@ -179,7 +180,7 @@ pub(crate) fn anthropic_to_openai_with_reasoning_history(
         }
     }
 
-    // 转换 messages
+    // Convert messages.
     if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
         for msg in msgs {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
@@ -192,7 +193,7 @@ pub(crate) fn anthropic_to_openai_with_reasoning_history(
     normalize_openai_system_messages(&mut messages);
     result["messages"] = json!(messages);
 
-    // 转换参数 — o-series 模型需要 max_completion_tokens
+    // Convert parameters; o-series models require `max_completion_tokens`.
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("");
     if let Some(v) = body.get("max_tokens") {
         if is_openai_o_series(model) {
@@ -221,7 +222,7 @@ pub(crate) fn anthropic_to_openai_with_reasoning_history(
         }
     }
 
-    // 转换 tools (过滤 BatchTool)
+    // Convert tools, excluding `BatchTool`.
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
         let openai_tools: Vec<Value> = tools
             .iter()
@@ -250,15 +251,15 @@ pub(crate) fn anthropic_to_openai_with_reasoning_history(
     Ok(result)
 }
 
-/// 为 OpenAI Chat Completions 流式请求注入 `stream_options.include_usage`。
+/// Injects `stream_options.include_usage` into streaming OpenAI Chat Completions requests.
 ///
-/// OpenAI 兼容上游在流式下默认不在 SSE 里返回 usage，必须显式声明 include_usage
-/// 才会在末尾吐 usage chunk。缺这一注入会导致流式请求的 token/成本/缓存全部漏记
-/// （input/output/cache 全为 0）。保留客户端可能透传的其它 stream_options 字段，
-/// 仅补 include_usage；非流式请求不动。
+/// OpenAI-compatible upstreams omit usage from SSE by default and emit the final usage
+/// chunk only when `include_usage` is explicit. Without this field, streaming token, cost,
+/// and cache usage would all be recorded as zero. Existing `stream_options` fields are
+/// preserved, and non-streaming requests are unchanged.
 ///
-/// 由 Claude→openai_chat（claude.rs）与 Codex Responses→Chat（transform_codex_chat.rs）
-/// 两条转换路径共用，确保两个客户端方向行为一致。
+/// Shared by the Claude-to-`openai_chat` path in `claude.rs` and the Codex
+/// Responses-to-Chat path in `transform_codex_chat.rs` to keep both directions aligned.
 pub(crate) fn inject_openai_stream_include_usage(result: &mut Value) {
     let is_stream = result
         .get("stream")
@@ -365,7 +366,7 @@ fn normalize_openai_system_messages(messages: &mut Vec<Value>) {
     }
 }
 
-/// 转换单条消息到 OpenAI 格式（可能产生多条消息）
+/// Converts one message to OpenAI format, possibly producing multiple messages.
 fn convert_message_to_openai(
     role: &str,
     content: Option<&Value>,
@@ -381,18 +382,18 @@ fn convert_message_to_openai(
         }
     };
 
-    // 字符串内容
+    // String content.
     if let Some(text) = content.as_str() {
         result.push(json!({"role": role, "content": text}));
         return Ok(result);
     }
 
-    // 数组内容（多模态/工具调用）
+    // Array content for multimodal data and tool calls.
     if let Some(blocks) = content.as_array() {
         let mut content_parts = Vec::new();
         let mut tool_calls = Vec::new();
-        // reasoning_parts: 仅在兼容 Moonshot/Kimi/DeepSeek thinking tool-call 路径时
-        // 生成 reasoning_content，通用 OpenAI-compatible 路径不发送该非标准字段。
+        // Generate `reasoning_content` only for Moonshot/Kimi/DeepSeek-compatible thinking
+        // tool-call paths. Generic OpenAI-compatible paths omit this nonstandard field.
         let mut reasoning_parts = Vec::new();
 
         for block in blocks {
@@ -431,7 +432,7 @@ fn convert_message_to_openai(
                     }));
                 }
                 "tool_result" => {
-                    // tool_result 变成单独的 tool role 消息
+                    // Convert `tool_result` into a separate tool-role message.
                     let tool_use_id = block
                         .get("tool_use_id")
                         .and_then(|i| i.as_str())
@@ -449,7 +450,7 @@ fn convert_message_to_openai(
                     }));
                 }
                 "thinking" if reasoning_history_policy != ReasoningHistoryPolicy::Drop => {
-                    // 提取 thinking 内容，后续可作为 reasoning_content 传给需要它的上游。
+                    // Retain thinking content as `reasoning_content` for upstreams that require it.
                     if let Some(thinking) = block.get("thinking").and_then(|t| t.as_str()) {
                         if !thinking.is_empty() {
                             reasoning_parts.push(thinking.to_string());
@@ -478,11 +479,11 @@ fn convert_message_to_openai(
         if !content_parts.is_empty() || !tool_calls.is_empty() || preserve_reasoning {
             let mut msg = json!({"role": role});
 
-            // 内容处理
+            // Convert content.
             if content_parts.is_empty() {
                 msg["content"] = Value::Null;
             } else if content_parts.len() == 1 {
-                // 单 text block 简化为纯字符串
+                // Simplify one text block to a string.
                 if let Some(text) = content_parts[0].get("text") {
                     msg["content"] = text.clone();
                 } else {
@@ -492,7 +493,7 @@ fn convert_message_to_openai(
                 msg["content"] = json!(content_parts);
             }
 
-            // 工具调用
+            // Add tool calls.
             if !tool_calls.is_empty() {
                 msg["tool_calls"] = json!(tool_calls);
             }
@@ -518,20 +519,20 @@ fn convert_message_to_openai(
         return Ok(result);
     }
 
-    // 其他情况直接透传
+    // Pass through other content forms.
     result.push(json!({"role": role, "content": content}));
     Ok(result)
 }
 
-/// 清理 JSON schema（移除不支持的 format）
+/// Removes unsupported formats from a JSON schema.
 pub fn clean_schema(mut schema: Value) -> Value {
     if let Some(obj) = schema.as_object_mut() {
-        // 移除 "format": "uri"
+        // Remove `"format": "uri"`.
         if obj.get("format").and_then(|v| v.as_str()) == Some("uri") {
             obj.remove("format");
         }
 
-        // 递归清理嵌套 schema
+        // Recursively clean nested schemas.
         if let Some(properties) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
             for (_, value) in properties.iter_mut() {
                 *value = clean_schema(value.clone());
@@ -545,7 +546,7 @@ pub fn clean_schema(mut schema: Value) -> Value {
     schema
 }
 
-/// OpenAI 响应 → Anthropic 响应
+/// Converts an OpenAI response to an Anthropic response.
 pub fn openai_to_anthropic(body: Value) -> Result<Value, ProxyError> {
     openai_to_anthropic_with_thinking(body, true)
 }
@@ -570,14 +571,14 @@ pub fn openai_to_anthropic_with_thinking(
     let mut content = Vec::new();
     let mut has_tool_use = false;
 
-    // DeepSeek provider 会把思考内容放在 message.reasoning_content。
+    // DeepSeek providers place thinking content in `message.reasoning_content`.
     if let Some(reasoning_content) = message.get("reasoning_content").and_then(|r| r.as_str()) {
         if emit_thinking && !reasoning_content.is_empty() {
             content.push(json!({"type": "thinking", "thinking": reasoning_content}));
         }
     }
 
-    // 文本/拒绝内容
+    // Convert text and refusal content.
     if let Some(msg_content) = message.get("content") {
         if let Some(text) = msg_content.as_str() {
             if !text.is_empty() {
@@ -613,7 +614,7 @@ pub fn openai_to_anthropic_with_thinking(
         }
     }
 
-    // 工具调用（tool_calls）
+    // Convert tool calls.
     if let Some(tool_calls) = message.get("tool_calls").and_then(|t| t.as_array()) {
         if !tool_calls.is_empty() {
             has_tool_use = true;
@@ -637,7 +638,7 @@ pub fn openai_to_anthropic_with_thinking(
             }));
         }
     }
-    // 兼容旧格式（function_call）
+    // Support the legacy `function_call` format.
     if !has_tool_use {
         if let Some(function_call) = message.get("function_call") {
             let id = function_call
@@ -668,7 +669,7 @@ pub fn openai_to_anthropic_with_thinking(
         }
     }
 
-    // 映射 finish_reason → stop_reason
+    // Map `finish_reason` to `stop_reason`.
     let stop_reason = choice
         .get("finish_reason")
         .and_then(|r| r.as_str())
@@ -688,12 +689,15 @@ pub fn openai_to_anthropic_with_thinking(
 
     // usage — map cache tokens from OpenAI format to Anthropic format
     let usage = body.get("usage").cloned().unwrap_or(json!({}));
-    // OpenAI prompt_tokens 含缓存命中，Anthropic input_tokens 不含 → 减去 cache_read 与
-    // cache_creation，使 input 成为 fresh input。本路径以 app_type="claude" 记账（calculator
-    // 不再扣减），若不减则缓存会被计入 input 与各 cache 桶两次。三桶互斥，恒等：
-    // input + cache_read + cache_creation == prompt_tokens（inclusive 上游）。
-    // 与流式 build_anthropic_usage_json (#2774) 及 transform_gemini 的 saturating_sub 对称。
-    // 最终 cache_read：直传字段优先于 nested；cache_creation 仅来自直传字段（OpenAI 无此概念）。
+    // OpenAI `prompt_tokens` includes cache hits, while Anthropic `input_tokens` does not.
+    // Subtract cache reads and creation so input represents fresh tokens. This path records
+    // usage as app_type="claude", where the calculator performs no further subtraction.
+    // Otherwise cache tokens would be counted in both input and cache buckets. The mutually
+    // exclusive buckets preserve:
+    // input + cache_read + cache_creation == inclusive upstream prompt_tokens.
+    // This matches streaming `build_anthropic_usage_json` (#2774) and the saturating
+    // subtraction in `transform_gemini`. Direct `cache_read` takes precedence over the nested
+    // value; `cache_creation` only comes from the direct field because OpenAI has no equivalent.
     let cached = usage
         .get("cache_read_input_tokens")
         .and_then(|v| v.as_u64())
@@ -1220,7 +1224,7 @@ mod tests {
 
     #[test]
     fn test_model_passthrough() {
-        // 格式转换层只做结构转换，模型映射由上游 proxy::model_mapper 处理
+        // This layer converts structure only; `proxy::model_mapper` handles model mapping.
         let input = json!({
             "model": "gpt-4o",
             "max_tokens": 1024,
@@ -1274,8 +1278,8 @@ mod tests {
         assert!(result["tools"][0].get("cache_control").is_none());
     }
 
-    /// 精确复现 Issue #3805 报告的 400 错误场景:
-    /// GLM/Qwen 等严格校验模型拒绝 cache_control 和 content 数组格式
+    /// Reproduces the 400 error from issue #3805: strict models such as GLM and Qwen
+    /// reject `cache_control` and array-form content.
     #[test]
     fn test_regression_gh3805_no_cache_control_leak_to_openai() {
         let input = json!({
@@ -1299,7 +1303,7 @@ mod tests {
 
         let result = anthropic_to_openai(input).unwrap();
 
-        // 验证: messages 中不存在 cache_control
+        // Messages must not contain `cache_control`.
         for (i, msg) in result["messages"].as_array().unwrap().iter().enumerate() {
             assert!(
                 msg.get("cache_control").is_none(),
@@ -1307,7 +1311,7 @@ mod tests {
             );
         }
 
-        // 验证: content 中没有 cache_control
+        // Content parts must not contain `cache_control`.
         for (i, msg) in result["messages"].as_array().unwrap().iter().enumerate() {
             if let Some(content) = msg.get("content") {
                 assert!(
@@ -1322,7 +1326,7 @@ mod tests {
             }
         }
 
-        // 验证: system content 为纯字符串格式（不是数组）
+        // System content must be a string, not an array.
         let sys_msg = &result["messages"][0];
         assert_eq!(sys_msg["role"], "system");
         assert!(
@@ -1331,7 +1335,7 @@ mod tests {
             sys_msg["content"]
         );
 
-        // 验证: user content 为纯字符串格式（不是数组）
+        // User content must be a string, not an array.
         let user_msg = &result["messages"][1];
         assert_eq!(user_msg["role"], "user");
         assert!(
@@ -1340,7 +1344,7 @@ mod tests {
             user_msg["content"]
         );
 
-        // 验证: tools 中不存在 cache_control
+        // Tools must not contain `cache_control`.
         if let Some(tools) = result["tools"].as_array() {
             for (i, tool) in tools.iter().enumerate() {
                 assert!(
@@ -1371,7 +1375,7 @@ mod tests {
         });
 
         let result = openai_to_anthropic(input).unwrap();
-        // prompt_tokens(100) 含 cached(80)，转换后 input 应为 fresh = 100 - 80 = 20
+        // `prompt_tokens` includes cached tokens, so fresh input is 100 - 80 = 20.
         assert_eq!(result["usage"]["input_tokens"], 20);
         assert_eq!(result["usage"]["output_tokens"], 50);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 80);
@@ -1396,8 +1400,8 @@ mod tests {
         });
 
         let result = openai_to_anthropic(input).unwrap();
-        // cache_read(60)+cache_creation(20) 均从 prompt(100) 扣除，fresh = 100 - 60 - 20 = 20
-        // 守恒：input(20) + cache_read(60) + cache_creation(20) == prompt(100)
+        // Subtract cache_read(60) and cache_creation(20) from prompt(100), leaving 20 fresh.
+        // Invariant: input(20) + cache_read(60) + cache_creation(20) == prompt(100).
         assert_eq!(result["usage"]["input_tokens"], 20);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 60);
         assert_eq!(result["usage"]["cache_creation_input_tokens"], 20);
@@ -1405,8 +1409,9 @@ mod tests {
 
     #[test]
     fn test_openai_to_anthropic_clamps_input_when_cache_exceeds_prompt() {
-        // prompt(100) < cache_read(60)+cache_creation(50)=110：saturating 钳到 0，防下溢。
-        // 钉桩：阻止未来把 saturating_sub 误改成普通减法(debug panic / release wrap)。
+        // Cache totals exceed prompt tokens, so saturating subtraction clamps to zero.
+        // This guards against replacing `saturating_sub` with subtraction that panics in debug
+        // builds or wraps in release builds.
         let input = json!({
             "id": "chatcmpl-uf",
             "model": "gpt-4",

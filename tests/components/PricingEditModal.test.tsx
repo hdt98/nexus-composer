@@ -7,7 +7,7 @@ import type { ModelPricing } from "@/types/usage";
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, options?: string | { defaultValue?: string }) =>
-      typeof options === "string" ? options : options?.defaultValue ?? key,
+      typeof options === "string" ? options : (options?.defaultValue ?? key),
   }),
 }));
 
@@ -50,18 +50,24 @@ const model: ModelPricing = {
 };
 
 const PRICE_FIELDS = [
-  { id: "inputCost", label: "输入成本" },
-  { id: "outputCost", label: "输出成本" },
-  { id: "cacheReadCost", label: "缓存读取成本" },
-  { id: "cacheCreationCost", label: "缓存写入成本" },
+  { id: "inputCost", label: "Input Cost (per million tokens, USD)" },
+  { id: "outputCost", label: "Output Cost (per million tokens, USD)" },
+  {
+    id: "cacheReadCost",
+    label: "Cache Read Cost (per million tokens, USD)",
+  },
+  {
+    id: "cacheCreationCost",
+    label: "Cache Write Cost (per million tokens, USD)",
+  },
 ] as const;
 
 describe("PricingEditModal", () => {
   it("all price inputs have step=0.0001", () => {
     render(<PricingEditModal open model={model} onClose={() => {}} />);
 
-    for (const { id } of PRICE_FIELDS) {
-      const input = screen.getByLabelText(/每百万 tokens/ as unknown as string, {
+    for (const { id, label } of PRICE_FIELDS) {
+      const input = screen.getByLabelText(label, {
         selector: `#${id}`,
       }) as HTMLInputElement;
       expect(input).toHaveAttribute("step", "0.0001");
@@ -79,9 +85,7 @@ describe("PricingEditModal", () => {
   });
 
   it("allows user to input sub-cent prices via change event", () => {
-    render(
-      <PricingEditModal open model={model} onClose={() => {}} isNew />,
-    );
+    render(<PricingEditModal open model={model} onClose={() => {}} isNew />);
 
     const cacheReadInput = document.getElementById(
       "cacheReadCost",

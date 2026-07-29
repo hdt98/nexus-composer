@@ -1,17 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { AppId } from "./types";
 
-// ===== 连通性检查类型 =====
-// 注意：本检查只探测 base_url 是否可达，不发真实大模型请求，也不触碰故障转移熔断器。
+// ===== Connectivity Check Types =====
+// This check only probes whether base_url is reachable. It does not send a real
+// model request or affect failover circuit breakers.
 
 export type HealthStatus = "operational" | "degraded" | "failed";
 
 export interface StreamCheckConfig {
-  /** 单次探测超时（秒） */
+  /** Timeout for each probe, in seconds. */
   timeoutSecs: number;
-  /** 超时类失败的最大重试次数 */
+  /** Maximum retries for timeout failures. */
   maxRetries: number;
-  /** 降级阈值（毫秒）：可达但 TTFB 超过该值判定为"较慢" */
+  /** Degraded threshold in milliseconds; reachable responses with a longer TTFB are slow. */
   degradedThresholdMs: number;
 }
 
@@ -25,10 +26,10 @@ export interface StreamCheckResult {
   retryCount: number;
 }
 
-// ===== 连通性检查 API =====
+// ===== Connectivity Check API =====
 
 /**
- * 连通性检查（单个供应商）
+ * Checks connectivity for one provider.
  */
 export async function streamCheckProvider(
   appType: AppId,
@@ -38,7 +39,7 @@ export async function streamCheckProvider(
 }
 
 /**
- * 批量流式健康检查
+ * Checks provider health in a streaming batch.
  */
 export async function streamCheckAllProviders(
   appType: AppId,
@@ -48,14 +49,14 @@ export async function streamCheckAllProviders(
 }
 
 /**
- * 获取流式检查配置
+ * Gets stream-check configuration.
  */
 export async function getStreamCheckConfig(): Promise<StreamCheckConfig> {
   return invoke("get_stream_check_config");
 }
 
 /**
- * 保存流式检查配置
+ * Saves stream-check configuration.
  */
 export async function saveStreamCheckConfig(
   config: StreamCheckConfig,

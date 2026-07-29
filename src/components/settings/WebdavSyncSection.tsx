@@ -459,7 +459,8 @@ export function WebdavSyncSection({
       enabled: true,
       baseUrl,
       username: form.username.trim(),
-      // 未重新触碰密码时，提交空值让后端沿用已保存密码，表单里的值仅用于 UI 显示
+      // Submit an empty value when the password was untouched so the backend
+      // retains the saved password; the form value is only for display.
       password: passwordTouched ? form.password : "",
       remoteRoot: form.remoteRoot.trim() || "nexus-composer-sync",
       profile: form.profile.trim() || "default",

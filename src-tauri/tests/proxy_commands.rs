@@ -7,7 +7,7 @@ use nexus_composer_lib::{
 mod support;
 use support::{create_test_state, ensure_test_home, reset_test_fs, test_mutex};
 
-// 测试使用 Mutex 进行串行化，跨 await 持锁是预期行为
+// Tests use a mutex for serialization; holding the lock across await is intentional.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn default_cost_multiplier_commands_round_trip() {
@@ -33,7 +33,7 @@ async fn default_cost_multiplier_commands_round_trip() {
     let err = set_default_cost_multiplier_test_hook(&state, "claude", "not-a-number")
         .await
         .expect_err("invalid multiplier should error");
-    // 错误已改为 Localized 类型（支持 i18n）
+    // The error now uses the Localized variant to support i18n.
     match err {
         AppError::Localized { key, .. } => {
             assert_eq!(key, "error.invalidMultiplier");
@@ -42,7 +42,7 @@ async fn default_cost_multiplier_commands_round_trip() {
     }
 }
 
-// 测试使用 Mutex 进行串行化，跨 await 持锁是预期行为
+// Tests use a mutex for serialization; holding the lock across await is intentional.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn pricing_model_source_commands_round_trip() {
@@ -68,7 +68,7 @@ async fn pricing_model_source_commands_round_trip() {
     let err = set_pricing_model_source_test_hook(&state, "claude", "invalid")
         .await
         .expect_err("invalid pricing model source should error");
-    // 错误已改为 Localized 类型（支持 i18n）
+    // The error now uses the Localized variant to support i18n.
     match err {
         AppError::Localized { key, .. } => {
             assert_eq!(key, "error.invalidPricingMode");

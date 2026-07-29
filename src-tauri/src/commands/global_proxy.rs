@@ -1,6 +1,6 @@
-//! 全局出站代理相关命令
+//! Global outbound proxy commands
 //!
-//! 提供获取、设置和测试全局代理的 Tauri 命令。
+//! Provides Tauri commands to get, set, and test the global proxy.
 
 use crate::proxy::http_client;
 use crate::store::AppState;
@@ -8,9 +8,9 @@ use serde::Serialize;
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::time::{Duration, Instant};
 
-/// 获取全局代理 URL
+/// Return the global proxy URL.
 ///
-/// 返回当前配置的代理 URL，null 表示直连。
+/// Returns the configured URL, or null for a direct connection.
 #[tauri::command]
 pub fn get_global_proxy_url(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
     let result = state.db.get_global_proxy_url().map_err(|e| e.to_string())?;
@@ -24,16 +24,16 @@ pub fn get_global_proxy_url(state: tauri::State<'_, AppState>) -> Result<Option<
     Ok(result)
 }
 
-/// 设置全局代理 URL
+/// Set the global proxy URL.
 ///
-/// - 传入非空字符串：启用代理
-/// - 传入空字符串：清除代理（直连）
+/// - A non-empty string enables the proxy.
+/// - An empty string clears the proxy for a direct connection.
 ///
-/// 执行顺序：先验证 → 写 DB → 再应用
-/// 这样确保 DB 写失败时不会出现运行态与持久化不一致的问题
+/// Validates first, writes to the database, then applies the proxy.
+/// This keeps runtime and persisted state consistent if the database write fails.
 #[tauri::command]
 pub fn set_global_proxy_url(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
-    // 调试：显示接收到的 URL 信息（不包含敏感内容）
+    // Log URL metadata without sensitive content.
     let has_auth = url.contains('@') && (url.starts_with("http://") || url.starts_with("socks"));
     log::debug!(
         "[GlobalProxy] [GP-011] Received URL: length={}, has_auth={}",
@@ -47,16 +47,16 @@ pub fn set_global_proxy_url(state: tauri::State<'_, AppState>, url: String) -> R
         Some(url.as_str())
     };
 
-    // 1. 先验证代理配置是否有效（不应用）
+    // 1. Validate the proxy configuration without applying it.
     http_client::validate_proxy(url_opt)?;
 
-    // 2. 验证成功后保存到数据库
+    // 2. Save the validated configuration to the database.
     state
         .db
         .set_global_proxy_url(url_opt)
         .map_err(|e| e.to_string())?;
 
-    // 3. DB 写入成功后再应用到运行态
+    // 3. Apply the configuration after the database write succeeds.
     http_client::apply_proxy(url_opt)?;
 
     log::info!(
@@ -69,22 +69,22 @@ pub fn set_global_proxy_url(state: tauri::State<'_, AppState>, url: String) -> R
     Ok(())
 }
 
-/// 代理测试结果
+/// Proxy test result.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyTestResult {
-    /// 是否连接成功
+    /// Whether the connection succeeded.
     pub success: bool,
-    /// 延迟（毫秒）
+    /// Latency in milliseconds.
     pub latency_ms: u64,
-    /// 错误信息
+    /// Error message.
     pub error: Option<String>,
 }
 
-/// 测试代理连接
+/// Test a proxy connection.
 ///
-/// 通过指定的代理 URL 发送测试请求，返回连接结果和延迟。
-/// 使用多个测试目标，任一成功即认为代理可用。
+/// Sends requests through the specified proxy and returns the result and latency.
+/// The proxy is considered available if any test target succeeds.
 #[tauri::command]
 pub async fn test_proxy_url(url: String) -> Result<ProxyTestResult, String> {
     if url.trim().is_empty() {
@@ -93,7 +93,7 @@ pub async fn test_proxy_url(url: String) -> Result<ProxyTestResult, String> {
 
     let start = Instant::now();
 
-    // 构建带代理的临时客户端
+    // Build a temporary client using the proxy.
     let proxy = reqwest::Proxy::all(&url).map_err(|e| format!("Invalid proxy URL: {e}"))?;
 
     let client = reqwest::Client::builder()
@@ -103,8 +103,8 @@ pub async fn test_proxy_url(url: String) -> Result<ProxyTestResult, String> {
         .build()
         .map_err(|e| format!("Failed to build client: {e}"))?;
 
-    // 使用多个测试目标，提高兼容性
-    // 优先使用 httpbin（专门用于 HTTP 测试），回退到其他公共端点
+    // Use multiple targets for compatibility.
+    // Prefer httpbin for HTTP testing, then fall back to other public endpoints.
     let test_urls = [
         "https://httpbin.org/get",
         "https://www.google.com",
@@ -137,7 +137,7 @@ pub async fn test_proxy_url(url: String) -> Result<ProxyTestResult, String> {
         }
     }
 
-    // 所有测试目标都失败
+    // All test targets failed.
     let latency = start.elapsed().as_millis() as u64;
     let error_msg = last_error
         .map(|e| e.to_string())
@@ -157,9 +157,9 @@ pub async fn test_proxy_url(url: String) -> Result<ProxyTestResult, String> {
     })
 }
 
-/// 获取当前出站代理状态
+/// Return the current outbound proxy status.
 ///
-/// 返回当前是否启用了出站代理以及代理 URL。
+/// Includes whether the proxy is enabled and its URL.
 #[tauri::command]
 pub fn get_upstream_proxy_status() -> UpstreamProxyStatus {
     let url = http_client::get_current_proxy_url();
@@ -169,62 +169,62 @@ pub fn get_upstream_proxy_status() -> UpstreamProxyStatus {
     }
 }
 
-/// 出站代理状态信息
+/// Outbound proxy status.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpstreamProxyStatus {
-    /// 是否启用代理
+    /// Whether the proxy is enabled.
     pub enabled: bool,
-    /// 代理 URL
+    /// Proxy URL.
     pub proxy_url: Option<String>,
 }
 
-/// 检测到的代理信息
+/// Detected proxy information.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DetectedProxy {
-    /// 代理 URL
+    /// Proxy URL.
     pub url: String,
-    /// 代理类型 (http/socks5)
+    /// Proxy type (`http` or `socks5`).
     pub proxy_type: String,
-    /// 端口
+    /// Port.
     pub port: u16,
 }
 
-/// 常见代理端口配置
-/// 格式：(端口, 主要类型, 是否同时支持 http 和 socks5)
-/// 对于 mixed 端口，会同时返回两种协议供用户选择
+/// Common proxy port configuration.
+/// Format: port, primary type, and whether both HTTP and SOCKS5 are supported.
+/// Mixed ports return both protocols for user selection.
 const PROXY_PORTS: &[(u16, &str, bool)] = &[
     (7890, "http", true),     // Clash (mixed mode)
     (7891, "socks5", false),  // Clash SOCKS only
-    (1080, "socks5", false),  // 通用 SOCKS5
-    (8080, "http", false),    // 通用 HTTP
+    (1080, "socks5", false),  // Generic SOCKS5
+    (8080, "http", false),    // Generic HTTP
     (8888, "http", false),    // Charles/Fiddler
     (3128, "http", false),    // Squid
     (10808, "socks5", false), // V2Ray SOCKS
     (10809, "http", false),   // V2Ray HTTP
 ];
 
-/// 扫描本地代理
+/// Scan for local proxies.
 ///
-/// 检测常见端口是否有代理服务在运行。
-/// 使用异步任务避免阻塞 UI 线程。
+/// Checks common ports for running proxy services.
+/// Uses an asynchronous task to avoid blocking the UI thread.
 #[tauri::command]
 pub async fn scan_local_proxies() -> Vec<DetectedProxy> {
-    // 使用 spawn_blocking 避免阻塞主线程
+    // Use spawn_blocking to avoid blocking the main thread.
     tokio::task::spawn_blocking(|| {
         let mut found = Vec::new();
 
         for &(port, primary_type, is_mixed) in PROXY_PORTS {
             let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, port);
             if TcpStream::connect_timeout(&addr.into(), Duration::from_millis(100)).is_ok() {
-                // 添加主要类型
+                // Add the primary protocol.
                 found.push(DetectedProxy {
                     url: format!("{primary_type}://127.0.0.1:{port}"),
                     proxy_type: primary_type.to_string(),
                     port,
                 });
-                // 对于 mixed 端口，同时添加另一种协议
+                // Add the alternate protocol for mixed ports.
                 if is_mixed {
                     let alt_type = if primary_type == "http" {
                         "socks5"

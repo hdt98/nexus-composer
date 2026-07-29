@@ -11,13 +11,13 @@ interface UsageFooterProps {
   provider: Provider;
   providerId: string;
   appId: AppId;
-  usageEnabled: boolean; // 是否启用了用量查询
-  isCurrent: boolean; // 是否为当前激活的供应商
-  isInConfig?: boolean; // OpenCode: 是否已添加到配置
-  inline?: boolean; // 是否内联显示（在按钮左侧）
+  usageEnabled: boolean; // Whether usage queries are enabled.
+  isCurrent: boolean; // Whether this provider is currently active.
+  isInConfig?: boolean; // OpenCode: whether the provider is included in the config.
+  inline?: boolean; // Whether to render inline to the left of the button.
 }
 
-/** UsageData → QuotaTier 转换（Token Plan 使用） */
+/** Convert UsageData to the QuotaTier format used by token plans. */
 function toQuotaTier(data: UsageData): QuotaTier {
   const extra = data.extra;
   if (extra && extra.startsWith("{")) {
@@ -55,8 +55,8 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
   const isTokenPlan =
     provider.meta?.usage_script?.templateType === "token_plan";
 
-  // 统一的用量查询（自动查询仅对当前激活的供应商启用）
-  // OpenCode（累加模式）：使用 isInConfig 代替 isCurrent
+  // Use the shared usage query and auto-query only active providers.
+  // OpenCode uses additive mode, so check isInConfig instead of isCurrent.
   const shouldAutoQuery = appId === "opencode" ? isInConfig : isCurrent;
   const autoQueryInterval = shouldAutoQuery
     ? provider.meta?.usage_script?.autoQueryInterval || 0
@@ -72,24 +72,24 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
     autoQueryInterval,
   });
 
-  // 🆕 定期更新当前时间，用于刷新相对时间显示
+  // Update the current time periodically to refresh relative timestamps.
   const [now, setNow] = React.useState(Date.now());
 
   React.useEffect(() => {
     if (!lastQueriedAt) return;
 
-    // 每30秒更新一次当前时间，触发相对时间显示的刷新
+    // Refresh the current time every 30 seconds.
     const interval = setInterval(() => {
       setNow(Date.now());
-    }, 30000); // 30秒
+    }, 30000); // 30 seconds
 
     return () => clearInterval(interval);
   }, [lastQueriedAt]);
 
-  // 只在启用用量查询且有数据时显示
+  // Render only when usage queries are enabled and data is available.
   if (!usageEnabled || !usage) return null;
 
-  // 错误状态
+  // Error state.
   if (!usage.success) {
     if (inline) {
       return (
@@ -118,7 +118,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
             <span>{usage.error || t("usage.queryFailed")}</span>
           </div>
 
-          {/* 刷新按钮 */}
+          {/* Refresh button */}
           <button
             onClick={() => refetch()}
             disabled={loading}
@@ -134,20 +134,20 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
 
   const usageDataList = usage.data || [];
 
-  // 无数据时不显示
+  // Do not render an empty result.
   if (usageDataList.length === 0) return null;
 
-  // ── Token Plan：订阅风格内联渲染（百分比徽章 + 倒计时） ──
+  // Token plans use the subscription-style inline layout with percentage badges and reset countdowns.
   if (isTokenPlan && inline) {
     return (
       <div className="flex flex-col items-end gap-1 text-xs whitespace-nowrap flex-shrink-0">
-        {/* 第一行：查询时间 + 刷新 */}
+        {/* First row: query time and refresh */}
         <div className="flex items-center gap-2 justify-end">
           <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
             <Clock size={10} />
             {lastQueriedAt
               ? formatRelativeTime(lastQueriedAt, now, t)
-              : t("usage.never", { defaultValue: "从未更新" })}
+              : t("usage.never", { defaultValue: "Never" })}
           </span>
           <button
             onClick={(e) => {
@@ -161,7 +161,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
             <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
           </button>
         </div>
-        {/* 第二行：tier 徽章（复用官方订阅的 TierBadge） */}
+        {/* Second row: tier badges shared with the official subscription view */}
         <div className="flex items-center gap-2">
           {(() => {
             const tiers = usageDataList.map((d) => toQuotaTier(d));
@@ -184,24 +184,24 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
     );
   }
 
-  // ── 通用用量：内联模式（原有逻辑） ──
+  // Generic usage data in the inline layout.
   if (inline) {
     const firstUsage = usageDataList[0];
     const isExpired = firstUsage.isValid === false;
 
     return (
       <div className="flex flex-col items-end gap-1 text-xs whitespace-nowrap flex-shrink-0">
-        {/* 第一行：更新时间和刷新按钮 */}
+        {/* First row: update time and refresh button */}
         <div className="flex items-center gap-2 justify-end">
-          {/* 上次查询时间 */}
+          {/* Last query time */}
           <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
             <Clock size={10} />
             {lastQueriedAt
               ? formatRelativeTime(lastQueriedAt, now, t)
-              : t("usage.never", { defaultValue: "从未更新" })}
+              : t("usage.never", { defaultValue: "Never" })}
           </span>
 
-          {/* 刷新按钮 */}
+          {/* Refresh button */}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -215,9 +215,9 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
           </button>
         </div>
 
-        {/* 第二行：用量和剩余 */}
+        {/* Second row: used and remaining quota */}
         <div className="flex items-center gap-2">
-          {/* 已用 */}
+          {/* Used quota */}
           {firstUsage.used !== undefined && (
             <div className="flex items-center gap-0.5">
               <span className="text-gray-500 dark:text-gray-400">
@@ -229,7 +229,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
             </div>
           )}
 
-          {/* 剩余 */}
+          {/* Remaining quota */}
           {firstUsage.remaining !== undefined && (
             <div className="flex items-center gap-0.5">
               <span className="text-gray-500 dark:text-gray-400">
@@ -250,14 +250,14 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
             </div>
           )}
 
-          {/* 单位 */}
+          {/* Unit */}
           {firstUsage.unit && (
             <span className="text-gray-500 dark:text-gray-400">
               {firstUsage.unit}
             </span>
           )}
 
-          {/* 扩展字段 extra */}
+          {/* Extra details */}
           {firstUsage.extra && (
             <span
               className="text-gray-500 dark:text-gray-400 truncate max-w-[150px]"
@@ -273,13 +273,13 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
 
   return (
     <div className="mt-3 rounded-xl border border-border-default bg-card px-4 py-3 shadow-sm">
-      {/* 标题行：包含刷新按钮和自动查询时间 */}
+      {/* Header row with refresh button and automatic query time */}
       <div className="flex items-center justify-between mb-2">
         <span className="text-xs text-gray-500 dark:text-gray-400 font-medium">
           {t("usage.planUsage")}
         </span>
         <div className="flex items-center gap-2">
-          {/* 自动查询时间提示 */}
+          {/* Automatic query timestamp */}
           {lastQueriedAt && (
             <span className="text-[10px] text-muted-foreground/70 flex items-center gap-1">
               <Clock size={10} />
@@ -297,7 +297,7 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
         </div>
       </div>
 
-      {/* 套餐列表 */}
+      {/* Plan list */}
       <div className="flex flex-col gap-3">
         {usageDataList.map((usageData, index) => (
           <UsagePlanItem key={index} data={usageData} />
@@ -307,9 +307,9 @@ const UsageFooter: React.FC<UsageFooterProps> = ({
   );
 };
 
-// ── 通用用量组件 ────────────────────────────────────────────
+// Generic usage component.
 
-// 单个套餐数据展示组件
+// Display a single plan's usage data.
 const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
   const { t } = useTranslation();
   const {
@@ -323,12 +323,12 @@ const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
     unit,
   } = data;
 
-  // 判断套餐是否失效（isValid 为 false 或未定义时视为有效）
+  // A plan is expired only when isValid is explicitly false.
   const isExpired = isValid === false;
 
   return (
     <div className="flex items-center gap-3">
-      {/* 标题部分：25% */}
+      {/* Title: 25% */}
       <div
         className="text-xs text-gray-500 dark:text-gray-400 min-w-0"
         style={{ width: "25%" }}
@@ -345,7 +345,7 @@ const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
         )}
       </div>
 
-      {/* 扩展字段：30% */}
+      {/* Extra details: 30% */}
       <div
         className="text-xs text-gray-500 dark:text-gray-400 min-w-0 flex items-center gap-2"
         style={{ width: "30%" }}
@@ -365,12 +365,12 @@ const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
         )}
       </div>
 
-      {/* 用量信息：45% */}
+      {/* Usage details: 45% */}
       <div
         className="flex items-center justify-end gap-2 text-xs flex-shrink-0"
         style={{ width: "45%" }}
       >
-        {/* 总额度 */}
+        {/* Total quota */}
         {total !== undefined && (
           <>
             <span className="text-gray-500 dark:text-gray-400">
@@ -383,7 +383,7 @@ const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
           </>
         )}
 
-        {/* 已用额度 */}
+        {/* Used quota */}
         {used !== undefined && (
           <>
             <span className="text-gray-500 dark:text-gray-400">
@@ -396,7 +396,7 @@ const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
           </>
         )}
 
-        {/* 剩余额度 - 突出显示 */}
+        {/* Remaining quota, highlighted */}
         {remaining !== undefined && (
           <>
             <span className="text-gray-500 dark:text-gray-400">
@@ -424,13 +424,13 @@ const UsagePlanItem: React.FC<{ data: UsageData }> = ({ data }) => {
   );
 };
 
-// 格式化相对时间
+// Format a relative timestamp.
 function formatRelativeTime(
   timestamp: number,
   now: number,
   t: (key: string, options?: { count?: number }) => string,
 ): string {
-  const diff = Math.floor((now - timestamp) / 1000); // 秒
+  const diff = Math.floor((now - timestamp) / 1000); // Seconds.
 
   if (diff < 60) {
     return t("usage.justNow");

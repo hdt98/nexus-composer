@@ -174,8 +174,8 @@ export function CodexFormFields({
 
   const [fetchedModels, setFetchedModels] = useState<FetchedModel[]>([]);
   const [isFetchingModels, setIsFetchingModels] = useState(false);
-  // 思考能力随 Chat 格式显示（仅 Chat Completions 转换路径用得上）；模型映射常驻
-  //（填了才生成 catalog）。两者都已与「路由接管」概念解耦。
+  // Show reasoning capabilities for the Chat format because only the Chat Completions conversion path uses them.
+  // Model mapping is always available and generates a catalog only when populated. Both are independent of routing takeover.
   const isChatFormat = apiFormat === "openai_chat";
   const canEditCatalog = Boolean(onCatalogModelsChange);
   const canEditReasoning = Boolean(onCodexChatReasoningChange);
@@ -184,8 +184,8 @@ export function CodexFormFields({
     codexChatReasoning.supportsEffort === true;
   const supportsEffort = codexChatReasoning.supportsEffort === true;
 
-  // 高级区在有任何可见配置时自动展开（仅折叠→展开，不会自动折叠）：自定义 UA /
-  // 请求覆盖 / 已填模型映射 / 原生 Responses（需维护 catalog）/ 已配置思考能力。
+  // Expand advanced options when any visible configuration is present, but never collapse automatically:
+  // custom User-Agent, request overrides, populated model mapping, native Responses catalog, or reasoning capabilities.
   const hasRequestOverrides = Boolean(
     localProxyHeadersOverride.trim() || localProxyBodyOverride.trim(),
   );
@@ -198,7 +198,7 @@ export function CodexFormFields({
     supportsEffort;
   const [advancedExpanded, setAdvancedExpanded] = useState(hasAnyAdvancedValue);
 
-  // 预设/编辑加载填充高级值后自动展开（仅从折叠→展开，不会自动折叠）
+  // Expand after preset or edit-mode loading populates advanced values, without collapsing automatically.
   useEffect(() => {
     if (hasAnyAdvancedValue) {
       setAdvancedExpanded(true);
@@ -209,28 +209,28 @@ export function CodexFormFields({
     catalogModels.map((m) => createCatalogRow(m)),
   );
 
-  // 记录上次发送给父组件的数据，避免重复触发
+  // Track the last data sent to the parent to avoid duplicate callbacks.
   const lastSentModelsRef = useRef<CodexCatalogModel[]>(catalogModels);
 
-  // 父 → 子：仅当 prop 数据真的变化（预设切换 / 编辑加载）时才重建 rowId；
-  // 同 shape 时保留现有 rowId，避免编辑过程中焦点丢失。
+  // Parent to child: rebuild rowId only when prop data actually changes during preset switching or edit loading.
+  // Preserve existing rowId values when the shape is unchanged to avoid losing focus while editing.
   useEffect(() => {
     setCatalogRows((current) => {
       if (catalogRowsMatchModels(current, catalogModels)) return current;
       return catalogModels.map((m) => createCatalogRow(m));
     });
-    // 同步更新 ref，避免父组件传入新数据时子→父 effect 误判为本地修改
+    // Update the ref in sync so the child-to-parent effect does not mistake new parent data for a local edit.
     lastSentModelsRef.current = catalogModels;
   }, [catalogModels]);
 
-  // 子 → 父：rowId 是视图层概念，不应进入持久化数据；剥离后再回传。
-  // 注意：依赖数组不包含 catalogModels，避免父→子更新触发子→父回调形成循环。
+  // Child to parent: rowId belongs to the view layer, so strip it before returning persistent data.
+  // catalogModels is intentionally excluded from dependencies to prevent parent updates from creating a callback loop.
   useEffect(() => {
     if (!onCatalogModelsChange) return;
     const next: CodexCatalogModel[] = catalogRows.map(
       ({ rowId: _rowId, ...rest }) => rest,
     );
-    // 只有当数据真的变化时才通知父组件
+    // Notify the parent only when data actually changes.
     if (catalogRowsMatchModels(catalogRows, lastSentModelsRef.current)) return;
     lastSentModelsRef.current = next;
     onCatalogModelsChange(next);
@@ -346,7 +346,7 @@ export function CodexFormFields({
 
   return (
     <>
-      {/* Codex API Key 输入框 */}
+      {/* Codex API key input. */}
       <ApiKeySection
         id="codexApiKey"
         label="API Key"
@@ -359,15 +359,16 @@ export function CodexFormFields({
         partnerPromotionKey={partnerPromotionKey}
         placeholder={{
           official: t("providerForm.codexOfficialNoApiKey", {
-            defaultValue: "官方供应商无需 API Key",
+            defaultValue: "Official does not require API Key, save directly",
           }),
           thirdParty: t("providerForm.codexApiKeyAutoFill", {
-            defaultValue: "输入 API Key，将自动填充到配置",
+            defaultValue:
+              "Just fill in here, auth.json below will be auto-filled",
           }),
         }}
       />
 
-      {/* Codex Base URL 输入框 */}
+      {/* Codex base URL input. */}
       {shouldShowSpeedTest && (
         <EndpointField
           id="codexBaseUrl"
@@ -383,7 +384,7 @@ export function CodexFormFields({
         />
       )}
 
-      {/* 高级选项 —— 上游格式/模型映射/思考能力/自定义 UA；预设供应商通常无需展开 */}
+      {/* Advanced options for upstream format, model mapping, reasoning, and custom User-Agent. Preset providers usually stay collapsed. */}
       {category !== "official" && (
         <Collapsible
           open={advancedExpanded}
@@ -403,7 +404,7 @@ export function CodexFormFields({
                 <ChevronRight className="h-4 w-4" />
               )}
               {t("providerForm.advancedOptionsToggle", {
-                defaultValue: "高级选项",
+                defaultValue: "Advanced Options",
               })}
             </Button>
           </CollapsibleTrigger>
@@ -411,19 +412,19 @@ export function CodexFormFields({
             <p className="mt-1 ml-1 text-xs text-muted-foreground">
               {t("codexConfig.advancedSectionHint", {
                 defaultValue:
-                  "包含上游格式、模型映射、思考能力与自定义 User-Agent。使用 Chat Completions 协议的供应商需开启路由接管才能使用。",
+                  "Includes upstream format, model mapping, reasoning overrides and custom User-Agent. Providers using the Chat Completions protocol require routing takeover to be enabled.",
               })}
             </p>
           )}
           <CollapsibleContent className="space-y-3 pt-3">
-            {/* 上游格式 —— Chat 需开启路由接管（走代理转换），Responses 原生直连。
-                沿用 shouldShowSpeedTest 门控，cloud_provider 保持不可切换。 */}
+            {/* Chat upstream format requires routing takeover for proxy conversion; Responses connects natively.
+                Retain shouldShowSpeedTest gating so cloud_provider remains non-switchable. */}
             {shouldShowSpeedTest && (
               <div className="space-y-3">
                 <div className="space-y-1.5">
                   <FormLabel htmlFor="codex-upstream-format">
                     {t("codexConfig.upstreamFormatLabel", {
-                      defaultValue: "上游格式",
+                      defaultValue: "Upstream Format",
                     })}
                   </FormLabel>
                   <Select
@@ -441,12 +442,12 @@ export function CodexFormFields({
                     <SelectContent>
                       <SelectItem value="openai_chat">
                         {t("codexConfig.upstreamFormatChat", {
-                          defaultValue: "Chat Completions（需开启路由）",
+                          defaultValue: "Chat Completions (routing required)",
                         })}
                       </SelectItem>
                       <SelectItem value="openai_responses">
                         {t("codexConfig.upstreamFormatResponses", {
-                          defaultValue: "Responses（原生）",
+                          defaultValue: "Responses (native)",
                         })}
                       </SelectItem>
                     </SelectContent>
@@ -454,7 +455,7 @@ export function CodexFormFields({
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.upstreamFormatHint", {
                       defaultValue:
-                        "供应商原生是 Responses API 就选 Responses（直连，不转换格式）；使用 Chat Completions 协议就选 Chat（需开启路由接管才能转换为 Chat Completions）。",
+                        "Pick Responses when your provider is natively a Responses API (direct, no format conversion); pick Chat when it uses the Chat Completions protocol (requires routing takeover to convert to Chat Completions).",
                     })}
                   </p>
                 </div>
@@ -471,13 +472,13 @@ export function CodexFormFields({
                 <div className="space-y-1">
                   <FormLabel>
                     {t("codexConfig.reasoningGroupTitle", {
-                      defaultValue: "思考能力",
+                      defaultValue: "Reasoning Capability",
                     })}
                   </FormLabel>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.reasoningSectionHint", {
                       defaultValue:
-                        "预设供应商已自动配置；自定义供应商会按名称/地址自动推断。仅当自动识别不准时才需手动覆盖。",
+                        "Preset providers are configured automatically; custom providers are inferred from name/URL. Override manually only when auto-detection is wrong.",
                     })}
                   </p>
                 </div>
@@ -486,13 +487,13 @@ export function CodexFormFields({
                   <div className="space-y-1">
                     <FormLabel>
                       {t("codexConfig.reasoningModeToggle", {
-                        defaultValue: "支持思考模式",
+                        defaultValue: "Supports Thinking Mode",
                       })}
                     </FormLabel>
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       {t("codexConfig.reasoningModeHint", {
                         defaultValue:
-                          "上游 Chat Completions 接口支持开启或关闭 thinking 时启用。Kimi、GLM、Qwen 等通常属于这一类。",
+                          "Enable when the upstream Chat Completions API supports toggling thinking on/off. Providers like Kimi, GLM and Qwen usually fall into this category.",
                       })}
                     </p>
                   </div>
@@ -500,7 +501,7 @@ export function CodexFormFields({
                     checked={supportsThinking}
                     onCheckedChange={handleReasoningThinkingChange}
                     aria-label={t("codexConfig.reasoningModeToggle", {
-                      defaultValue: "支持思考模式",
+                      defaultValue: "Supports Thinking Mode",
                     })}
                   />
                 </div>
@@ -509,13 +510,13 @@ export function CodexFormFields({
                   <div className="space-y-1">
                     <FormLabel>
                       {t("codexConfig.reasoningEffortToggle", {
-                        defaultValue: "支持思考等级",
+                        defaultValue: "Supports Reasoning Effort",
                       })}
                     </FormLabel>
                     <p className="text-xs leading-relaxed text-muted-foreground">
                       {t("codexConfig.reasoningEffortHint", {
                         defaultValue:
-                          "上游支持 low/high/max 等思考深度控制时启用。启用后会自动启用思考模式，并把 Codex 的 reasoning.effort 转成上游 Chat 参数。",
+                          "Enable when the upstream supports thinking-depth control such as low/high/max. Enabling this also turns on thinking mode and converts Codex's reasoning.effort into the upstream Chat parameter.",
                       })}
                     </p>
                   </div>
@@ -523,16 +524,16 @@ export function CodexFormFields({
                     checked={supportsEffort}
                     onCheckedChange={handleReasoningEffortChange}
                     aria-label={t("codexConfig.reasoningEffortToggle", {
-                      defaultValue: "支持思考等级",
+                      defaultValue: "Supports Reasoning Effort",
                     })}
                   />
                 </div>
               </div>
             )}
 
-            {/* 模型映射 / 模型目录 —— 与「路由接管」解耦，常驻显示（可编辑即渲染）。
-                填了才生成 catalog：Chat 模式生成兼容路由、原生 Responses 生成
-                model-catalogs.json；留空则不生成。排在自定义 UA 之前。 */}
+            {/* Model mapping and catalogs are independent of routing takeover and remain visible whenever editable.
+                Populated Chat mappings generate compatible routes, while native Responses mappings generate
+                model-catalogs.json. Empty mappings generate nothing. Keep this before the custom User-Agent. */}
             {canEditCatalog && (
               <div
                 className={cn(
@@ -545,41 +546,41 @@ export function CodexFormFields({
                   <div className="flex items-center justify-between gap-3">
                     <FormLabel>
                       {t("codexConfig.modelMappingTitle", {
-                        defaultValue: "模型映射",
+                        defaultValue: "Model Mapping",
                       })}
                     </FormLabel>
                     {renderCatalogActionButtons(
                       handleAddCatalogRow,
                       t("codexConfig.addCatalogModel", {
-                        defaultValue: "添加模型",
+                        defaultValue: "Add Model",
                       }),
                     )}
                   </div>
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     {t("codexConfig.modelMappingHint", {
                       defaultValue:
-                        "选择模型角色后，Nexus Composer 会自动生成 Codex 兼容路由；菜单显示名可以填 DeepSeek、Kimi 等品牌模型，实际请求模型按右侧填写内容发送。",
+                        "Generates Codex model_catalog_json so /model can show these third-party model names; entries are saved exactly as listed. Codex must be restarted to refresh the model list after changes.",
                     })}
                   </p>
                 </div>
 
                 {catalogRows.length > 0 && (
                   <div className="space-y-2">
-                    {/* 列头：md+ 显示 */}
+                    {/* Column headers shown at md and larger breakpoints. */}
                     <div className="hidden grid-cols-[1fr_1fr_140px_36px] gap-2 px-1 text-xs font-medium text-muted-foreground md:grid">
                       <span>
                         {t("codexConfig.catalogColumnDisplay", {
-                          defaultValue: "菜单显示名",
+                          defaultValue: "Menu Display Name",
                         })}
                       </span>
                       <span>
                         {t("codexConfig.catalogColumnModel", {
-                          defaultValue: "实际请求模型",
+                          defaultValue: "Actual Request Model",
                         })}
                       </span>
                       <span>
                         {t("codexConfig.catalogColumnContext", {
-                          defaultValue: "上下文窗口",
+                          defaultValue: "Context Window",
                         })}
                       </span>
                       <span />
@@ -600,11 +601,11 @@ export function CodexFormFields({
                           placeholder={t(
                             "codexConfig.catalogDisplayNamePlaceholder",
                             {
-                              defaultValue: "例如: DeepSeek V4 Flash",
+                              defaultValue: "e.g., DeepSeek V4 Flash",
                             },
                           )}
                           aria-label={t("codexConfig.catalogColumnDisplay", {
-                            defaultValue: "菜单显示名",
+                            defaultValue: "Menu Display Name",
                           })}
                         />
                         <div className="flex gap-1">
@@ -618,11 +619,11 @@ export function CodexFormFields({
                             placeholder={t(
                               "codexConfig.catalogModelPlaceholder",
                               {
-                                defaultValue: "例如: deepseek-v4-flash",
+                                defaultValue: "e.g., deepseek-v4-flash",
                               },
                             )}
                             aria-label={t("codexConfig.catalogColumnModel", {
-                              defaultValue: "实际请求模型",
+                              defaultValue: "Actual Request Model",
                             })}
                             className="flex-1"
                           />
@@ -656,11 +657,11 @@ export function CodexFormFields({
                           placeholder={t(
                             "codexConfig.contextWindowPlaceholder",
                             {
-                              defaultValue: "例如: 128000",
+                              defaultValue: "e.g., 128000",
                             },
                           )}
                           aria-label={t("codexConfig.catalogColumnContext", {
-                            defaultValue: "上下文窗口",
+                            defaultValue: "Context Window",
                           })}
                         />
                         <Button
@@ -669,7 +670,7 @@ export function CodexFormFields({
                           size="icon"
                           className="h-9 w-9 text-muted-foreground hover:text-destructive"
                           onClick={() => handleRemoveCatalogRow(index)}
-                          title={t("common.delete", { defaultValue: "删除" })}
+                          title={t("common.delete", { defaultValue: "Delete" })}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -707,7 +708,7 @@ export function CodexFormFields({
         </Collapsible>
       )}
 
-      {/* 端点测速弹窗 - Codex */}
+      {/* Codex endpoint speed-test dialog. */}
       {shouldShowSpeedTest && isEndpointModalOpen && (
         <EndpointSpeedTest
           appId="codex"

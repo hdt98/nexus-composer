@@ -71,8 +71,8 @@ function parseModelsFromConfig(settingsConfig: string) {
       typeof env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME === "string"
         ? env.ANTHROPIC_DEFAULT_OPUS_MODEL_NAME
         : stripClaudeOneMMarker(opus);
-    // 回填链镜像运行时映射链（fable → opus → default），保证 UI 展示
-    // 与代理实际转发的模型一致。
+    // Mirror the runtime fallback chain (fable → opus → default) so the UI
+    // displays the model actually forwarded by routing.
     const fable =
       typeof env.ANTHROPIC_DEFAULT_FABLE_MODEL === "string"
         ? env.ANTHROPIC_DEFAULT_FABLE_MODEL
@@ -109,8 +109,7 @@ function parseModelsFromConfig(settingsConfig: string) {
 }
 
 /**
- * 管理模型选择状态
- * 支持 ANTHROPIC_MODEL 和各类型默认模型
+ * Manages model selection state for ANTHROPIC_MODEL and role defaults.
  */
 export function useModelState({
   settingsConfig,
@@ -141,8 +140,8 @@ export function useModelState({
 
   latestConfigRef.current = settingsConfig;
 
-  // 仅在 settingsConfig 外部变化时同步（表单加载 / 切换预设）；
-  // 用户正在编辑时 (isUserEditingRef) 跳过一次以避免回填覆盖。
+  // Synchronize only external settingsConfig changes, such as form loading or
+  // switching presets. Skip once during user edits to avoid overwriting input.
   useEffect(() => {
     if (lastConfigRef.current === settingsConfig) {
       return;
@@ -194,14 +193,14 @@ export function useModelState({
         if (!currentConfig.env) currentConfig.env = {};
         const env = currentConfig.env as Record<string, unknown>;
 
-        // 新键仅写入；旧键不再写入
+        // Write only current keys; legacy keys are no longer written.
         const trimmed = value.trim();
         if (trimmed) {
           env[field] = trimmed;
         } else {
           delete env[field];
         }
-        // 删除旧键
+        // Remove the legacy key.
         delete env["ANTHROPIC_SMALL_FAST_MODEL"];
 
         const updatedConfig = JSON.stringify(currentConfig, null, 2);

@@ -14,8 +14,8 @@ interface UseCodexConfigStateProps {
   };
 }
 
-// auth.json 缺 OPENAI_API_KEY 时回退到 config.toml 的 experimental_bearer_token
-// (Mobile 兼容形态：保留 ChatGPT 登录态但用第三方 token)
+// Fall back to experimental_bearer_token in config.toml when auth.json has no OPENAI_API_KEY.
+// This mobile-compatible form retains the ChatGPT login state while using a third-party token.
 function pickCodexApiKey(
   authObj: { OPENAI_API_KEY?: unknown } | null | undefined,
   configText: string,
@@ -28,8 +28,8 @@ function pickCodexApiKey(
 }
 
 /**
- * 管理 Codex 配置状态
- * Codex 配置包含两部分：auth.json (JSON) 和 config.toml (TOML 字符串)
+ * Manage Codex configuration state.
+ * Codex configuration has two parts: auth.json as JSON and config.toml as a TOML string.
  */
 export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
   const [codexAuth, setCodexAuthState] = useState("");
@@ -43,17 +43,17 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
 
   const isUpdatingCodexBaseUrlRef = useRef(false);
 
-  // 初始化 Codex 配置（编辑模式）
+  // Initialize Codex configuration in edit mode.
   useEffect(() => {
     if (!initialData) return;
 
     const config = initialData.settingsConfig;
     if (typeof config === "object" && config !== null) {
-      // 设置 auth.json
+      // Set auth.json.
       const auth = (config as any).auth || {};
       setCodexAuthState(JSON.stringify(auth, null, 2));
 
-      // 设置 config.toml
+      // Set config.toml.
       const configStr =
         typeof (config as any).config === "string"
           ? (config as any).config
@@ -67,10 +67,10 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
       setCodexCatalogModels(
         rawCatalogModels
           .map((item: any) => {
-            // 隐藏字段（原生 Responses profile 用）不在行 UI 暴露，但必须 load→save
-            // 原样保留，否则编辑保存 MiMo/MiniMax 等会丢官方 base_instructions、
-            // 并行工具、图像模态。DB SSOT 为 camelCase、live 反解兜底可能为 snake_case，
-            // 双格式兼容（与 displayName/contextWindow 一致）。
+            // Hidden fields for native Responses profiles are not exposed in the row UI but must survive load and save.
+            // Preserve them verbatim so editing MiMo, MiniMax, and similar profiles does not discard official
+            // base_instructions, parallel tool support, or image modalities. The database source of truth uses
+            // camelCase, while live-config fallback parsing may use snake_case, so support both like displayName/contextWindow.
             const supportsParallelToolCalls =
               typeof item?.supportsParallelToolCalls === "boolean"
                 ? item.supportsParallelToolCalls
@@ -114,7 +114,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
           .filter((item: CodexCatalogModel) => item.model.trim()),
       );
 
-      // 提取 Base URL
+      // Extract the base URL.
       const initialBaseUrl = extractCodexBaseUrl(configStr);
       if (initialBaseUrl) {
         setCodexBaseUrl(initialBaseUrl);
@@ -124,7 +124,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     }
   }, [initialData]);
 
-  // 与 TOML 配置保持基础 URL 同步
+  // Keep the base URL synchronized with the TOML configuration.
   useEffect(() => {
     if (isUpdatingCodexBaseUrlRef.current) {
       return;
@@ -133,7 +133,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     setCodexBaseUrl((prev) => (prev === extracted ? prev : extracted));
   }, [codexConfig]);
 
-  // 获取 API Key（从 auth JSON）
+  // Get the API key from auth JSON.
   const getCodexAuthApiKey = useCallback((authString: string): string => {
     try {
       const auth = JSON.parse(authString || "{}");
@@ -143,7 +143,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     }
   }, []);
 
-  // 从 codexAuth 中提取并同步 API Key
+  // Extract and synchronize the API key from codexAuth.
   useEffect(() => {
     let parsed: { OPENAI_API_KEY?: unknown } | null = null;
     try {
@@ -155,7 +155,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     setCodexApiKey((prev) => (prev === extractedKey ? prev : extractedKey));
   }, [codexAuth, codexConfig]);
 
-  // 验证 Codex Auth JSON
+  // Validate Codex auth JSON.
   const validateCodexAuth = useCallback((value: string): string => {
     if (!value.trim()) return "";
     try {
@@ -169,7 +169,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     }
   }, []);
 
-  // 设置 auth 并验证
+  // Set and validate auth JSON.
   const setCodexAuth = useCallback(
     (value: string) => {
       setCodexAuthState(value);
@@ -178,7 +178,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     [validateCodexAuth],
   );
 
-  // 设置 config (支持函数更新)
+  // Set config, including functional updates.
   const setCodexConfig = useCallback(
     (value: string | ((prev: string) => string)) => {
       setCodexConfigState((prev) =>
@@ -190,9 +190,9 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     [],
   );
 
-  // 处理 Codex API Key 输入并写回 auth.json
-  // 同步: 若 config.toml 当前含 experimental_bearer_token (Mobile 兼容形态),
-  // 也一并更新/清除——否则用户清空输入框会被 pickCodexApiKey 的 fallback 又填回去
+  // Write Codex API key input back to auth.json.
+  // If config.toml contains experimental_bearer_token in its mobile-compatible form,
+  // update or clear it too. Otherwise, pickCodexApiKey would restore a value the user cleared.
   const handleCodexApiKeyChange = useCallback(
     (key: string) => {
       const trimmed = key.trim();
@@ -211,7 +211,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     [codexAuth, setCodexAuth, setCodexConfig],
   );
 
-  // 处理 Codex Base URL 变化
+  // Handle Codex base URL changes.
   const handleCodexBaseUrlChange = useCallback(
     (url: string) => {
       const sanitized = url.trim();
@@ -226,10 +226,10 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     [setCodexConfig],
   );
 
-  // 处理 config 变化（同步 Base URL）
+  // Handle config changes and synchronize the base URL.
   const handleCodexConfigChange = useCallback(
     (value: string) => {
-      // 归一化中文/全角/弯引号，避免 TOML 解析报错
+      // Normalize CJK, full-width, and curly quotation marks to prevent TOML parse errors.
       const normalized = normalizeTomlText(value);
       setCodexConfig(normalized);
 
@@ -243,7 +243,7 @@ export function useCodexConfigState({ initialData }: UseCodexConfigStateProps) {
     [setCodexConfig, codexBaseUrl],
   );
 
-  // 重置配置（用于预设切换）
+  // Reset configuration when switching presets.
   const resetCodexConfig = useCallback(
     (
       auth: Record<string, unknown>,

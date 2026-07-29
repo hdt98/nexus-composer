@@ -37,7 +37,7 @@ interface ProviderCardProps {
   provider: Provider;
   isCurrent: boolean;
   appId: AppId;
-  isInConfig?: boolean; // OpenCode: 是否已添加到 opencode.json
+  isInConfig?: boolean; // OpenCode: whether the provider is included in opencode.json.
   isOmo?: boolean;
   isOmoSlim?: boolean;
   onSwitch: (provider: Provider) => void;
@@ -53,19 +53,19 @@ interface ProviderCardProps {
   onOpenTerminal?: (provider: Provider) => void;
   isTesting?: boolean;
   isProxyRunning: boolean;
-  isProxyTakeover?: boolean; // 代理接管模式（Live配置已被接管，切换为热切换）
+  isProxyTakeover?: boolean; // Proxy takeover mode: live config is managed, so switches are applied immediately.
   dragHandleProps?: DragHandleProps;
-  isAutoFailoverEnabled?: boolean; // 是否开启自动故障转移
-  failoverPriority?: number; // 故障转移优先级（1 = P1, 2 = P2, ...）
-  isInFailoverQueue?: boolean; // 是否在故障转移队列中
-  onToggleFailover?: (enabled: boolean) => void; // 切换故障转移队列
-  activeProviderId?: string; // 代理当前实际使用的供应商 ID（用于故障转移模式下标注绿色边框）
+  isAutoFailoverEnabled?: boolean; // Whether automatic failover is enabled.
+  failoverPriority?: number; // Failover priority (1 = P1, 2 = P2, and so on).
+  isInFailoverQueue?: boolean; // Whether the provider is in the failover queue.
+  onToggleFailover?: (enabled: boolean) => void; // Toggle failover-queue membership.
+  activeProviderId?: string; // Provider currently used by the proxy, highlighted in green during failover.
   // OpenClaw: default model
   isDefaultModel?: boolean;
   onSetAsDefault?: () => void;
 }
 
-/** 判断是否为官方供应商（无自定义 base URL / API key，直连官方 API） */
+/** Determine whether a provider connects directly to the official API without a custom base URL or API key. */
 function isOfficialProvider(provider: Provider, appId: AppId): boolean {
   if (provider.category === "official") {
     return true;
@@ -77,7 +77,7 @@ function isOfficialProvider(provider: Provider, appId: AppId): boolean {
     return !baseUrl || (typeof baseUrl === "string" && baseUrl.trim() === "");
   }
   if (appId === "codex") {
-    // 无 OPENAI_API_KEY → 使用 Codex CLI 内置 OAuth（官方）
+    // Without OPENAI_API_KEY, Codex CLI uses its built-in official OAuth flow.
     const apiKey = config?.auth?.OPENAI_API_KEY;
     const bearerToken =
       typeof config?.config === "string"
@@ -89,7 +89,7 @@ function isOfficialProvider(provider: Provider, appId: AppId): boolean {
     );
   }
   if (appId === "gemini") {
-    // 无 GEMINI_API_KEY 且无 GOOGLE_GEMINI_BASE_URL → Google OAuth 官方模式
+    // Without GEMINI_API_KEY or GOOGLE_GEMINI_BASE_URL, use the official Google OAuth flow.
     const apiKey = config?.env?.GEMINI_API_KEY;
     const baseUrl = config?.env?.GOOGLE_GEMINI_BASE_URL;
     return (
@@ -173,7 +173,7 @@ export function ProviderCard({
   const { data: health } = useProviderHealth(provider.id, appId);
 
   const fallbackUrlText = t("provider.notConfigured", {
-    defaultValue: "未配置接口地址",
+    defaultValue: "Not configured for official website",
   });
 
   const displayUrl = useMemo(() => {
@@ -199,14 +199,18 @@ export function ProviderCard({
     TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
   const officialSubscriptionEnabled =
     supportsOfficialSubscription && usageEnabled && isOfficialSubscriptionUsage;
-  // 官方判定只认显式 category === "official"（SSOT），不回退 isOfficial 的空字段启发式。
-  // 理由（此判定曾在「纯 category ↔ category+isOfficial 回退」间反复，结论钉死于此）：
-  //  1) 封号保护是高代价决策，不该建立在「base_url/key 缺失」这种脆弱信号上——它无法区分
-  //     「想直连官方」与「自定义但还没填完」，两者都表现为字段为空，必然误伤后者。
-  //  2) 启发式在 UI 多拦的部分，执行层 useProviderActions.ts 也只认 category === "official"、
-  //     并不兑现（绕过 UI 即可切换）→ 属虚保护，却以误伤 category 缺失的自定义供应商为代价。
-  //  3) 预设导入的官方一定带 category="official"，category 缺失的「真官方」现实中≈不存在。
-  // 真官方就该有显式 category；手动新建官方应引导标注，而不是靠空字段猜。
+  // Treat only an explicit category === "official" as official here (the SSOT);
+  // do not fall back to the empty-field heuristic used by isOfficial.
+  // This decision is intentional:
+  //  1) Account-protection restrictions are costly and should not depend on a fragile
+  //     missing base_url/key signal. That signal cannot distinguish an official
+  //     connection from an unfinished custom provider, so it would block the latter.
+  //  2) useProviderActions.ts also recognizes only category === "official", so extra
+  //     heuristic blocking in the UI would be bypassable and provide false protection.
+  //  3) Imported official presets always include category="official"; a genuinely
+  //     official provider without that category is effectively nonexistent.
+  // Official providers should carry an explicit category. Manual creation should guide
+  // users to set it instead of inferring it from empty fields.
   const isCopilot =
     provider.meta?.providerType === PROVIDER_TYPES.GITHUB_COPILOT ||
     provider.meta?.usage_script?.templateType === "github_copilot";
@@ -230,8 +234,8 @@ export function ProviderCard({
     provider.meta?.apiFormat,
     (provider.settingsConfig as Record<string, any>)?.config,
   ]);
-  // 获取用量数据以判断是否有多套餐
-  // 累加模式应用（OpenCode/OpenClaw/Hermes）：使用 isInConfig 代替 isCurrent
+  // Load usage data to determine whether the provider exposes multiple plans.
+  // Additive-mode apps (OpenCode, OpenClaw, and Hermes) use isInConfig instead of isCurrent.
   const shouldAutoQuery =
     appId === "opencode" || appId === "openclaw" || appId === "hermes"
       ? isInConfig
@@ -265,12 +269,12 @@ export function ProviderCard({
     onOpenWebsite(displayUrl);
   };
 
-  // 判断是否是"当前使用中"的供应商
-  // - OMO/OMO Slim 供应商：使用 isCurrent
-  // - OpenClaw：使用默认模型归属的 provider 作为当前项（蓝色边框）
-  // - OpenCode（非 OMO）：不存在"当前"概念，返回 false
-  // - 故障转移模式：代理实际使用的供应商（activeProviderId）
-  // - 普通模式：isCurrent
+  // Determine whether this provider is currently active.
+  // - OMO and OMO Slim use isCurrent.
+  // - OpenClaw marks the provider that owns the default model as current (blue border).
+  // - OpenCode outside OMO has no current-provider concept and always returns false.
+  // - Failover mode uses the provider currently selected by the proxy (activeProviderId).
+  // - Normal mode uses isCurrent.
   const isActiveProvider = isAnyOmo
     ? isCurrent
     : appId === "openclaw"
@@ -365,7 +369,7 @@ export function ProviderCard({
                 provider.meta?.claudeDesktopMode === "proxy" && (
                   <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                     {t("claudeDesktop.modeProxy", {
-                      defaultValue: "需要路由",
+                      defaultValue: "Needs Routing",
                     })}
                   </span>
                 )}
@@ -376,7 +380,7 @@ export function ProviderCard({
                 provider.meta.apiFormat !== "anthropic" && (
                   <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                     {t("claudeCode.needsRouting", {
-                      defaultValue: "需要路由",
+                      defaultValue: "Needs Routing",
                     })}
                   </span>
                 )}
@@ -384,7 +388,7 @@ export function ProviderCard({
               {codexNeedsRouting && (
                 <span className="inline-flex items-center rounded-md bg-sky-100 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
                   {t("codex.needsRouting", {
-                    defaultValue: "需要路由",
+                    defaultValue: "Needs Routing",
                   })}
                 </span>
               )}
@@ -392,7 +396,7 @@ export function ProviderCard({
               {appId === "claude" && provider.category === "official" && (
                 <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
                   {t("claudeCode.noRoutingSupport", {
-                    defaultValue: "不支持路由",
+                    defaultValue: "No Routing Support",
                   })}
                 </span>
               )}
@@ -400,7 +404,7 @@ export function ProviderCard({
               {appId === "codex" && provider.category === "official" && (
                 <span className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200">
                   {t("codex.noRoutingSupport", {
-                    defaultValue: "不支持路由",
+                    defaultValue: "No Routing Support",
                   })}
                 </span>
               )}
@@ -423,7 +427,7 @@ export function ProviderCard({
                   <span
                     className="text-yellow-500 dark:text-yellow-400"
                     title={t("provider.officialPartner", {
-                      defaultValue: "官方合作伙伴",
+                      defaultValue: "Official Partner",
                     })}
                   >
                     ⭐
@@ -434,7 +438,8 @@ export function ProviderCard({
                 <span
                   className="inline-flex items-center rounded-md bg-slate-200 px-1.5 py-0.5 text-[10px] font-semibold text-slate-700 dark:bg-slate-700/60 dark:text-slate-200"
                   title={t("provider.managedByHermesHint", {
-                    defaultValue: "由 Hermes 管理，请在 Hermes Web UI 中编辑",
+                    defaultValue:
+                      "Defined in Hermes' providers: dict. Edit or remove it via Hermes Web UI.",
                   })}
                 >
                   {t("provider.managedByHermes", {
@@ -494,7 +499,7 @@ export function ProviderCard({
                   <span className="font-medium">
                     {t("usage.multiplePlans", {
                       count: usage?.data?.length || 0,
-                      defaultValue: `${usage?.data?.length || 0} 个套餐`,
+                      defaultValue: `${usage?.data?.length || 0} plans`,
                     })}
                   </span>
                 </div>
@@ -518,8 +523,8 @@ export function ProviderCard({
                   className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors text-gray-500 dark:text-gray-400 flex-shrink-0"
                   title={
                     isExpanded
-                      ? t("usage.collapse", { defaultValue: "收起" })
-                      : t("usage.expand", { defaultValue: "展开" })
+                      ? t("usage.collapse", { defaultValue: "Collapse" })
+                      : t("usage.expand", { defaultValue: "Expand" })
                   }
                 >
                   {isExpanded ? (
@@ -545,11 +550,13 @@ export function ProviderCard({
               onEdit={() => onEdit(provider)}
               onDuplicate={() => onDuplicate(provider)}
               onTest={
-                // 连通检测对第三方/自定义/Copilot/Codex-OAuth 供应商开放（这些正是旧的
-                // 真实请求探测会误报、而可达性探测能正确处理的对象）。官方供应商
-                // (category === "official") 一律隐藏：它们 base_url 故意留空、走客户端
-                // 默认/OAuth 端点，Nexus Composer 没有可靠的探测目标（尤其 Claude Desktop
-                // 官方是原生 1P 模式，根本不在请求路径上）。
+                // Offer connectivity tests for third-party, custom, Copilot, and
+                // Codex OAuth providers. Reachability probes handle these providers
+                // correctly where the old real-request probe produced false failures.
+                // Hide tests for official providers: their base_url is intentionally
+                // empty and the client uses a built-in or OAuth endpoint, so Nexus
+                // Composer has no reliable target to probe. Official Claude Desktop
+                // mode is also native first-party traffic outside this request path.
                 onTest && provider.category !== "official"
                   ? () => onTest(provider)
                   : undefined

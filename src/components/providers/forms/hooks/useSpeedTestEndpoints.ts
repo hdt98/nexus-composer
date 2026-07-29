@@ -23,15 +23,15 @@ interface UseSpeedTestEndpointsProps {
 }
 
 /**
- * 收集端点测速弹窗的初始端点列表
+ * Collect initial endpoints for the endpoint speed-test dialog.
  *
- * 收集来源：
- * 1. 当前选中的 Base URL
- * 2. 编辑模式下的初始数据 URL
- * 3. 预设中的 endpointCandidates
+ * Sources:
+ * 1. The currently selected base URL.
+ * 2. The initial data URL in edit mode.
+ * 3. endpointCandidates from the selected preset.
  *
- * 注意：已保存的自定义端点通过 getCustomEndpoints API 在 EndpointSpeedTest 组件中加载，
- * 不在此处读取，避免重复导入。
+ * Saved custom endpoints are loaded by EndpointSpeedTest through the
+ * getCustomEndpoints API, so do not load them here and import duplicates.
  */
 export function useSpeedTestEndpoints({
   appId,
@@ -46,8 +46,8 @@ export function useSpeedTestEndpoints({
     if (appId !== "claude" && appId !== "gemini") return [];
 
     const map = new Map<string, EndpointCandidate>();
-    // 候选端点标记为 isCustom: false，表示来自预设或配置
-    // 已保存的自定义端点会在 EndpointSpeedTest 组件中通过 API 加载
+    // Candidate endpoints use isCustom: false because they come from presets or configuration.
+    // EndpointSpeedTest loads saved custom endpoints separately through the API.
     const add = (url?: string, isCustom = false) => {
       if (!url) return;
       const sanitized = url.trim().replace(/\/+$/, "");
@@ -55,12 +55,12 @@ export function useSpeedTestEndpoints({
       map.set(sanitized, { url: sanitized, isCustom });
     };
 
-    // 1. 当前 Base URL
+    // 1. Current base URL.
     if (baseUrl) {
       add(baseUrl);
     }
 
-    // 2. 编辑模式：初始数据中的 URL
+    // 2. URL from initial data in edit mode.
     if (initialData && typeof initialData.settingsConfig === "object") {
       const configEnv = initialData.settingsConfig as {
         env?: { ANTHROPIC_BASE_URL?: string; GOOGLE_GEMINI_BASE_URL?: string };
@@ -74,7 +74,7 @@ export function useSpeedTestEndpoints({
       });
     }
 
-    // 3. 预设中的 endpointCandidates
+    // 3. endpointCandidates from the selected preset.
     if (selectedPresetId && selectedPresetId !== "custom") {
       const entry = presetEntries.find((item) => item.id === selectedPresetId);
       if (entry) {
@@ -82,7 +82,7 @@ export function useSpeedTestEndpoints({
           settingsConfig?: { env?: { GOOGLE_GEMINI_BASE_URL?: string } };
           endpointCandidates?: string[];
         };
-        // 添加预设自己的 baseUrl（兼容 Claude/Gemini）
+        // Add the preset's own base URL for Claude and Gemini compatibility.
         const presetEnv = preset.settingsConfig as {
           env?: {
             ANTHROPIC_BASE_URL?: string;
@@ -94,7 +94,7 @@ export function useSpeedTestEndpoints({
           presetEnv?.env?.GOOGLE_GEMINI_BASE_URL,
         ];
         presetUrls.forEach((u) => add(u));
-        // 添加预设的候选端点
+        // Add candidate endpoints from the preset.
         if (preset.endpointCandidates) {
           preset.endpointCandidates.forEach((url) => add(url));
         }
@@ -108,8 +108,8 @@ export function useSpeedTestEndpoints({
     if (appId !== "codex") return [];
 
     const map = new Map<string, EndpointCandidate>();
-    // 候选端点标记为 isCustom: false，表示来自预设或配置
-    // 已保存的自定义端点会在 EndpointSpeedTest 组件中通过 API 加载
+    // Candidate endpoints use isCustom: false because they come from presets or configuration.
+    // EndpointSpeedTest loads saved custom endpoints separately through the API.
     const add = (url?: string, isCustom = false) => {
       if (!url) return;
       const sanitized = url.trim().replace(/\/+$/, "");
@@ -117,12 +117,12 @@ export function useSpeedTestEndpoints({
       map.set(sanitized, { url: sanitized, isCustom });
     };
 
-    // 1. 当前 Codex Base URL
+    // 1. Current Codex base URL.
     if (codexBaseUrl) {
       add(codexBaseUrl);
     }
 
-    // 2. 编辑模式：初始数据中的 URL
+    // 2. URL from initial data in edit mode.
     const initialCodexConfig = initialData?.settingsConfig as
       | {
           config?: string;
@@ -134,18 +134,18 @@ export function useSpeedTestEndpoints({
       add(extractedBaseUrl);
     }
 
-    // 3. 预设中的 endpointCandidates
+    // 3. endpointCandidates from the selected preset.
     if (selectedPresetId && selectedPresetId !== "custom") {
       const entry = presetEntries.find((item) => item.id === selectedPresetId);
       if (entry) {
         const preset = entry.preset as CodexProviderPreset;
-        // 添加预设自己的 baseUrl
+        // Add the preset's own base URL.
         const presetConfig = preset.config || "";
         const presetBaseUrl = extractCodexBaseUrl(presetConfig);
         if (presetBaseUrl) {
           add(presetBaseUrl);
         }
-        // 添加预设的候选端点
+        // Add candidate endpoints from the preset.
         if (preset.endpointCandidates) {
           preset.endpointCandidates.forEach((url) => add(url));
         }

@@ -104,7 +104,7 @@ objc2-app-kit = { version = "0.2", features = ["NSColor"] }
 codegen-units = 1
 lto = "thin"
 opt-level = "s"
-# 使用 unwind 以便 panic hook 能捕获 backtrace（abort 会直接终止无法捕获）
+# Use unwind so the panic hook can capture a backtrace; abort would terminate immediately.
 panic = "unwind"
 strip = "symbols"
 

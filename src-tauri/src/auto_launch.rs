@@ -1,71 +1,71 @@
 use crate::error::AppError;
 use auto_launch::{AutoLaunch, AutoLaunchBuilder};
 
-/// 获取 macOS 上的 .app bundle 路径
-/// 将 `/path/to/Nexus Composer.app/Contents/MacOS/Nexus Composer` 转换为 `/path/to/Nexus Composer.app`
+/// Returns the macOS .app bundle path.
+/// Converts `/path/to/Nexus Composer.app/Contents/MacOS/Nexus Composer` to `/path/to/Nexus Composer.app`.
 #[cfg(target_os = "macos")]
 fn get_macos_app_bundle_path(exe_path: &std::path::Path) -> Option<std::path::PathBuf> {
     let path_str = exe_path.to_string_lossy();
-    // 查找 .app/Contents/MacOS/ 模式
+    // Find the .app/Contents/MacOS/ pattern.
     if let Some(app_pos) = path_str.find(".app/Contents/MacOS/") {
-        let app_bundle_end = app_pos + 4; // ".app" 的结束位置
+        let app_bundle_end = app_pos + 4; // End of ".app".
         Some(std::path::PathBuf::from(&path_str[..app_bundle_end]))
     } else {
         None
     }
 }
 
-/// 初始化 AutoLaunch 实例
+/// Initializes an AutoLaunch instance.
 fn get_auto_launch() -> Result<AutoLaunch, AppError> {
     let app_name = "Nexus Composer";
-    let exe_path =
-        std::env::current_exe().map_err(|e| AppError::Message(format!("无法获取应用路径: {e}")))?;
+    let exe_path = std::env::current_exe()
+        .map_err(|e| AppError::Message(format!("Cannot determine the application path: {e}")))?;
 
-    // macOS 需要使用 .app bundle 路径，否则 AppleScript login item 会打开终端
+    // macOS needs the .app bundle path; otherwise the AppleScript login item opens a terminal.
     #[cfg(target_os = "macos")]
     let app_path = get_macos_app_bundle_path(&exe_path).unwrap_or(exe_path);
 
     #[cfg(not(target_os = "macos"))]
     let app_path = exe_path;
 
-    // 使用 AutoLaunchBuilder 消除平台差异
-    // macOS: 使用 AppleScript 方式（默认），需要 .app bundle 路径
-    // Windows/Linux: 使用注册表/XDG autostart
+    // Use AutoLaunchBuilder to abstract platform differences.
+    // macOS: the default AppleScript method requires an .app bundle path.
+    // Windows/Linux: registry or XDG autostart.
     let auto_launch = AutoLaunchBuilder::new()
         .set_app_name(app_name)
         .set_app_path(&app_path.to_string_lossy())
         .build()
-        .map_err(|e| AppError::Message(format!("创建 AutoLaunch 失败: {e}")))?;
+        .map_err(|e| AppError::Message(format!("Failed to create AutoLaunch: {e}")))?;
 
     Ok(auto_launch)
 }
 
-/// 启用开机自启
+/// Enables launch at startup.
 pub fn enable_auto_launch() -> Result<(), AppError> {
     let auto_launch = get_auto_launch()?;
     auto_launch
         .enable()
-        .map_err(|e| AppError::Message(format!("启用开机自启失败: {e}")))?;
-    log::info!("已启用开机自启");
+        .map_err(|e| AppError::Message(format!("Failed to enable launch at startup: {e}")))?;
+    log::info!("Enabled launch at startup");
     Ok(())
 }
 
-/// 禁用开机自启
+/// Disables launch at startup.
 pub fn disable_auto_launch() -> Result<(), AppError> {
     let auto_launch = get_auto_launch()?;
     auto_launch
         .disable()
-        .map_err(|e| AppError::Message(format!("禁用开机自启失败: {e}")))?;
-    log::info!("已禁用开机自启");
+        .map_err(|e| AppError::Message(format!("Failed to disable launch at startup: {e}")))?;
+    log::info!("Disabled launch at startup");
     Ok(())
 }
 
-/// 检查是否已启用开机自启
+/// Returns whether launch at startup is enabled.
 pub fn is_auto_launch_enabled() -> Result<bool, AppError> {
     let auto_launch = get_auto_launch()?;
     auto_launch
         .is_enabled()
-        .map_err(|e| AppError::Message(format!("检查开机自启状态失败: {e}")))
+        .map_err(|e| AppError::Message(format!("Failed to check launch-at-startup status: {e}")))
 }
 
 #[cfg(test)]
@@ -111,7 +111,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn test_get_macos_app_bundle_path_dev_build() {
-        // 开发环境下的路径通常不在 .app bundle 内
+        // Development paths are usually outside an .app bundle.
         let exe_path = std::path::Path::new("/Users/dev/project/target/debug/nexus-composer");
         let result = get_macos_app_bundle_path(exe_path);
         assert_eq!(result, None);

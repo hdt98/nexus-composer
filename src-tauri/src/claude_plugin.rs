@@ -7,11 +7,12 @@ const CLAUDE_DIR: &str = ".claude";
 const CLAUDE_CONFIG_FILE: &str = "config.json";
 
 fn claude_dir() -> Result<PathBuf, AppError> {
-    // 优先使用设置中的覆盖目录
+    // Prefer the directory override from settings.
     if let Some(dir) = crate::settings::get_claude_override_dir() {
         return Ok(dir);
     }
-    let home = dirs::home_dir().ok_or_else(|| AppError::Config("无法获取用户主目录".into()))?;
+    let home = dirs::home_dir()
+        .ok_or_else(|| AppError::Config("Cannot find the user home directory".into()))?;
     Ok(home.join(CLAUDE_DIR))
 }
 
@@ -49,11 +50,11 @@ fn is_managed_config(content: &str) -> bool {
 }
 
 pub fn write_claude_config() -> Result<bool, AppError> {
-    // 增量写入：仅设置 primaryApiKey = "any"，保留其它字段
+    // Update only primaryApiKey = "any" and preserve all other fields.
     let path = claude_config_path()?;
     ensure_claude_dir_exists()?;
 
-    // 尝试读取并解析为对象
+    // Read the file and try to parse it as an object.
     let mut obj = match read_claude_config()? {
         Some(existing) => match serde_json::from_str::<serde_json::Value>(&existing) {
             Ok(serde_json::Value::Object(map)) => serde_json::Value::Object(map),

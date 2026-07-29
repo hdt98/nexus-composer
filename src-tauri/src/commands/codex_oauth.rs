@@ -1,9 +1,10 @@
 //! Codex OAuth Tauri Commands
 //!
-//! 提供 OpenAI ChatGPT Plus/Pro OAuth 认证相关的 Tauri 命令。
+//! Tauri commands for OpenAI ChatGPT Plus/Pro OAuth authentication.
 //!
-//! 大部分认证命令通过通用 `auth_*` 命令（参见 `commands::auth`）暴露给前端，
-//! 此处定义 State wrapper 以及 Codex OAuth 专属的订阅额度和模型列表查询命令。
+//! Most authentication commands are exposed through the generic `auth_*` commands; see
+//! `commands::auth`. This module defines the state wrapper and Codex OAuth-specific commands
+//! for querying subscription quotas and available models.
 
 use crate::proxy::providers::codex_oauth_auth::CodexOAuthManager;
 use crate::services::model_fetch::FetchedModel;
@@ -12,15 +13,15 @@ use std::sync::Arc;
 use tauri::State;
 use tokio::sync::RwLock;
 
-/// Codex OAuth 认证状态
+/// Codex OAuth authentication state.
 pub struct CodexOAuthState(pub Arc<RwLock<CodexOAuthManager>>);
 
-/// 查询 Codex OAuth (ChatGPT Plus/Pro) 订阅额度
+/// Queries a Codex OAuth (ChatGPT Plus/Pro) subscription quota.
 ///
-/// - `account_id` 未指定时回退到 `CodexOAuthManager` 的默认账号
-/// - 没有任何账号时返回 `not_found`，前端 `SubscriptionQuotaView` 会静默不渲染
-/// - 复用 `services::subscription::query_codex_quota`，因此 wham/usage 端点协议
-///   与 Codex CLI 路径完全一致
+/// - Falls back to the `CodexOAuthManager` default account when `account_id` is absent.
+/// - Returns `not_found` when there are no accounts, allowing `SubscriptionQuotaView` to stay hidden.
+/// - Reuses `services::subscription::query_codex_quota`, keeping the wham/usage endpoint
+///   protocol identical to the Codex CLI path.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_codex_oauth_quota(
     account_id: Option<String>,
@@ -28,7 +29,7 @@ pub async fn get_codex_oauth_quota(
 ) -> Result<SubscriptionQuota, String> {
     let manager = state.0.read().await;
 
-    // 解析最终使用的账号 ID：显式 > 默认账号 > 无账号 (not_found)
+    // Resolve the account ID: explicit account > default account > not_found.
     let resolved = match account_id {
         Some(id) => Some(id),
         None => manager.default_account_id().await,
@@ -37,7 +38,7 @@ pub async fn get_codex_oauth_quota(
         return Ok(SubscriptionQuota::not_found("codex_oauth"));
     };
 
-    // 获取（必要时自动刷新）access_token
+    // Obtain the access token, refreshing it automatically when necessary.
     let token = match manager.get_valid_token_for_account(&id).await {
         Ok(t) => t,
         Err(e) => {
@@ -58,11 +59,11 @@ pub async fn get_codex_oauth_quota(
     .await)
 }
 
-/// 获取 Codex OAuth (ChatGPT Plus/Pro) 可用模型列表
+/// Returns the models available to Codex OAuth (ChatGPT Plus/Pro).
 ///
-/// ChatGPT Codex 反代使用 `chatgpt.com/backend-api/codex/*`，不是 OpenAI 兼容
-/// `/v1/models`。这里复用托管 OAuth 账号的 access_token，直接读取 Codex 后端
-/// 暴露的模型列表端点。
+/// The ChatGPT Codex gateway uses `chatgpt.com/backend-api/codex/*`, not the OpenAI-compatible
+/// `/v1/models` endpoint. This reuses a managed OAuth account's access token to query the model
+/// list exposed directly by the Codex backend.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn get_codex_oauth_models(
     account_id: Option<String>,

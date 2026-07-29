@@ -1,12 +1,12 @@
-//! 供应商余额查询服务
+//! Provider balance-query service.
 //!
-//! 支持 DeepSeek、StepFun、SiliconFlow、OpenRouter、Novita AI 的账户余额查询。
-//! 返回 UsageResult 格式，与现有用量系统无缝对接。
+//! Supports account-balance queries for DeepSeek, StepFun, SiliconFlow, OpenRouter,
+//! and Novita AI. Returns UsageResult values compatible with the existing usage system.
 
 use crate::provider::{UsageData, UsageResult};
 use std::time::Duration;
 
-// ── 供应商检测 ──────────────────────────────────────────────
+// ── Provider detection ──────────────────────────────────────
 
 enum BalanceProvider {
     DeepSeek,
@@ -318,7 +318,7 @@ async fn query_openrouter(api_key: &str) -> UsageResult {
 // ── Novita AI ───────────────────────────────────────────────
 // GET https://api.novita.ai/v3/user/balance
 // Response: { availableBalance, cashBalance, creditLimit, outstandingInvoices }
-// 金额单位：0.0001 USD
+// Monetary unit: 0.0001 USD.
 
 async fn query_novita(api_key: &str) -> UsageResult {
     let client = crate::proxy::http_client::get();
@@ -350,7 +350,7 @@ async fn query_novita(api_key: &str) -> UsageResult {
         Err(e) => return make_error(format!("Failed to parse response: {e}")),
     };
 
-    // Novita 金额单位为 0.0001 USD，需除以 10000 转为 USD
+    // Novita amounts use units of 0.0001 USD; divide by 10,000 to convert to USD.
     let available = parse_f64_field(&body, "availableBalance").unwrap_or(0.0) / 10000.0;
 
     UsageResult {
@@ -373,9 +373,9 @@ async fn query_novita(api_key: &str) -> UsageResult {
     }
 }
 
-// ── 工具函数 ────────────────────────────────────────────────
+// ── Helpers ─────────────────────────────────────────────────
 
-/// 解析 JSON 字段为 f64，兼容数字和字符串格式
+/// Parses a JSON field as f64, accepting both number and string representations.
 fn parse_f64_field(obj: &serde_json::Value, field: &str) -> Option<f64> {
     obj.get(field).and_then(|v| {
         v.as_f64()
@@ -383,7 +383,7 @@ fn parse_f64_field(obj: &serde_json::Value, field: &str) -> Option<f64> {
     })
 }
 
-// ── 公开入口 ────────────────────────────────────────────────
+// ── Public entry point ──────────────────────────────────────
 
 pub async fn get_balance(base_url: &str, api_key: &str) -> Result<UsageResult, String> {
     if api_key.trim().is_empty() {

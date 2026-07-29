@@ -220,7 +220,7 @@ export function useOmoModelSource({
     return {
       options: Array.from(dedupedOptions.entries())
         .map(([value, label]) => ({ value, label }))
-        .sort((a, b) => a.label.localeCompare(b.label, "zh-CN")),
+        .sort((a, b) => a.label.localeCompare(b.label, "en-US")),
       variantsMap,
       presetMetaMap,
       parseFailedProviders,

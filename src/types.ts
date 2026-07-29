@@ -1,32 +1,32 @@
 export type ProviderCategory =
-  | "official" // 官方
-  | "cn_official" // 开源官方（原"国产官方"）
-  | "cloud_provider" // 云服务商（AWS Bedrock 等）
-  | "aggregator" // 聚合网站
-  | "third_party" // 第三方供应商
-  | "custom" // 自定义
+  | "official" // Official provider
+  | "cn_official" // Open-source official provider (formerly "domestic official")
+  | "cloud_provider" // Cloud provider, such as AWS Bedrock
+  | "aggregator" // API aggregator
+  | "third_party" // Third-party provider
+  | "custom" // Custom provider
   | "omo" // Oh My OpenCode
   | "omo-slim"; // Oh My OpenCode Slim
 
 export interface Provider {
   id: string;
   name: string;
-  settingsConfig: Record<string, any>; // 应用配置对象：Claude 为 settings.json；Codex 为 { auth, config }
+  settingsConfig: Record<string, any>; // App config: settings.json for Claude; { auth, config } for Codex
   websiteUrl?: string;
-  // 新增：供应商分类（用于差异化提示/能力开关）
+  // Provider category used for contextual guidance and capability toggles.
   category?: ProviderCategory;
-  createdAt?: number; // 添加时间戳（毫秒）
-  sortIndex?: number; // 排序索引（用于自定义拖拽排序）
-  // 备注信息
+  createdAt?: number; // Creation timestamp in milliseconds
+  sortIndex?: number; // Custom drag-and-drop sort index
+  // Optional notes
   notes?: string;
-  // 新增：是否为商业合作伙伴
+  // Whether this is a commercial partner.
   isPartner?: boolean;
-  // 可选：供应商元数据（仅存于 ~/.nexus-composer/config.json，不写入 live 配置）
+  // Provider metadata stored only in ~/.nexus-composer/config.json, not live config.
   meta?: ProviderMeta;
-  // 图标配置
-  icon?: string; // 图标名称（如 "openai", "anthropic"）
-  iconColor?: string; // 图标颜色（Hex 格式，如 "#00A67E"）
-  // 是否加入故障转移队列
+  // Icon configuration
+  icon?: string; // Icon name, such as "openai" or "anthropic"
+  iconColor?: string; // Hex icon color, such as "#00A67E"
+  // Whether the provider is in the failover queue.
   inFailoverQueue?: boolean;
 }
 
@@ -35,14 +35,14 @@ export interface AppConfig {
   current: string;
 }
 
-// 自定义端点配置
+// Custom endpoint configuration
 export interface CustomEndpoint {
   url: string;
   addedAt: number;
   lastUsed?: number;
 }
 
-// 端点候选项（用于端点测速弹窗）
+// Endpoint candidate used by the speed-test dialog
 export interface EndpointCandidate {
   id?: string;
   url: string;
@@ -51,28 +51,28 @@ export interface EndpointCandidate {
 
 import type { TemplateType } from "./config/constants";
 
-// 用量查询脚本配置
+// Usage-query script configuration
 export interface UsageScript {
-  enabled: boolean; // 是否启用用量查询
-  language: "javascript"; // 脚本语言
-  code: string; // 脚本代码（JSON 格式配置）
-  timeout?: number; // 超时时间（秒，默认 10）
-  templateType?: TemplateType; // 模板类型（用于后端判断验证规则）
-  apiKey?: string; // 用量查询专用的 API Key（通用模板使用）
-  baseUrl?: string; // 用量查询专用的 Base URL（通用和 NewAPI 模板使用）
-  accessToken?: string; // 访问令牌（NewAPI 模板使用）
-  userId?: string; // 用户ID（NewAPI 模板使用）
-  accessKeyId?: string; // 火山方舟 AccessKey ID（用量查询签名用，与推理 Key 分离）
-  secretAccessKey?: string; // 火山方舟 SecretAccessKey
-  codingPlanProvider?: string; // Coding Plan 供应商标识（如 "kimi", "zhipu", "minimax"）
-  autoQueryInterval?: number; // 自动查询间隔（单位：分钟，0 表示禁用）
-  autoIntervalMinutes?: number; // 自动查询间隔（分钟）- 别名字段
+  enabled: boolean; // Whether usage queries are enabled
+  language: "javascript"; // Script language
+  code: string; // Script code represented as JSON configuration
+  timeout?: number; // Timeout in seconds; defaults to 10
+  templateType?: TemplateType; // Template type used by backend validation
+  apiKey?: string; // Usage-query API key for the generic template
+  baseUrl?: string; // Usage-query base URL for generic and NewAPI templates
+  accessToken?: string; // Access token for the NewAPI template
+  userId?: string; // User ID for the NewAPI template
+  accessKeyId?: string; // Volcengine Ark AccessKey ID used only to sign usage queries
+  secretAccessKey?: string; // Volcengine Ark SecretAccessKey
+  codingPlanProvider?: string; // Coding Plan provider ID, such as "kimi", "zhipu", or "minimax"
+  autoQueryInterval?: number; // Automatic query interval in minutes; 0 disables it
+  autoIntervalMinutes?: number; // Alias for the automatic query interval in minutes
   request?: {
-    // 请求配置
-    url?: string; // 请求 URL
-    method?: string; // HTTP 方法
-    headers?: Record<string, string>; // 请求头
-    body?: any; // 请求体
+    // Request configuration
+    url?: string; // Request URL
+    method?: string; // HTTP method
+    headers?: Record<string, string>; // Request headers
+    body?: any; // Request body
   };
 }
 
@@ -90,34 +90,34 @@ export function createUsageScript(
   return { ...DEFAULT_USAGE_SCRIPT, ...overrides };
 }
 
-// 单个套餐用量数据
+// Usage data for one plan
 export interface UsageData {
-  planName?: string; // 套餐名称（可选）
-  extra?: string; // 扩展字段，可自由补充需要展示的文本（可选）
-  isValid?: boolean; // 套餐是否有效（可选）
-  invalidMessage?: string; // 失效原因说明（可选，当 isValid 为 false 时显示）
-  total?: number; // 总额度（可选）
-  used?: number; // 已用额度（可选）
-  remaining?: number; // 剩余额度（可选）
-  unit?: string; // 单位（可选）
+  planName?: string; // Optional plan name
+  extra?: string; // Optional supplemental display text
+  isValid?: boolean; // Optional plan validity flag
+  invalidMessage?: string; // Optional reason shown when isValid is false
+  total?: number; // Optional total quota
+  used?: number; // Optional used quota
+  remaining?: number; // Optional remaining quota
+  unit?: string; // Optional unit
 }
 
-// 用量查询结果（支持多套餐）
+// Usage-query result supporting multiple plans
 export interface UsageResult {
   success: boolean;
-  data?: UsageData[]; // 改为数组，支持返回多个套餐
+  data?: UsageData[]; // Array form supports multiple plans
   error?: string;
 }
 
-// 供应商单独的连通检测配置（覆盖全局配置）
+// Per-provider connectivity-test configuration that overrides global settings
 export interface ProviderTestConfig {
-  // 是否启用单独配置（false 时使用全局配置）
+  // Whether to use this override; false uses the global configuration.
   enabled: boolean;
-  // 超时时间（秒）
+  // Timeout in seconds
   timeoutSecs?: number;
-  // 降级阈值（毫秒）
+  // Degraded-response threshold in milliseconds
   degradedThresholdMs?: number;
-  // 最大重试次数
+  // Maximum retry count
   maxRetries?: number;
 }
 
@@ -144,14 +144,14 @@ export type CodexChatThinkingParam =
 export type CodexChatEffortParam =
   | "none"
   | "reasoning_effort"
-  // OpenRouter 原生归一化对象 reasoning:{effort}（区别于顶层 OpenAI 别名 reasoning_effort）
+  // OpenRouter's native normalized reasoning:{effort} object, distinct from the top-level OpenAI reasoning_effort alias
   | "reasoning.effort";
 
 export type CodexChatEffortValueMode =
   | "passthrough"
   | "low_high"
   | "deepseek"
-  // OpenRouter effort 枚举 xhigh|high|medium|low|minimal（无 max，max 钳到 xhigh）
+  // OpenRouter effort values: xhigh|high|medium|low|minimal; max is clamped to xhigh
   | "openrouter";
 
 export type CodexChatReasoningOutputFormat =
@@ -167,7 +167,8 @@ export interface CodexChatReasoning {
   thinkingParam?: CodexChatThinkingParam;
   effortParam?: CodexChatEffortParam;
   effortValueMode?: CodexChatEffortValueMode;
-  // 声明性字段：标注上游 reasoning 回传位置。当前提取靠穷举字段，未读取此值（think_tags 尚未接线）。
+  // Declares where upstream reasoning is returned. Extraction currently checks
+  // known fields directly and does not read this value; think_tags is not wired yet.
   outputFormat?: CodexChatReasoningOutputFormat;
 }
 
@@ -176,45 +177,45 @@ export interface LocalProxyRequestOverrides {
   body?: Record<string, unknown>;
 }
 
-// 供应商元数据（字段名与后端一致，保持 snake_case）
+// Provider metadata; field names match the backend and retain snake_case.
 export interface ProviderMeta {
-  // 自定义端点：以 URL 为键，值为端点信息
+  // Custom endpoints keyed by URL.
   custom_endpoints?: Record<string, CustomEndpoint>;
-  // 是否在切换/同步到 live 时应用通用配置片段
+  // Whether switching or syncing to live config applies the common snippet.
   commonConfigEnabled?: boolean;
-  // Claude Desktop 3P 配置写入模式
+  // Claude Desktop third-party configuration write mode
   claudeDesktopMode?: "direct" | "proxy";
-  // Claude Desktop 本地路由模式：Claude-safe route -> upstream model
+  // Claude Desktop local routing: Claude-safe route -> upstream model
   claudeDesktopModelRoutes?: Record<string, ClaudeDesktopModelRoute>;
-  // 用量查询脚本配置
+  // Usage-query script configuration
   usage_script?: UsageScript;
-  // 请求地址管理：测速后自动选择最佳端点
+  // Automatically select the best endpoint after speed testing.
   endpointAutoSelect?: boolean;
-  // 是否为官方合作伙伴
+  // Whether this is an official partner.
   isPartner?: boolean;
-  // 合作伙伴促销 key（用于后端识别 PackyCode 等）
+  // Partner promotion key used by the backend to identify PackyCode and others.
   partnerPromotionKey?: string;
-  // 供应商单独的模型测试配置
+  // Per-provider model-test configuration
   testConfig?: ProviderTestConfig;
-  // 供应商成本倍率
+  // Provider cost multiplier
   costMultiplier?: string;
-  // 供应商计费模式来源
+  // Source of the provider pricing model
   pricingModelSource?: string;
-  // API 格式（Claude / Codex 供应商使用）
-  // - "anthropic": 原生 Anthropic Messages API 格式，直接透传
-  // - "openai_chat": OpenAI Chat Completions 格式，需要格式转换
-  // - "openai_responses": OpenAI Responses API 格式，需要格式转换
-  // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
+  // API format used by Claude and Codex providers
+  // - "anthropic": native Anthropic Messages API, passed through directly
+  // - "openai_chat": OpenAI Chat Completions, requiring format conversion
+  // - "openai_responses": OpenAI Responses, requiring format conversion
+  // - "gemini_native": Gemini Native generateContent, requiring format conversion
   apiFormat?:
     | "anthropic"
     | "openai_chat"
     | "openai_responses"
     | "gemini_native";
-  // 通用认证绑定
+  // Shared authentication binding
   authBinding?: AuthBinding;
-  // Claude 认证字段名
+  // Claude authentication field name
   apiKeyField?: ClaudeApiKeyField;
-  // 是否将 base_url 视为完整 API 端点（代理直接使用此 URL，不拼接路径）
+  // Whether base_url is a complete API endpoint used without appending a path.
   isFullUrl?: boolean;
   // Prompt cache key for OpenAI Responses-compatible endpoints (improves cache hit rate)
   promptCacheKey?: string;
@@ -228,32 +229,32 @@ export interface ProviderMeta {
   localProxyRequestOverrides?: LocalProxyRequestOverrides;
   // Version of the Nexus-managed defaults applied to this provider.
   managedNexusPresetVersion?: number;
-  // 供应商类型（用于识别 Copilot 等特殊供应商）
+  // Provider type used to identify special providers such as Copilot.
   providerType?: string;
-  // GitHub Copilot 关联账号 ID（旧字段，保留兼容读取）
+  // Legacy GitHub Copilot account ID retained for compatibility reads.
   githubAccountId?: string;
 }
 
-// Skill 同步方式
+// Skill synchronization method
 export type SkillSyncMethod = "auto" | "symlink" | "copy";
 
-// Skill 存储位置
+// Skill storage location
 export type SkillStorageLocation = "cc_switch" | "unified";
 
-// Claude API 格式类型
-// - "anthropic": 原生 Anthropic Messages API 格式，直接透传
-// - "openai_chat": OpenAI Chat Completions 格式，需要格式转换
-// - "openai_responses": OpenAI Responses API 格式，需要格式转换
-// - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
+// Claude API format
+// - "anthropic": native Anthropic Messages API, passed through directly
+// - "openai_chat": OpenAI Chat Completions, requiring format conversion
+// - "openai_responses": OpenAI Responses, requiring format conversion
+// - "gemini_native": Gemini Native generateContent, requiring format conversion
 export type ClaudeApiFormat =
   | "anthropic"
   | "openai_chat"
   | "openai_responses"
   | "gemini_native";
 
-// Codex API 格式类型
-// - "openai_responses": OpenAI Responses API 格式，直接透传
-// - "openai_chat": OpenAI Chat Completions 格式，需要本地路由转换
+// Codex API format
+// - "openai_responses": OpenAI Responses API, passed through directly
+// - "openai_chat": OpenAI Chat Completions, requiring local route conversion
 export type CodexApiFormat = "openai_responses" | "openai_chat";
 
 export interface CodexCatalogModel {
@@ -271,10 +272,10 @@ export interface CodexCatalogModel {
   baseInstructions?: string;
 }
 
-// Claude 认证字段类型
+// Claude authentication field type
 export type ClaudeApiKeyField = "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
 
-// 主页面显示的应用配置
+// Applications visible on the main page
 export interface VisibleApps {
   claude: boolean;
   "claude-desktop": boolean;
@@ -285,7 +286,7 @@ export interface VisibleApps {
   hermes: boolean;
 }
 
-// WebDAV 同步状态
+// WebDAV synchronization status
 export interface WebDavSyncStatus {
   lastSyncAt?: number | null;
   lastError?: string | null;
@@ -295,7 +296,7 @@ export interface WebDavSyncStatus {
   lastRemoteManifestHash?: string | null;
 }
 
-// WebDAV 同步配置
+// WebDAV synchronization settings
 export interface WebDavSyncSettings {
   enabled?: boolean;
   autoSync?: boolean;
@@ -307,7 +308,7 @@ export interface WebDavSyncSettings {
   status?: WebDavSyncStatus;
 }
 
-// S3 同步配置
+// S3 synchronization settings
 export interface S3SyncSettings {
   enabled?: boolean;
   autoSync?: boolean;
@@ -323,7 +324,7 @@ export interface S3SyncSettings {
 
 export type RemoteSnapshotLayout = "current" | "legacy";
 
-// 远端快照信息（下载前预览）
+// Remote snapshot metadata shown before download
 export interface RemoteSnapshotInfo {
   deviceName: string;
   createdAt: string;
@@ -337,25 +338,25 @@ export interface RemoteSnapshotInfo {
   remotePath: string;
 }
 
-// 应用设置类型（用于设置对话框与 Tauri API）
-// 存储在本地 ~/.nexus-composer/settings.json，不随数据库同步
+// Application settings used by the settings dialog and Tauri API.
+// Stored locally in ~/.nexus-composer/settings.json and not synchronized with the database.
 export interface Settings {
-  // ===== 设备级 UI 设置 =====
-  // 是否在系统托盘（macOS 菜单栏）显示图标
+  // ===== Device-level UI settings =====
+  // Whether to show an icon in the system tray or macOS menu bar.
   showInTray: boolean;
-  // 点击关闭按钮时是否最小化到托盘而不是关闭应用
+  // Whether the close button minimizes to the tray instead of quitting.
   minimizeToTrayOnClose: boolean;
-  // 是否启用应用级窗口控制按钮（最小化/最大化/关闭）
+  // Whether to use application-provided minimize, maximize, and close controls.
   useAppWindowControls?: boolean;
-  // 启用 Claude 插件联动（写入 ~/.claude/config.json 的 primaryApiKey）
+  // Enable Claude plugin integration by writing primaryApiKey to ~/.claude/config.json.
   enableClaudePluginIntegration?: boolean;
-  // 跳过 Claude Code 初次安装确认（写入 ~/.claude.json 的 hasCompletedOnboarding）
+  // Skip Claude Code's first-install confirmation by setting hasCompletedOnboarding in ~/.claude.json.
   skipClaudeOnboarding?: boolean;
-  // 是否开机自启
+  // Whether to launch at system startup.
   launchOnStartup?: boolean;
-  // 静默启动（程序启动时不显示主窗口）
+  // Start silently without showing the main window.
   silentStartup?: boolean;
-  // 是否启用主页面本地代理功能（默认关闭）
+  // Whether the main-page local proxy is enabled; defaults to false.
   enableLocalProxy?: boolean;
   // User has confirmed the local proxy first-run notice
   proxyConfirmed?: boolean;
@@ -380,62 +381,62 @@ export interface Settings {
   autoSyncConfirmed?: boolean;
   // User has confirmed the common config first-run notice
   commonConfigConfirmed?: boolean;
-  // 首选语言（可选，默认中文）
+  // Preferred language; optional and defaults to English.
   language?: "en" | "vi";
 
-  // 主页面显示的应用（默认全部显示）
+  // Applications shown on the main page; all are visible by default.
   visibleApps?: VisibleApps;
 
-  // ===== 设备级目录覆盖 =====
-  // 覆盖 Claude Code 配置目录（可选）
+  // ===== Device-level directory overrides =====
+  // Optional Claude Code configuration directory override
   claudeConfigDir?: string;
-  // 覆盖 Codex 配置目录（可选）
+  // Optional Codex configuration directory override
   codexConfigDir?: string;
-  // 覆盖 Gemini 配置目录（可选）
+  // Optional Gemini configuration directory override
   geminiConfigDir?: string;
-  // 覆盖 OpenCode 配置目录（可选）
+  // Optional OpenCode configuration directory override
   opencodeConfigDir?: string;
-  // 覆盖 OpenClaw 配置目录（可选）
+  // Optional OpenClaw configuration directory override
   openclawConfigDir?: string;
-  // 覆盖 Hermes 配置目录（可选）
+  // Optional Hermes configuration directory override
   hermesConfigDir?: string;
 
-  // ===== 当前供应商 ID（设备级）=====
-  // 当前 Claude 供应商 ID（优先于数据库 is_current）
+  // ===== Current provider IDs (device-level) =====
+  // Current Claude provider ID; takes precedence over database is_current.
   currentProviderClaude?: string;
-  // 当前 Claude Desktop 供应商 ID（优先于数据库 is_current）
+  // Current Claude Desktop provider ID; takes precedence over database is_current.
   currentProviderClaudeDesktop?: string;
-  // 当前 Codex 供应商 ID（优先于数据库 is_current）
+  // Current Codex provider ID; takes precedence over database is_current.
   currentProviderCodex?: string;
-  // 当前 Gemini 供应商 ID（优先于数据库 is_current）
+  // Current Gemini provider ID; takes precedence over database is_current.
   currentProviderGemini?: string;
 
-  // ===== Skill 同步设置 =====
-  // Skill 同步方式：auto（默认，优先 symlink）、symlink、copy
+  // ===== Skill synchronization settings =====
+  // Method: auto (default, preferring symlink), symlink, or copy.
   skillSyncMethod?: SkillSyncMethod;
-  // Skill 存储位置：cc_switch（默认）或 unified（~/.agents/skills/）
+  // Storage: cc_switch (default) or unified (~/.agents/skills/).
   skillStorageLocation?: SkillStorageLocation;
 
-  // ===== WebDAV v2 同步设置 =====
+  // ===== WebDAV v2 synchronization settings =====
   webdavSync?: WebDavSyncSettings;
 
-  // ===== S3 同步设置 =====
+  // ===== S3 synchronization settings =====
   s3Sync?: S3SyncSettings;
 
-  // ===== 备份策略设置 =====
+  // ===== Backup policy settings =====
   // Auto-backup interval in hours (0=disabled, default 24)
   backupIntervalHours?: number;
   // Maximum backup files to retain (default 10)
   backupRetainCount?: number;
 
-  // ===== 终端设置 =====
-  // 首选终端应用（可选，默认使用系统默认终端）
+  // ===== Terminal settings =====
+  // Optional preferred terminal application; defaults to the system terminal.
   // macOS: "terminal" | "iterm2" | "warp" | "alacritty" | "kitty" | "ghostty" | "wezterm" | "kaku"
   // Windows: "cmd" | "powershell" | "wt"
   // Linux: "gnome-terminal" | "konsole" | "xfce4-terminal" | "alacritty" | "kitty" | "ghostty"
   preferredTerminal?: string;
 
-  // ===== 本机自动迁移状态 =====
+  // ===== Local automatic migration state =====
   localMigrations?: {
     codexThirdPartyHistoryProviderBucketV1?: {
       completedAt: string;
@@ -465,23 +466,23 @@ export interface SessionMessage {
   ts?: number;
 }
 
-// MCP 服务器连接参数（宽松：允许扩展字段）
+// MCP server connection parameters; permissive to allow extension fields.
 export interface McpServerSpec {
-  // 可选：社区常见 .mcp.json 中 stdio 配置可不写 type
+  // Optional because common community .mcp.json stdio entries may omit type.
   type?: "stdio" | "http" | "sse";
-  // stdio 字段
+  // stdio fields
   command?: string;
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
-  // http 和 sse 字段
+  // HTTP and SSE fields
   url?: string;
   headers?: Record<string, string>;
-  // 通用字段
+  // Shared fields
   [key: string]: any;
 }
 
-// v3.7.0: MCP 服务器应用启用状态
+// v3.7.0: MCP server enablement by application
 export interface McpApps {
   claude: boolean;
   "claude-desktop"?: boolean;
@@ -492,50 +493,50 @@ export interface McpApps {
   hermes: boolean;
 }
 
-// MCP 服务器条目（v3.7.0 统一结构）
+// MCP server entry using the unified v3.7.0 structure
 export interface McpServer {
   id: string;
   name: string;
   server: McpServerSpec;
-  apps: McpApps; // v3.7.0: 标记应用到哪些客户端
+  apps: McpApps; // v3.7.0: identifies which clients use this server
   description?: string;
   tags?: string[];
   homepage?: string;
   docs?: string;
-  // 兼容旧字段（v3.6.x 及以前）
-  enabled?: boolean; // 已废弃，v3.7.0 使用 apps 字段
+  // Legacy fields retained for v3.6.x and earlier compatibility
+  enabled?: boolean; // Deprecated; v3.7.0 uses the apps field
   source?: string;
   [key: string]: any;
 }
 
-// MCP 服务器映射（id -> McpServer）
+// MCP server map (id -> McpServer)
 export type McpServersMap = Record<string, McpServer>;
 
-// MCP 配置状态
+// MCP configuration status
 export interface McpStatus {
   userConfigPath: string;
   userConfigExists: boolean;
   serverCount: number;
 }
 
-// 新：来自 config.json 的 MCP 列表响应
+// MCP list response from config.json
 export interface McpConfigResponse {
   configPath: string;
   servers: Record<string, McpServer>;
 }
 
 // ============================================================================
-// 统一供应商（Universal Provider）- 跨应用共享配置
+// Universal providers: configuration shared across applications
 // ============================================================================
 
-// 统一供应商的应用启用状态
+// Universal provider enablement by application
 export interface UniversalProviderApps {
   claude: boolean;
   codex: boolean;
   gemini: boolean;
 }
 
-// Claude 模型配置
+// Claude model configuration
 export interface ClaudeModelConfig {
   model?: string;
   haikuModel?: string;
@@ -543,29 +544,29 @@ export interface ClaudeModelConfig {
   opusModel?: string;
 }
 
-// Codex 模型配置
+// Codex model configuration
 export interface CodexModelConfig {
   model?: string;
   reasoningEffort?: string;
 }
 
-// Gemini 模型配置
+// Gemini model configuration
 export interface GeminiModelConfig {
   model?: string;
 }
 
-// 各应用的模型配置
+// Per-application model configuration
 export interface UniversalProviderModels {
   claude?: ClaudeModelConfig;
   codex?: CodexModelConfig;
   gemini?: GeminiModelConfig;
 }
 
-// 统一供应商（跨应用共享配置）
+// Universal provider shared across applications
 export interface UniversalProvider {
   id: string;
   name: string;
-  providerType: string; // "newapi" | "custom" 等
+  providerType: string; // For example, "newapi" or "custom"
   apps: UniversalProviderApps;
   baseUrl: string;
   apiKey: string;
@@ -579,86 +580,86 @@ export interface UniversalProvider {
   sortIndex?: number;
 }
 
-// 统一供应商映射（id -> UniversalProvider）
+// Universal provider map (id -> UniversalProvider)
 export type UniversalProvidersMap = Record<string, UniversalProvider>;
 
 // ============================================================================
-// OpenCode 专属配置（v3.9.2+）
+// OpenCode-specific configuration (v3.9.2+)
 // ============================================================================
 
-// OpenCode 模型配置
+// OpenCode model configuration
 export interface OpenCodeModel {
   name: string;
   limit?: {
     context?: number;
     output?: number;
   };
-  options?: Record<string, unknown>; // 模型级别额外选项（provider 路由等）
-  // 支持任意额外字段（cost、modalities、thinking、variants 等）
+  options?: Record<string, unknown>; // Additional model options, such as provider routing
+  // Supports arbitrary additional fields such as cost, modalities, thinking, and variants.
   [key: string]: unknown;
 }
 
-// OpenCode 供应商选项
+// OpenCode provider options
 export interface OpenCodeProviderOptions {
   baseURL?: string;
   apiKey?: string;
   headers?: Record<string, string>;
-  // 支持额外选项（timeout, setCacheKey 等）
+  // Supports extra options such as timeout and setCacheKey.
   [key: string]: unknown;
 }
 
-// OpenCode 供应商配置（settings_config 结构）
+// OpenCode provider configuration using the settings_config structure
 export interface OpenCodeProviderConfig {
-  npm: string; // AI SDK 包名，如 "@ai-sdk/openai-compatible"
-  name?: string; // 供应商显示名称
+  npm: string; // AI SDK package, such as "@ai-sdk/openai-compatible"
+  name?: string; // Provider display name
   options: OpenCodeProviderOptions;
   models: Record<string, OpenCodeModel>;
 }
 
-// OpenCode MCP 服务器配置（与统一格式不同）
+// OpenCode MCP server configuration, which differs from the unified format
 export interface OpenCodeMcpServerSpec {
   type: "local" | "remote";
-  // local 类型字段
-  command?: string[]; // 与统一格式不同：命令和参数合并为数组
-  environment?: Record<string, string>; // 与统一格式不同：使用 environment 而非 env
-  // remote 类型字段
+  // Local fields
+  command?: string[]; // Unlike the unified format, command and arguments share one array
+  environment?: Record<string, string>; // Uses environment instead of env
+  // Remote fields
   url?: string;
   headers?: Record<string, string>;
-  // 通用字段
+  // Shared fields
   enabled?: boolean;
 }
 
 // ============================================================================
-// OpenClaw 专属配置（v3.11.0+）
+// OpenClaw-specific configuration (v3.11.0+)
 // ============================================================================
 
-// OpenClaw 模型配置
+// OpenClaw model configuration
 export interface OpenClawModel {
   id: string;
   name: string;
   alias?: string;
-  reasoning?: boolean; // 是否支持推理模式（如 o1、DeepSeek R1）
-  input?: string[]; // 支持的输入类型（如 ["text"]、["text", "image"]）
+  reasoning?: boolean; // Whether reasoning modes such as o1 or DeepSeek R1 are supported
+  input?: string[]; // Supported input types, such as ["text"] or ["text", "image"]
   cost?: {
     input: number;
     output: number;
-    cacheRead?: number; // 缓存读取价格
-    cacheWrite?: number; // 缓存写入价格
+    cacheRead?: number; // Cache-read price
+    cacheWrite?: number; // Cache-write price
   };
   contextWindow?: number;
-  maxTokens?: number; // 最大输出 token 数
+  maxTokens?: number; // Maximum output token count
   compat?: {
     maxTokensField?: string;
   };
 }
 
-// OpenClaw 默认模型配置（agents.defaults.model）
+// OpenClaw default model configuration (agents.defaults.model)
 export interface OpenClawDefaultModel {
   primary: string;
   fallbacks?: string[];
 }
 
-// OpenClaw 模型目录条目（agents.defaults.models 中的值）
+// OpenClaw model catalog entry stored in agents.defaults.models
 export interface OpenClawModelCatalogEntry {
   alias?: string;
 }
@@ -676,18 +677,18 @@ export interface OpenClawWriteOutcome {
 
 export type OpenClawToolsProfile = "minimal" | "coding" | "messaging" | "full";
 
-// OpenClaw 供应商配置（settings_config 结构）
-// 对应 OpenClaw 的 models.providers.<provider-id> 配置
+// OpenClaw provider configuration using the settings_config structure.
+// Corresponds to OpenClaw models.providers.<provider-id> configuration.
 export interface OpenClawProviderConfig {
-  baseUrl?: string; // API 端点
-  apiKey?: string; // API 密钥
-  api?: string; // API 协议类型（如 "openai-completions"、"anthropic"）
-  models?: OpenClawModel[]; // 可用模型列表
-  headers?: Record<string, string>; // 自定义请求头（如 User-Agent）
-  authHeader?: boolean; // 供应商自定义认证开关（如 Longcat）
+  baseUrl?: string; // API endpoint
+  apiKey?: string; // API key
+  api?: string; // API protocol, such as "openai-completions" or "anthropic"
+  models?: OpenClawModel[]; // Available models
+  headers?: Record<string, string>; // Custom request headers, such as User-Agent
+  authHeader?: boolean; // Provider-specific authentication toggle, such as for Longcat
 }
 
-// OpenClaw agents.defaults 完整配置
+// Complete OpenClaw agents.defaults configuration
 export interface OpenClawAgentsDefaults {
   model?: OpenClawDefaultModel;
   models?: Record<string, OpenClawModelCatalogEntry>;
@@ -696,12 +697,12 @@ export interface OpenClawAgentsDefaults {
   [key: string]: unknown; // preserve unknown fields
 }
 
-// OpenClaw env 配置（openclaw.json 的 env 节点）
+// OpenClaw env configuration from the openclaw.json env node
 export interface OpenClawEnvConfig {
   [key: string]: unknown;
 }
 
-// OpenClaw tools 配置（openclaw.json 的 tools 节点）
+// OpenClaw tools configuration from the openclaw.json tools node
 export interface OpenClawToolsConfig {
   profile?: OpenClawToolsProfile | string;
   allow?: string[];
@@ -710,7 +711,7 @@ export interface OpenClawToolsConfig {
 }
 
 // ============================================================================
-// Hermes Agent 专属配置
+// Hermes Agent-specific configuration
 // ============================================================================
 
 export interface HermesModelConfig {

@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
 
-// 要提取的图标列表（按分类组织）
+// Icons to extract, grouped by category.
 const ICONS_TO_EXTRACT = {
-  // AI 服务商（必需）
+  // Required AI providers
   aiProviders: [
     'openai', 'anthropic', 'claude', 'google', 'gemini',
     'deepseek', 'kimi', 'moonshot', 'stepfun', 'zhipu', 'minimax',
@@ -11,23 +11,23 @@ const ICONS_TO_EXTRACT = {
     'cohere', 'perplexity', 'mistral', 'huggingface'
   ],
 
-  // 云平台
+  // Cloud platforms
   cloudPlatforms: [
     'aws', 'azure', 'huawei', 'cloudflare'
   ],
 
-  // 开发工具
+  // Developer tools
   devTools: [
     'github', 'gitlab', 'docker', 'kubernetes', 'vscode'
   ],
 
-  // 其他
+  // Other UI icons
   others: [
     'settings', 'folder', 'file', 'link'
   ]
 };
 
-// 合并所有图标
+// Flatten the categories into one extraction list.
 const ALL_ICONS = [
   ...ICONS_TO_EXTRACT.aiProviders,
   ...ICONS_TO_EXTRACT.cloudPlatforms,
@@ -35,11 +35,11 @@ const ALL_ICONS = [
   ...ICONS_TO_EXTRACT.others
 ];
 
-// 提取逻辑
+// Extraction paths
 const OUTPUT_DIR = path.join(__dirname, '../src/icons/extracted');
 const SOURCE_DIR = path.join(__dirname, '../node_modules/@lobehub/icons-static-svg/icons');
 
-// 确保输出目录存在
+// Ensure the output directory exists.
 if (!fs.existsSync(OUTPUT_DIR)) {
   fs.mkdirSync(OUTPUT_DIR, { recursive: true });
 }
@@ -51,7 +51,7 @@ console.log('📦 Extracting icons...\n');
 let extracted = 0;
 let notFound = [];
 
-// 提取图标
+// Extract icons.
 ALL_ICONS.forEach(iconName => {
   const sourceFile = path.join(SOURCE_DIR, `${iconName}.svg`);
   const targetFile = path.join(OUTPUT_DIR, `${iconName}.svg`);
@@ -69,7 +69,7 @@ ALL_ICONS.forEach(iconName => {
   }
 });
 
-// 生成索引文件
+// Generate the TypeScript index.
 console.log('\n📝 Generating index file...\n');
 
 const indexContent = `// Auto-generated icon index
@@ -99,7 +99,7 @@ export function hasIcon(name: string): boolean {
 fs.writeFileSync(path.join(OUTPUT_DIR, 'index.ts'), indexContent);
 console.log('✓ Generated: src/icons/extracted/index.ts');
 
-// 生成图标元数据
+// Generate searchable icon metadata.
 const metadataContent = `// Icon metadata for search and categorization
 import { IconMetadata } from '@/types/icon';
 
@@ -113,7 +113,7 @@ export const iconMetadata: Record<string, IconMetadata> = {
   deepseek: { name: 'deepseek', displayName: 'DeepSeek', category: 'ai-provider', keywords: ['deep', 'seek'], defaultColor: '#1E88E5' },
   moonshot: { name: 'moonshot', displayName: 'Moonshot', category: 'ai-provider', keywords: ['kimi', 'moonshot'], defaultColor: '#6366F1' },
   kimi: { name: 'kimi', displayName: 'Kimi', category: 'ai-provider', keywords: ['moonshot'], defaultColor: '#6366F1' },
-  stepfun: { name: 'stepfun', displayName: 'StepFun', category: 'ai-provider', keywords: ['stepfun', 'step', 'jieyue', '阶跃星辰'], defaultColor: '#005AFF' },
+  stepfun: { name: 'stepfun', displayName: 'StepFun', category: 'ai-provider', keywords: ['stepfun', 'step', 'jieyue'], defaultColor: '#005AFF' },
   zhipu: { name: 'zhipu', displayName: 'Zhipu AI', category: 'ai-provider', keywords: ['chatglm', 'glm'], defaultColor: '#0F62FE' },
   minimax: { name: 'minimax', displayName: 'MiniMax', category: 'ai-provider', keywords: ['minimax'], defaultColor: '#FF6B6B' },
   baidu: { name: 'baidu', displayName: 'Baidu', category: 'ai-provider', keywords: ['ernie', 'wenxin'], defaultColor: '#2932E1' },
@@ -165,7 +165,7 @@ export function searchIcons(query: string): string[] {
 fs.writeFileSync(path.join(OUTPUT_DIR, 'metadata.ts'), metadataContent);
 console.log('✓ Generated: src/icons/extracted/metadata.ts');
 
-// 生成 README
+// Generate the README.
 const readmeContent = `# Extracted Icons
 
 This directory contains extracted icons from @lobehub/icons-static-svg.

@@ -26,11 +26,11 @@ interface DatabaseUpgradeProps {
   };
 }
 
-// checking: 启动时检查是否有可用更新
-// upgradable: 有可用更新，升级应用即可解决
-// incompatible: 已是最新版本但数据库仍过新（可能来自第三方客户端），升级无法解决
-// updating: 正在下载/安装更新
-// error: 升级过程出错
+// checking: checking for an available update during startup
+// upgradable: an update is available and upgrading the app should resolve the issue
+// incompatible: the app is current but the database is still too new, possibly from a third-party client
+// updating: downloading or installing the update
+// error: the upgrade failed
 type Phase = "checking" | "upgradable" | "incompatible" | "updating" | "error";
 
 interface DownloadProgress {
@@ -39,12 +39,13 @@ interface DownloadProgress {
 }
 
 /**
- * 数据库版本过新（应用过旧）时的应用内恢复界面。
+ * In-app recovery UI for a database that is newer than the current app supports.
  *
- * 启动时先检查是否有可用更新：
- * - 有 → 提供「升级应用」一键下载+安装+重启，并展示下载进度条。
- * - 无 → 说明当前已是最新版本但数据库仍不兼容（通常由第三方客户端或更高版本创建），
- *   升级无法解决，及时提醒用户备份后改用兼容客户端或等待官方支持。
+ * Check for an available update during startup:
+ * - If available, offer a one-click app upgrade that downloads, installs, and restarts with progress shown.
+ * - If unavailable, explain that the current app is already up to date but the database remains incompatible,
+ *   usually because a third-party client or newer build created it. Prompt the user to back up their data
+ *   and use a compatible client or wait for official support.
  */
 export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
   const { t } = useTranslation();
@@ -57,7 +58,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
   const dbVersion = payload.db_version;
   const supportedVersion = payload.supported_version;
 
-  // 启动时检查可用更新，决定 upgradable / incompatible
+  // Check for an available update during startup to choose the upgradable or incompatible phase.
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -73,7 +74,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
           setPhase("incompatible");
         }
       } catch {
-        // 检查失败（如离线）：仍允许尝试升级，避免完全卡死
+        // If the check fails, for example while offline, still allow an upgrade attempt to avoid a dead end.
         if (!cancelled) setPhase("upgradable");
       }
     })();
@@ -98,15 +99,15 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
         "update-download-progress",
         (e) => setProgress(e.payload),
       );
-      // 成功时后端会下载+安装+重启，不会返回；返回 false 表示无可用更新。
+      // On success, the backend downloads, installs, and restarts without returning. False means no update is available.
       const updating = await invoke<boolean>("install_update_and_restart");
       unlistenRef.current?.();
       unlistenRef.current = null;
       if (!updating) {
-        // 竞态：检查时有更新、安装时已无 → 按不兼容处理
+        // Race: an update existed during the check but not during installation. Treat it as incompatible.
         setPhase("incompatible");
       }
-      // updating === true：应用即将重启，保持 updating 态直到进程退出。
+      // If updating is true, the app is about to restart. Remain in the updating phase until the process exits.
     } catch (e) {
       unlistenRef.current?.();
       unlistenRef.current = null;
@@ -144,12 +145,12 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
           </div>
           <div className="space-y-1">
             <h1 className="text-lg font-semibold">
-              {t("dbUpgrade.title", "数据库版本过新")}
+              {t("dbUpgrade.title", "Database version is too new")}
             </h1>
             <p className="text-sm text-muted-foreground">
               {t(
                 "dbUpgrade.description",
-                "当前数据库由更新版本的 Nexus Composer 创建，需要升级应用后才能继续使用。升级不会删除你的数据。",
+                "This database was created by a newer version of Nexus Composer. Upgrade the app to continue. Upgrading will not delete your data.",
               )}
             </p>
             {dbVersion != null && supportedVersion != null && (
@@ -157,21 +158,22 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
                 {t("dbUpgrade.versionInfo", {
                   db: dbVersion,
                   supported: supportedVersion,
-                  defaultValue: "数据库版本 v{{db}} · 应用支持 v{{supported}}",
+                  defaultValue:
+                    "Database v{{db}} · App supports v{{supported}}",
                 })}
               </p>
             )}
           </div>
         </div>
 
-        {/* 错误详情 / 数据库路径 */}
+        {/* Error details and database path. */}
         <div className="space-y-1 rounded-lg border border-border/50 bg-muted/40 p-3 text-xs text-muted-foreground">
           {payload.error && (
             <p className="break-words font-mono">{payload.error}</p>
           )}
           {payload.path && (
             <p className="break-all">
-              {t("dbUpgrade.dbPath", "数据库文件")}：{payload.path}
+              {t("dbUpgrade.dbPath", "Database file")}: {payload.path}
             </p>
           )}
         </div>
@@ -179,7 +181,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
         {phase === "checking" && (
           <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
-            {t("dbUpgrade.checking", "正在检查可用更新…")}
+            {t("dbUpgrade.checking", "Checking for available updates…")}
           </p>
         )}
 
@@ -187,7 +189,8 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
           <p className="text-sm text-muted-foreground">
             {t("dbUpgrade.updateAvailable", {
               version: availableVersion,
-              defaultValue: "发现新版本 v{{version}}，升级后即可继续使用。",
+              defaultValue:
+                "Version v{{version}} is available; upgrading will let you continue.",
             })}
           </p>
         )}
@@ -195,14 +198,14 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
         {phase === "incompatible" && (
           <div className="space-y-2 rounded-lg border border-red-300/60 bg-red-50 p-3 text-sm text-red-700 dark:border-red-500/40 dark:bg-red-950/40 dark:text-red-300">
             <p className="font-medium">
-              {t("dbUpgrade.incompatibleTitle", "升级也无法解决")}
+              {t("dbUpgrade.incompatibleTitle", "Upgrading won't fix this")}
             </p>
             <p className="leading-relaxed">
               {t("dbUpgrade.incompatibleDescription", {
                 db: dbVersion,
                 supported: supportedVersion,
                 defaultValue:
-                  "你已是最新版本，但数据库版本（v{{db}}）仍高于本应用支持的版本（v{{supported}}）。该数据库可能由第三方客户端或更高版本创建，升级当前官方应用也无法兼容。",
+                  "You are already on the latest version, but the database (v{{db}}) is still newer than this app supports (v{{supported}}). It was likely created by a third-party client or a newer build, so upgrading the official app cannot make it compatible.",
               })}
             </p>
           </div>
@@ -214,8 +217,8 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
               <span className="flex items-center gap-2 text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {percent === null
-                  ? t("dbUpgrade.preparing", "正在准备更新…")
-                  : t("dbUpgrade.downloading", "正在下载更新…")}
+                  ? t("dbUpgrade.preparing", "Preparing update…")
+                  : t("dbUpgrade.downloading", "Downloading update…")}
               </span>
               {percent !== null && (
                 <span className="tabular-nums text-muted-foreground">
@@ -258,8 +261,8 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
                 <Download className="h-4 w-4" />
               )}
               {phase === "error"
-                ? t("dbUpgrade.retry", "重试升级")
-                : t("dbUpgrade.upgradeNow", "升级应用")}
+                ? t("dbUpgrade.retry", "Retry upgrade")
+                : t("dbUpgrade.upgradeNow", "Upgrade app")}
             </Button>
           )}
 
@@ -272,7 +275,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
               }
             >
               <ExternalLink className="h-4 w-4" />
-              {t("dbUpgrade.openReleases", "打开发布页")}
+              {t("dbUpgrade.openReleases", "Open releases page")}
             </Button>
           )}
 
@@ -283,7 +286,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
             disabled={phase === "updating"}
           >
             <FolderOpen className="h-4 w-4" />
-            {t("dbUpgrade.openConfigDir", "打开配置目录")}
+            {t("dbUpgrade.openConfigDir", "Open config folder")}
           </Button>
 
           <Button
@@ -292,7 +295,7 @@ export function DatabaseUpgrade({ payload }: DatabaseUpgradeProps) {
             onClick={() => void exit(0)}
             disabled={phase === "updating"}
           >
-            {t("dbUpgrade.quit", "退出")}
+            {t("dbUpgrade.quit", "Quit")}
           </Button>
         </div>
       </div>

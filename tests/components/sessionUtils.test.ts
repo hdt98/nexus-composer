@@ -137,7 +137,10 @@ describe("session utils", () => {
       },
     ];
 
-    const groups = groupSessionsByProviderAndDirectory(sessions, "未知目录");
+    const groups = groupSessionsByProviderAndDirectory(
+      sessions,
+      "Unknown directory",
+    );
 
     expect(groups).toHaveLength(2);
     expect(groups[0].providerId).toBe("codex");
@@ -171,13 +174,16 @@ describe("session utils", () => {
       },
     ];
 
-    const groups = groupSessionsByProviderAndDirectory(sessions, "未知目录");
+    const groups = groupSessionsByProviderAndDirectory(
+      sessions,
+      "Unknown directory",
+    );
 
     expect(groups).toHaveLength(1);
     expect(groups[0].directories).toHaveLength(1);
     expect(groups[0].directories[0]).toMatchObject({
       projectDir: null,
-      label: "未知目录",
+      label: "Unknown directory",
     });
     expect(
       groups[0].directories[0].sessions.map((session) => session.sessionId),
@@ -206,7 +212,10 @@ describe("session utils", () => {
       },
     ];
 
-    const groups = groupSessionsByProviderAndDirectory(sessions, "未知目录");
+    const groups = groupSessionsByProviderAndDirectory(
+      sessions,
+      "Unknown directory",
+    );
 
     expect(groups[0].sessions.map((session) => session.sessionId)).toEqual([
       "newest",

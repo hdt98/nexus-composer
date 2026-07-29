@@ -118,7 +118,7 @@ export const getProviderLabel = (
   return translated === key ? providerId : translated;
 };
 
-// 根据 providerId 获取对应的图标名称
+// Resolves an icon name from providerId.
 export const getProviderIconName = (providerId: string) => {
   if (providerId === "codex") return "openai";
   if (providerId === "claude") return "claude";

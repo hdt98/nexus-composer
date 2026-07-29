@@ -10,17 +10,17 @@ import type { UpdateInfo } from "../lib/updater";
 import { checkForUpdate } from "../lib/updater";
 
 interface UpdateContextValue {
-  // 更新状态
+  // Update state
   hasUpdate: boolean;
   updateInfo: UpdateInfo | null;
   isChecking: boolean;
   error: string | null;
 
-  // 提示状态
+  // Notification state
   isDismissed: boolean;
   dismissUpdate: () => void;
 
-  // 操作方法
+  // Actions
   checkUpdate: () => Promise<boolean>;
   resetDismiss: () => void;
 }
@@ -29,7 +29,7 @@ const UpdateContext = createContext<UpdateContextValue | undefined>(undefined);
 
 export function UpdateProvider({ children }: { children: React.ReactNode }) {
   const DISMISSED_VERSION_KEY = "nexus:update:dismissedVersion";
-  const LEGACY_DISMISSED_KEY = "dismissedUpdateVersion"; // 兼容旧键
+  const LEGACY_DISMISSED_KEY = "dismissedUpdateVersion"; // Legacy key compatibility
 
   const [hasUpdate, setHasUpdate] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -37,12 +37,12 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [isDismissed, setIsDismissed] = useState(false);
 
-  // 从 localStorage 读取已关闭的版本
+  // Read closed version from localStorage
   useEffect(() => {
     const current = updateInfo?.availableVersion;
     if (!current) return;
 
-    // 读取新键；若不存在，尝试迁移旧键
+    // Read the new key and migrate the legacy key when needed.
     let dismissedVersion = localStorage.getItem(DISMISSED_VERSION_KEY);
     if (!dismissedVersion) {
       const legacy = localStorage.getItem(LEGACY_DISMISSED_KEY);
@@ -71,7 +71,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
         setHasUpdate(true);
         setUpdateInfo(result.info);
 
-        // 检查是否已经关闭过这个版本的提醒
+        // Check whether this version's notification was already dismissed.
         let dismissedVersion = localStorage.getItem(DISMISSED_VERSION_KEY);
         if (!dismissedVersion) {
           const legacy = localStorage.getItem(LEGACY_DISMISSED_KEY);
@@ -82,18 +82,20 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
           }
         }
         setIsDismissed(dismissedVersion === result.info.availableVersion);
-        return true; // 有更新
+        return true; // An update is available.
       } else {
         setHasUpdate(false);
         setUpdateInfo(null);
         setIsDismissed(false);
-        return false; // 已是最新
+        return false; // Already up to date.
       }
     } catch (err) {
-      console.error("检查更新失败:", err);
-      setError(err instanceof Error ? err.message : "检查更新失败");
+      console.error("Failed to check for updates:", err);
+      setError(
+        err instanceof Error ? err.message : "Failed to check for updates",
+      );
       setHasUpdate(false);
-      throw err; // 抛出错误让调用方处理
+      throw err; // Throw error for caller to handle
     } finally {
       setIsChecking(false);
       isCheckingRef.current = false;
@@ -104,7 +106,7 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     setIsDismissed(true);
     if (updateInfo?.availableVersion) {
       localStorage.setItem(DISMISSED_VERSION_KEY, updateInfo.availableVersion);
-      // 清理旧键
+      // Remove the legacy key.
       localStorage.removeItem(LEGACY_DISMISSED_KEY);
     }
   }, [updateInfo?.availableVersion]);
@@ -115,9 +117,9 @@ export function UpdateProvider({ children }: { children: React.ReactNode }) {
     localStorage.removeItem(LEGACY_DISMISSED_KEY);
   }, []);
 
-  // 应用启动时自动检查更新
+  // Automatically check updates on startup
   useEffect(() => {
-    // 延迟1秒后检查，避免影响启动体验
+    // Delay the check by one second to avoid slowing startup.
     const timer = setTimeout(() => {
       checkUpdate().catch(console.error);
     }, 1000);

@@ -675,7 +675,7 @@ export const iconMetadata: Record<string, IconMetadata> = {
     name: "stepfun",
     displayName: "StepFun",
     category: "ai-provider",
-    keywords: ["stepfun", "step", "jieyue", "阶跃星辰"],
+    keywords: ["stepfun", "step", "jieyue"],
     defaultColor: "#005AFF",
   },
 };

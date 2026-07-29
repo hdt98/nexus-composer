@@ -17,7 +17,7 @@ export function usePromptActions(appId: AppId) {
       const data = await promptsApi.getPrompts(appId);
       setPrompts(data);
 
-      // 同时加载当前文件内容
+      // Load the current file content at the same time.
       try {
         const content = await promptsApi.getCurrentFileContent(appId);
         setCurrentFileContent(content);
@@ -78,7 +78,7 @@ export function usePromptActions(appId: AppId) {
       // Optimistic update
       const previousPrompts = prompts;
 
-      // 如果要启用当前提示词，先禁用其他所有提示词
+      // Disable all other prompts before enabling the current prompt.
       if (enabled) {
         const updatedPrompts = Object.keys(prompts).reduce(
           (acc, key) => {
@@ -106,7 +106,7 @@ export function usePromptActions(appId: AppId) {
           await promptsApi.enablePrompt(appId, id);
           toast.success(t("prompts.enableSuccess"), { closeButton: true });
         } else {
-          // 禁用提示词 - 需要后端支持
+          // Disable the prompt; requires backend support.
           await promptsApi.upsertPrompt(appId, id, {
             ...prompts[id],
             enabled: false,

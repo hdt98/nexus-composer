@@ -1,14 +1,12 @@
-//! 使用统计实时刷新事件模块
+//! Real-time usage statistics refresh events
 //!
-//! 当 `proxy_request_logs` 表写入新数据时（代理日志、会话同步、归档等），
-//! 通过本模块向前端 emit `usage-log-recorded` 事件，让 UsageDashboard
-//! 立刻 invalidate 查询缓存而无需等待轮询周期。
+//! Emits `usage-log-recorded` when proxy logs, session synchronization, archives, or other paths
+//! add data to `proxy_request_logs`, allowing UsageDashboard to invalidate its query immediately.
 //!
-//! 设计要点：
-//! - 全局单例 AppHandle：写日志路径上不持有 AppHandle，用 OnceCell 共享。
-//! - 200ms 防抖合并：流式响应等场景在短时间内可能写入多条日志，
-//!   合并成一次事件可避免前端连续 invalidate。
-//! - 不阻塞写入：通知失败仅记录 warn 日志，不向上传播错误。
+//! Design:
+//! - A global AppHandle avoids carrying it through log-writing paths.
+//! - A 200 ms debounce combines bursts such as streaming log writes into one event.
+//! - Notification failures are logged without blocking or propagating to writers.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -16,40 +14,40 @@ use std::time::Duration;
 
 use tauri::{AppHandle, Emitter};
 
-/// 前端监听的事件名
+/// Event name observed by the frontend.
 pub const EVENT_USAGE_LOG_RECORDED: &str = "usage-log-recorded";
 
-/// 防抖窗口：合并 200ms 内的多次通知。
+/// Debounce window that combines notifications within 200 ms.
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
 
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
-/// 防抖标记：true 表示已有调度任务在等待 emit，后续通知合并到该任务。
+/// True while a scheduled task is waiting to emit; later notifications join that task.
 static EMIT_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
-/// 在应用 setup 阶段调用一次，注入 AppHandle。
+/// Initialize the AppHandle once during application setup.
 ///
-/// 重复调用是无害的（OnceLock 仅首次写入生效），但应用启动期只该被
-/// `lib.rs::run` 调一次。
+/// Repeated calls are harmless because OnceLock accepts only the first value, but startup should
+/// call this only once from `lib.rs::run`.
 pub fn init(handle: AppHandle) {
     if APP_HANDLE.set(handle).is_err() {
-        log::debug!("usage_events::init 重复调用，已忽略");
+        log::debug!("Ignored repeated usage_events::init call");
     } else {
-        log::info!("[usage-event] AppHandle 已注入，事件推送启用");
+        log::info!("[usage-event] AppHandle initialized; event delivery enabled");
     }
 }
 
-/// 通知前端有新的使用日志写入。
+/// Notify the frontend that a usage log was recorded.
 ///
-/// 调用方**不**需要持有 AppHandle，可以从任意线程/任意写入路径调用。
-/// 内部 200ms 防抖合并，绝不阻塞调用线程。
+/// Callers do not need an AppHandle and may call from any thread or write path. The internal
+/// 200 ms debounce does not block the calling thread.
 pub fn notify_log_recorded() {
-    // AppHandle 未注入（典型出现在单元测试或 setup 之前）：直接放弃。
+    // Ignore notifications before setup or in tests without an AppHandle.
     let Some(handle) = APP_HANDLE.get() else {
         return;
     };
 
-    // 已有调度任务：本次通知被合并到既有任务里，无需再起线程。
+    // Merge into an already scheduled task without spawning another thread.
     if EMIT_SCHEDULED.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -57,12 +55,11 @@ pub fn notify_log_recorded() {
     let handle = handle.clone();
     std::thread::spawn(move || {
         std::thread::sleep(DEBOUNCE_WINDOW);
-        // 必须先清标志再 emit：万一 emit 期间又有新通知进来，
-        // 下一轮防抖窗口会重新调度，不会丢失。
+        // Clear the flag before emitting so a concurrent notification schedules the next window.
         EMIT_SCHEDULED.store(false, Ordering::Release);
 
         if let Err(e) = handle.emit(EVENT_USAGE_LOG_RECORDED, ()) {
-            log::warn!("emit {EVENT_USAGE_LOG_RECORDED} 失败: {e}");
+            log::warn!("Failed to emit {EVENT_USAGE_LOG_RECORDED}: {e}");
         }
     });
 }

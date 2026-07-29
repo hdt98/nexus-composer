@@ -19,12 +19,12 @@ interface UseCustomEndpointsProps {
 }
 
 /**
- * 收集和管理自定义端点
+ * Collects and manages custom endpoints.
  *
- * 收集来源：
- * 1. 用户在测速弹窗中新增的自定义端点
- * 2. 预设中的 endpointCandidates
- * 3. 当前选中的 Base URL
+ * Sources:
+ * 1. Custom endpoints added by the user in the speed-test dialog.
+ * 2. endpointCandidates from the preset.
+ * 3. The currently selected Base URL.
  */
 export function useCustomEndpoints({
   appId,
@@ -37,16 +37,16 @@ export function useCustomEndpoints({
   const customEndpointsMap = useMemo(() => {
     const urlSet = new Set<string>();
 
-    // 辅助函数：标准化并添加 URL
+    // Normalize and add a URL.
     const push = (raw?: string) => {
       const url = (raw || "").trim().replace(/\/+$/, "");
       if (url) urlSet.add(url);
     };
 
-    // 1. 自定义端点（来自用户新增）
+    // 1. Custom endpoints added by the user.
     for (const u of draftCustomEndpoints) push(u);
 
-    // 2. 预设端点候选
+    // 2. Preset endpoint candidates.
     if (selectedPresetId && selectedPresetId !== "custom") {
       const entry = presetEntries.find((item) => item.id === selectedPresetId);
       if (entry) {
@@ -57,14 +57,14 @@ export function useCustomEndpoints({
       }
     }
 
-    // 3. 当前 Base URL
+    // 3. Current Base URL.
     if (appId === "codex") {
       push(codexBaseUrl);
     } else {
       push(baseUrl);
     }
 
-    // 构建 CustomEndpoint map
+    // Build the CustomEndpoint map.
     const urls = Array.from(urlSet.values());
     if (urls.length === 0) {
       return null;

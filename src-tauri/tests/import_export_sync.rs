@@ -56,14 +56,14 @@ fn sync_claude_provider_writes_live_settings() {
     let live_value: serde_json::Value = read_json_file(&settings_path).expect("read live file");
     assert_eq!(live_value, provider_config);
 
-    // 确认 SSOT 中的供应商也同步了最新内容
+    // Verify that the provider in the source of truth was also updated.
     let updated = config
         .get_manager(&AppType::Claude)
         .and_then(|m| m.providers.get("prov-1"))
         .expect("provider in config");
     assert_eq!(updated.settings_config, provider_config);
 
-    // 额外确认写入位置位于测试 HOME 下
+    // Verify that the write location is under the test HOME.
     assert!(
         settings_path.starts_with(home),
         "settings path {settings_path:?} should reside under test HOME {home:?}"
@@ -78,8 +78,8 @@ fn sync_codex_provider_writes_config_without_touching_auth() {
 
     let mut config = MultiAppConfig::default();
 
-    // 注意：v3.7.0 后 MCP 同步由 McpService 独立处理，不再通过 provider 切换触发
-    // Codex provider 切换只写 config.toml；auth.json 保留用户登录态。
+    // Since v3.7.0, McpService handles MCP synchronization independently of provider switching.
+    // Codex provider switching writes only config.toml and preserves user login state in auth.json.
 
     let provider_config = json!({
         "auth": {
@@ -146,9 +146,9 @@ fn sync_codex_provider_writes_config_without_touching_auth() {
 
 #[test]
 fn sync_codex_provider_with_config_only_token_backfills_auth() {
-    // P2-2 回归: stored provider 的 token 只藏在 config.toml 的 experimental_bearer_token 时,
-    // sync 路径必须把 token 从 live config 提取并写回 stored auth.OPENAI_API_KEY,
-    // 否则下一轮 sync 会在 cleaned config + 空 auth 之间丢失 token。
+    // P2-2 regression: when a stored token exists only as experimental_bearer_token in config.toml,
+    // synchronization must extract it from live config into stored auth.OPENAI_API_KEY. Otherwise,
+    // the next synchronization loses the token between cleaned config and empty auth.
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
@@ -303,7 +303,7 @@ fn sync_enabled_to_codex_writes_enabled_servers() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
-    // 模拟 Codex 已安装/已初始化：存在 ~/.codex 目录
+    // Simulate an installed and initialized Codex with an existing ~/.codex directory.
     let path = nexus_composer_lib::get_codex_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
@@ -338,7 +338,7 @@ fn sync_enabled_to_codex_preserves_non_mcp_content_and_style() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
 
-    // 预置含有顶层注释与非 MCP 键的 config.toml
+    // Seed config.toml with a top-level comment and non-MCP keys.
     let path = nexus_composer_lib::get_codex_config_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
@@ -351,7 +351,7 @@ mode = "dev"
 "#;
     fs::write(&path, seed).expect("seed config.toml");
 
-    // 启用一个 MCP 项，触发增量写入
+    // Enable one MCP entry to trigger an incremental write.
     let mut config = MultiAppConfig::default();
     config.mcp.codex.servers.insert(
         "echo".into(),
@@ -365,7 +365,7 @@ mode = "dev"
     nexus_composer_lib::sync_enabled_to_codex(&config).expect("sync codex");
 
     let text = fs::read_to_string(&path).expect("read config.toml");
-    // 顶层注释与非 MCP 键应保留
+    // Preserve the top-level comment and non-MCP keys.
     assert!(
         text.contains("# top-comment"),
         "top comment should be preserved"
@@ -400,7 +400,7 @@ fn sync_enabled_to_codex_migrates_erroneous_mcp_dot_servers_to_mcp_servers() {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create codex dir");
     }
-    // 预置错误的 mcp.servers 风格（应迁移为顶层 mcp_servers）
+    // Seed the invalid mcp.servers form for migration to top-level mcp_servers.
     let seed = r#"[mcp]
   other = "keep"
   [mcp.servers]
@@ -419,7 +419,7 @@ fn sync_enabled_to_codex_migrates_erroneous_mcp_dot_servers_to_mcp_servers() {
 
     nexus_composer_lib::sync_enabled_to_codex(&config).expect("sync codex");
     let text = fs::read_to_string(&path).expect("read config.toml");
-    // 应迁移到顶层 mcp_servers，并移除错误的 mcp.servers 表
+    // Migrate to top-level mcp_servers and remove the invalid mcp.servers table.
     assert!(
         text.contains("mcp_servers"),
         "should migrate to mcp_servers table"
@@ -446,7 +446,7 @@ disabled = { type = "stdio", command = "noop" }
     )
     .expect("seed config file");
 
-    let config = MultiAppConfig::default(); // 无启用项
+    let config = MultiAppConfig::default(); // No enabled entries.
     nexus_composer_lib::sync_enabled_to_codex(&config).expect("sync codex");
 
     let text = fs::read_to_string(&path).expect("read config.toml");
@@ -526,7 +526,7 @@ fn sync_codex_provider_missing_auth_returns_error() {
         other => panic!("unexpected error variant: {other:?}"),
     }
 
-    // 确认未产生任何 live 配置文件
+    // Verify that no live configuration files were created.
     assert!(
         !nexus_composer_lib::get_codex_auth_path().exists(),
         "auth.json should not be created on failure"
@@ -646,7 +646,7 @@ url = "https://example.com"
     let changed = nexus_composer_lib::import_from_codex(&mut config).expect("import codex");
     assert!(changed >= 2, "should import both servers");
 
-    // v3.7.0: 检查统一结构
+    // v3.7.0: Check the unified structure.
     let servers = config
         .mcp
         .servers
@@ -697,7 +697,7 @@ command = "echo"
     .expect("write codex config");
 
     let mut config = MultiAppConfig::default();
-    // v3.7.0: 在统一结构中创建已存在的服务器
+    // v3.7.0: Create an existing server in the unified structure.
     config.mcp.servers = Some(std::collections::HashMap::new());
     config.mcp.servers.as_mut().unwrap().insert(
         "existing".to_string(),
@@ -710,7 +710,7 @@ command = "echo"
             }),
             apps: nexus_composer_lib::McpApps {
                 claude: false,
-                codex: false, // 初始未启用
+                codex: false, // Initially disabled.
                 gemini: false,
                 opencode: false,
                 hermes: false,
@@ -725,7 +725,7 @@ command = "echo"
     let changed = nexus_composer_lib::import_from_codex(&mut config).expect("import codex");
     assert!(changed >= 1, "should mark change for enabled flag");
 
-    // v3.7.0: 检查统一结构
+    // v3.7.0: Check the unified structure.
     let entry = config
         .mcp
         .servers
@@ -734,10 +734,10 @@ command = "echo"
         .get("existing")
         .expect("existing entry");
 
-    // 验证 Codex 应用已启用
+    // Verify that Codex is enabled.
     assert!(entry.apps.codex, "Codex app should be enabled after import");
 
-    // 验证现有配置被保留（server 不应被覆盖）
+    // Verify that import preserves the existing server configuration.
     let spec = entry.server.as_object().expect("server spec");
     assert_eq!(
         spec.get("command").and_then(|v| v.as_str()),
@@ -752,7 +752,7 @@ fn sync_claude_enabled_mcp_projects_to_user_config() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 模拟 Claude 已安装/已初始化：存在 ~/.claude 目录
+    // Simulate an installed and initialized Claude with an existing ~/.claude directory.
     fs::create_dir_all(home.join(".claude")).expect("create claude dir");
 
     let mut config = MultiAppConfig::default();
@@ -826,7 +826,7 @@ fn import_from_claude_merges_into_config() {
     .expect("write claude json");
 
     let mut config = MultiAppConfig::default();
-    // v3.7.0: 在统一结构中创建已存在的服务器
+    // v3.7.0: Create an existing server in the unified structure.
     config.mcp.servers = Some(std::collections::HashMap::new());
     config.mcp.servers.as_mut().unwrap().insert(
         "stdio-enabled".to_string(),
@@ -838,7 +838,7 @@ fn import_from_claude_merges_into_config() {
                 "command": "prev"
             }),
             apps: nexus_composer_lib::McpApps {
-                claude: false, // 初始未启用
+                claude: false, // Initially disabled.
                 codex: false,
                 gemini: false,
                 opencode: false,
@@ -854,7 +854,7 @@ fn import_from_claude_merges_into_config() {
     let changed = nexus_composer_lib::import_from_claude(&mut config).expect("import from claude");
     assert!(changed >= 1, "should mark at least one change");
 
-    // v3.7.0: 检查统一结构
+    // v3.7.0: Check the unified structure.
     let entry = config
         .mcp
         .servers
@@ -863,13 +863,13 @@ fn import_from_claude_merges_into_config() {
         .get("stdio-enabled")
         .expect("entry exists");
 
-    // 验证 Claude 应用已启用
+    // Verify that Claude is enabled.
     assert!(
         entry.apps.claude,
         "Claude app should be enabled after import"
     );
 
-    // 验证现有配置被保留（server 不应被覆盖）
+    // Verify that import preserves the existing server configuration.
     let server = entry.server.as_object().expect("server obj");
     assert_eq!(
         server.get("command").and_then(|v| v.as_str()).unwrap_or(""),
@@ -885,7 +885,7 @@ fn create_backup_skips_missing_file() {
     let home = ensure_test_home();
     let config_path = home.join(".cc-switch").join("config.json");
 
-    // 未创建文件时应返回空字符串，不报错
+    // A missing file returns an empty string without error.
     let result = ConfigService::create_backup(&config_path).expect("create backup");
     assert!(
         result.is_empty(),
@@ -966,7 +966,7 @@ fn create_backup_retains_only_latest_entries() {
         latest_path.display()
     );
 
-    // 进一步确认保留的条目包含一些历史文件，说明清理逻辑仅裁剪多余部分
+    // Verify that cleanup trims only excess entries and preserves some history.
     let manual_kept = entries
         .iter()
         .filter_map(|entry| entry.file_name().into_string().ok())
@@ -1149,7 +1149,7 @@ fn export_sql_returns_error_for_invalid_path() {
     match err {
         AppError::IoContext { context, .. } => {
             assert!(
-                context.contains("原子写入失败") || context.contains("写入失败"),
+                context.contains("Atomic replacement failed"),
                 "expected IO error message about atomic write failure, got: {context}"
             );
         }

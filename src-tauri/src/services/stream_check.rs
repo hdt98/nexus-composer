@@ -1,20 +1,22 @@
-//! 供应商连通性检查服务（reachability）
+//! Provider reachability-check service.
 //!
-//! 仅探测供应商 `base_url` 是否可达，**不发送真实大模型请求**：
-//! - 收到任意 HTTP 响应（200/4xx/5xx）即判定"可达"（端口通、网关存活）；
-//! - 仅 DNS / 连接被拒 / TLS / 超时等网络级错误判定"不可达"；
-//! - 延迟 = 收到响应头的耗时（TTFB，真实往返）。
+//! Probes only whether a provider's `base_url` is reachable and **does not send a real model request**:
+//! - Any HTTP response, including 200, 4xx, or 5xx, means reachable because the port and gateway work.
+//! - Only network-level DNS, connection-refused, TLS, timeout, and similar errors mean unreachable.
+//! - Latency is time to response headers (TTFB), representing an actual round trip.
 //!
-//! ## 设计取舍：可达 ≠ 配置正确
+//! ## Design tradeoff: reachable does not mean correctly configured
 //!
-//! 本检查刻意不验证鉴权或模型，因此不会被第三方供应商的鉴权拦截 / 模型校验
-//! 误判为"不可用"。代价是它无法告诉你鉴权对不对、模型存不存在。
+//! This check intentionally avoids authentication and model validation so a third-party provider's
+//! auth gate or model validation cannot be mistaken for unavailability. It therefore cannot confirm
+//! whether credentials are valid or a model exists.
 //!
-//! ## 与故障转移的关系（重要不变量）
+//! ## Relationship to failover: important invariant
 //!
-//! 连通性检查 **绝不** 触碰故障转移熔断器：一个返回 403/401 的供应商在本检查里
-//! 算"可达"，但它对真实流量是坏的。熔断器只由 `proxy/forwarder.rs` 转发真实流量
-//! 的成败驱动（被动）。两者职责分离——可达性回答"能不能到"，真实流量回答"能不能用"。
+//! A reachability check **never** changes the failover circuit breaker. A provider returning 401 or
+//! 403 is reachable here but unusable for real traffic. Only success or failure of real traffic
+//! forwarded by `proxy/forwarder.rs` drives the circuit breaker passively. Reachability answers
+//! "can we connect?" while real traffic answers "does it work?".
 
 use reqwest::header::HeaderValue;
 use reqwest::Client;
@@ -26,7 +28,7 @@ use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::providers::{get_adapter, ClaudeAdapter, ProviderAdapter};
 
-/// 健康状态枚举
+/// Health status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthStatus {
@@ -35,23 +37,24 @@ pub enum HealthStatus {
     Failed,
 }
 
-/// 连通性检查配置
+/// Reachability-check configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCheckConfig {
-    /// 单次探测超时（秒）
+    /// Timeout for one probe in seconds.
     pub timeout_secs: u64,
-    /// 超时类失败的最大重试次数
+    /// Maximum retries for timeout-class failures.
     pub max_retries: u32,
-    /// 降级阈值（毫秒）：可达但 TTFB 超过该值判定为"较慢"
+    /// Degraded threshold in milliseconds: a reachable endpoint whose TTFB exceeds this is slow.
     pub degraded_threshold_ms: u64,
 }
 
 impl Default for StreamCheckConfig {
     fn default() -> Self {
-        // 可达性探测打的是 base_url 的小请求（仅读响应头），不等待模型生成，故超时远小于
-        // 旧的真实请求检查（45s → 8s）；降级阈值沿用旧尺度 6000ms——探测 TTFB 一般远低于
-        // 此，仅在确实很慢时才标"较慢"，避免把 1 秒多的正常延迟误判为降级。
+        // The reachability probe sends a small base_url request and reads only headers without waiting
+        // for model generation, so its timeout is much shorter than the old real-request check
+        // (45s → 8s). Retain the old 6000 ms degraded threshold: probe TTFB is normally much lower,
+        // marking only genuinely slow endpoints rather than normal latency slightly above one second.
         Self {
             timeout_secs: 8,
             max_retries: 1,
@@ -60,7 +63,7 @@ impl Default for StreamCheckConfig {
     }
 }
 
-/// 连通性检查结果
+/// Reachability-check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StreamCheckResult {
@@ -69,23 +72,24 @@ pub struct StreamCheckResult {
     pub message: String,
     pub response_time_ms: Option<u64>,
     pub http_status: Option<u16>,
-    /// 保留字段以兼容 `stream_check_logs` 表结构；连通性检查恒为空串。
+    /// Retained for compatibility with the `stream_check_logs` schema; always empty for reachability checks.
     pub model_used: String,
     pub tested_at: i64,
     pub retry_count: u32,
-    /// 细粒度错误分类；连通性检查不再细分，恒为 None。
+    /// Fine-grained error classification; reachability checks no longer subdivide errors and always use None.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_category: Option<String>,
 }
 
-/// 连通性检查服务
+/// Reachability-check service.
 pub struct StreamCheckService;
 
 impl StreamCheckService {
-    /// 执行连通性检查（仅对超时类失败重试）。
+    /// Runs a reachability check, retrying only timeout-class failures.
     ///
-    /// `base_url_override`：用于 Copilot 等需要从 OAuth 管理器动态解析端点的供应商，
-    /// 由命令层预先解析后传入；其余供应商传 `None`，由本服务从 `settings_config` 提取。
+    /// `base_url_override` supports providers such as Copilot whose endpoints are resolved dynamically
+    /// by an OAuth manager. The command layer resolves and supplies it. Other providers pass `None`,
+    /// and this service extracts the URL from `settings_config`.
     pub async fn check_with_retry(
         app_type: &AppType,
         provider: &Provider,
@@ -113,7 +117,8 @@ impl StreamCheckService {
                 });
             }
 
-            // 仅超时 / abort 类网络抖动值得重试；连接被拒、DNS 失败等立即返回。
+            // Retry only timeout or abort-class network instability. Return immediately for refused
+            // connections, DNS failures, and other deterministic errors.
             if Self::should_retry(&result.message) && attempt < effective.max_retries {
                 last_result = Some(result);
                 continue;
@@ -137,7 +142,7 @@ impl StreamCheckService {
         }))
     }
 
-    /// 合并供应商单独配置（`meta.testConfig`，仅当 `enabled`）与全局配置。
+    /// Merges provider-specific `meta.testConfig`, when enabled, with global configuration.
     fn merge_provider_config(provider: &Provider, global: &StreamCheckConfig) -> StreamCheckConfig {
         let tc = provider
             .meta
@@ -157,7 +162,7 @@ impl StreamCheckService {
         }
     }
 
-    /// 单次连通性探测。
+    /// Runs one reachability probe.
     async fn check_once(
         app_type: &AppType,
         provider: &Provider,
@@ -183,19 +188,20 @@ impl StreamCheckService {
         ))
     }
 
-    /// 解析供应商 `base_url`。
+    /// Resolves a provider `base_url`.
     ///
-    /// 连通性探测只需打到 base（origin 或用户配置的 base 路径）即可——任何 HTTP
-    /// 响应都证明端口可达，因此无需像旧的真实请求检查那样解析具体 API 路径
-    /// （`/v1/messages` vs `/chat/completions` vs `:streamGenerateContent`）。
+    /// A reachability probe needs only the base origin or user-configured base path. Any HTTP response
+    /// proves the port is reachable, so unlike the old real-request check it does not resolve a specific
+    /// API path such as `/v1/messages`, `/chat/completions`, or `:streamGenerateContent`.
     ///
-    /// 官方供应商（`category == "official"`）base_url 故意留空（走客户端默认/OAuth 端点），
-    /// 没有 Nexus Composer 能可靠探测的目标——这类供应商的连通检测按钮在前端已隐藏
-    /// （见 `ProviderCard.tsx`），故此处对其提取失败直接报错即可，不做官方端点回退。
+    /// Official providers (`category == "official"`) intentionally leave base_url empty and use the
+    /// client's default or OAuth endpoint. Nexus Composer has no reliable target to probe, so the
+    /// renderer hides their reachability button in `ProviderCard.tsx`. Extraction may return an error
+    /// here without falling back to an official endpoint.
     fn resolve_base_url(app_type: &AppType, provider: &Provider) -> Result<String, AppError> {
         match app_type {
-            // 累加模式应用的 settings_config 结构与 Claude/Codex/Gemini 不同，
-            // 不走 adapter，直接按各自约定提取 base_url。
+            // Additive applications use settings_config structures different from Claude, Codex, and
+            // Gemini. Extract base_url directly by each convention instead of using an adapter.
             AppType::OpenCode => {
                 let npm = Self::extract_opencode_npm(provider);
                 Self::resolve_opencode_base_url(provider, npm.as_deref())
@@ -211,11 +217,11 @@ impl StreamCheckService {
         }
     }
 
-    /// 轻量可达性探测：GET `base_url`，收到任意 HTTP 响应即可达。
+    /// Lightweight reachability probe: GET `base_url`; any HTTP response means reachable.
     ///
-    /// - `send()` 在收到响应头时即返回，故计时天然是 TTFB；不读 body。
-    /// - reqwest 对任何 HTTP 状态码都返回 `Ok`，只有网络级错误进 `Err`——
-    ///   这正是"任何响应都算可达、只有连不上才算失败"的语义。
+    /// - `send()` returns when headers arrive, naturally measuring TTFB without reading the body.
+    /// - reqwest returns `Ok` for every HTTP status and `Err` only for network failures, exactly
+    ///   matching the rule that any response is reachable and only connection failure is not.
     async fn probe_reachability(
         client: &Client,
         base_url: &str,
@@ -224,7 +230,7 @@ impl StreamCheckService {
     ) -> Result<u16, AppError> {
         let url = base_url.trim();
         if url.is_empty() {
-            return Err(AppError::Message("base_url 为空".to_string()));
+            return Err(AppError::Message("base_url is empty".to_string()));
         }
 
         let mut req = client
@@ -232,7 +238,8 @@ impl StreamCheckService {
             .timeout(timeout)
             .header("accept", "*/*")
             .header("accept-encoding", "identity");
-        // 复用供应商自定义 UA（部分网关按 UA 白名单放行），与转发路径口径一致。
+        // Reuse the provider's custom user agent because some gateways allowlist it, matching the
+        // forwarding path.
         if let Some(ua) = custom_ua {
             req = req.header("user-agent", ua);
         }
@@ -243,7 +250,7 @@ impl StreamCheckService {
         }
     }
 
-    /// 将探测原始结果包装成 `StreamCheckResult`。
+    /// Wraps a raw probe result in `StreamCheckResult`.
     fn build_result(
         result: Result<u16, AppError>,
         response_time: u64,
@@ -299,8 +306,8 @@ impl StreamCheckService {
         }
     }
 
-    /// Provider 级自定义 User-Agent（`meta.customUserAgent`），与转发路径共用单一口径：
-    /// trim、空串视为未设置、非法值静默忽略（返回 `None`）。
+    /// Provider-level custom user agent from `meta.customUserAgent`, following the forwarding path's
+    /// policy: trim it, treat an empty value as unset, and silently ignore invalid values by returning None.
     fn custom_user_agent(provider: &Provider) -> Option<HeaderValue> {
         provider
             .meta
@@ -308,9 +315,9 @@ impl StreamCheckService {
             .and_then(|meta| meta.custom_user_agent_header().ok().flatten())
     }
 
-    // ===== 各应用 base_url 提取（settings_config 结构互不相同）=====
+    // ===== Per-application base_url extraction for distinct settings_config structures =====
 
-    /// OpenClaw: `{ baseUrl, apiKey, api, ... }`（camelCase）
+    /// OpenClaw: `{ baseUrl, apiKey, api, ... }` (camelCase).
     fn extract_openclaw_base_url(provider: &Provider) -> Result<String, AppError> {
         provider
             .settings_config
@@ -321,13 +328,13 @@ impl StreamCheckService {
             .ok_or_else(|| {
                 AppError::localized(
                     "openclaw_base_url_missing",
-                    "OpenClaw 供应商缺少 baseUrl",
+                    "The OpenClaw provider is missing baseUrl",
                     "OpenClaw provider is missing `baseUrl`",
                 )
             })
     }
 
-    /// Hermes: `{ base_url, api_key, api_mode }`（snake_case）
+    /// Hermes: `{ base_url, api_key, api_mode }` (snake_case).
     fn extract_hermes_base_url(provider: &Provider) -> Result<String, AppError> {
         provider
             .settings_config
@@ -338,7 +345,7 @@ impl StreamCheckService {
             .ok_or_else(|| {
                 AppError::localized(
                     "hermes_base_url_missing",
-                    "Hermes 供应商缺少 base_url",
+                    "The Hermes provider is missing base_url",
                     "Hermes provider is missing `base_url`",
                 )
             })
@@ -346,8 +353,9 @@ impl StreamCheckService {
 
     /// OpenCode: `{ npm, options: { baseURL, apiKey }, ... }`
     ///
-    /// 用户未显式填 `options.baseURL` 时，按 `npm`（AI SDK 包）回退到包自带默认端点。
-    /// `@ai-sdk/openai-compatible` 无默认端点，必须显式填。
+    /// When the user does not explicitly set `options.baseURL`, falls back by `npm` AI SDK package
+    /// to the package's built-in default endpoint. `@ai-sdk/openai-compatible` has no default and
+    /// requires an explicit value.
     fn resolve_opencode_base_url(
         provider: &Provider,
         npm: Option<&str>,
@@ -366,7 +374,7 @@ impl StreamCheckService {
         fallback.map(|s| s.to_string()).ok_or_else(|| {
             AppError::localized(
                 "opencode_base_url_missing",
-                "OpenCode 供应商缺少 options.baseURL，且当前 SDK 包没有默认端点",
+                "The OpenCode provider is missing options.baseURL and the current SDK package has no default endpoint",
                 "OpenCode provider is missing `options.baseURL` and the SDK package has no default endpoint",
             )
         })
@@ -410,7 +418,7 @@ mod tests {
         let config = StreamCheckConfig::default();
         assert_eq!(config.timeout_secs, 8);
         assert_eq!(config.max_retries, 1);
-        // 降级阈值沿用旧尺度，避免把 1 秒多的正常延迟误判为"较慢"
+        // Retain the previous degraded threshold so normal latency slightly above one second is not marked slow.
         assert_eq!(config.degraded_threshold_ms, 6000);
     }
 
@@ -435,7 +443,7 @@ mod tests {
         assert!(StreamCheckService::should_retry("Request timeout"));
         assert!(StreamCheckService::should_retry("request timed out"));
         assert!(StreamCheckService::should_retry("connection abort"));
-        // 连接被拒 / DNS 失败不重试
+        // Do not retry refused connections or DNS failures.
         assert!(!StreamCheckService::should_retry(
             "Connection failed: dns error"
         ));
@@ -444,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_build_result_any_http_status_is_reachable() {
-        // 任何 HTTP 状态码都算可达（success=true）
+        // Every HTTP status means reachable (success=true).
         for status in [200u16, 401, 403, 404, 429, 500, 503] {
             let r = StreamCheckService::build_result(Ok(status), 100, 1500);
             assert!(r.success, "status {status} should be reachable");
@@ -480,12 +488,12 @@ mod tests {
 
         let global = StreamCheckConfig::default();
 
-        // 无 testConfig → 用全局
+        // Without testConfig, use global configuration.
         let p = make_provider(serde_json::json!({}));
         let merged = StreamCheckService::merge_provider_config(&p, &global);
         assert_eq!(merged.timeout_secs, global.timeout_secs);
 
-        // testConfig 启用并覆盖部分字段
+        // Enabled testConfig overrides selected fields.
         let mut p2 = make_provider(serde_json::json!({}));
         p2.meta = Some(ProviderMeta {
             test_config: Some(ProviderTestConfig {
@@ -499,9 +507,9 @@ mod tests {
         let merged2 = StreamCheckService::merge_provider_config(&p2, &global);
         assert_eq!(merged2.timeout_secs, 20);
         assert_eq!(merged2.degraded_threshold_ms, 3000);
-        assert_eq!(merged2.max_retries, global.max_retries); // 未覆盖 → 全局
+        assert_eq!(merged2.max_retries, global.max_retries); // Not overridden; use global.
 
-        // testConfig 存在但未启用 → 忽略，用全局
+        // Ignore a present but disabled testConfig and use global configuration.
         let mut p3 = make_provider(serde_json::json!({}));
         p3.meta = Some(ProviderMeta {
             test_config: Some(ProviderTestConfig {
@@ -566,7 +574,7 @@ mod tests {
 
     #[test]
     fn test_resolve_base_url_uses_explicit_url_or_errors_when_missing() {
-        // 有显式 base_url → 直接用
+        // Use an explicit base_url directly.
         let p = make_provider(
             serde_json::json!({ "env": { "ANTHROPIC_BASE_URL": "https://relay.example/v1" } }),
         );
@@ -575,8 +583,10 @@ mod tests {
             "https://relay.example/v1"
         );
 
-        // 缺 base_url（官方留空 / 用户忘填）→ 报错。官方供应商的检测按钮在前端已隐藏，
-        // 不会走到这里；不做官方端点回退（避免给忘填地址的第三方误显绿灯）。
+        // Missing base_url, whether intentionally empty for an official provider or omitted by the
+        // user, is an error. The renderer hides checks for official providers, so they do not reach
+        // this path. Do not fall back to an official endpoint because that could incorrectly mark a
+        // third-party provider with a missing URL as reachable.
         let empty = make_provider(serde_json::json!({ "env": {} }));
         assert!(StreamCheckService::resolve_base_url(&AppType::Claude, &empty).is_err());
     }

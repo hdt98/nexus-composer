@@ -18,7 +18,7 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-/// 打开外部链接
+/// Open an external link.
 #[tauri::command]
 pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> {
     let url = if url.starts_with("http://") || url.starts_with("https://") {
@@ -29,7 +29,7 @@ pub async fn open_external(app: AppHandle, url: String) -> Result<bool, String> 
 
     app.opener()
         .open_url(&url, None::<String>)
-        .map_err(|e| format!("打开链接失败: {e}"))?;
+        .map_err(|e| format!("Failed to open link: {e}"))?;
 
     Ok(true)
 }
@@ -39,18 +39,18 @@ pub async fn copy_text_to_clipboard(text: String) -> Result<bool, String> {
     // Use spawn_blocking to avoid blocking the async runtime
     // Clipboard access can block on some platforms and may have thread/loop constraints
     tokio::task::spawn_blocking(move || {
-        let mut clipboard =
-            arboard::Clipboard::new().map_err(|e| format!("访问系统剪贴板失败: {e}"))?;
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|e| format!("Failed to access system clipboard: {e}"))?;
         clipboard
             .set_text(text)
-            .map_err(|e| format!("写入系统剪贴板失败: {e}"))?;
+            .map_err(|e| format!("Failed to write to system clipboard: {e}"))?;
         Ok(true)
     })
     .await
-    .map_err(|e| format!("剪贴板任务执行失败: {e}"))?
+    .map_err(|e| format!("Clipboard task failed: {e}"))?
 }
 
-/// 检查更新
+/// Check for updates.
 #[tauri::command]
 pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
     handle
@@ -59,15 +59,16 @@ pub async fn check_for_updates(handle: AppHandle) -> Result<bool, String> {
             "https://github.com/hdt98/nexus-composer/releases/latest",
             None::<String>,
         )
-        .map_err(|e| format!("打开更新页面失败: {e}"))?;
+        .map_err(|e| format!("Failed to open updates page: {e}"))?;
 
     Ok(true)
 }
 
-/// 判断是否为便携版（绿色版）运行
+/// Check whether the app is running in portable mode.
 #[tauri::command]
 pub async fn is_portable_mode() -> Result<bool, String> {
-    let exe_path = std::env::current_exe().map_err(|e| format!("获取可执行路径失败: {e}"))?;
+    let exe_path =
+        std::env::current_exe().map_err(|e| format!("Failed to get executable path: {e}"))?;
     if let Some(dir) = exe_path.parent() {
         Ok(dir.join("portable.ini").is_file())
     } else {
@@ -75,22 +76,22 @@ pub async fn is_portable_mode() -> Result<bool, String> {
     }
 }
 
-/// 获取应用启动阶段的初始化错误（若有）。
-/// 用于前端在早期主动拉取，避免事件订阅竞态导致的提示缺失。
+/// Get the app startup initialization error, if any.
+/// Used by the frontend for early polling to avoid missing notices due to event subscription races.
 #[tauri::command]
 pub async fn get_init_error() -> Result<Option<InitErrorPayload>, String> {
     Ok(crate::init_status::get_init_error())
 }
 
-/// 获取 JSON→SQLite 迁移结果（若有）。
-/// 只返回一次 true，之后返回 false，用于前端显示一次性 Toast 通知。
+/// Get the JSON-to-SQLite migration result, if any.
+/// Returns `true` only once, then `false`, so the frontend can show a one-time toast.
 #[tauri::command]
 pub async fn get_migration_result() -> Result<bool, String> {
     Ok(crate::init_status::take_migration_success())
 }
 
-/// 获取 Skills 自动导入（SSOT）迁移结果（若有）。
-/// 只返回一次 Some({count})，之后返回 None，用于前端显示一次性 Toast 通知。
+/// Get the Skills auto-import (SSOT) migration result, if any.
+/// Returns `Some({count})` only once, then `None`, so the frontend can show a one-time toast.
 #[tauri::command]
 pub async fn get_skills_migration_result() -> Result<Option<SkillsMigrationPayload>, String> {
     Ok(crate::init_status::take_skills_migration_result())
@@ -100,14 +101,17 @@ pub async fn get_skills_migration_result() -> Result<Option<SkillsMigrationPaylo
 pub struct ToolVersion {
     name: String,
     version: Option<String>,
-    latest_version: Option<String>, // 新增字段：最新版本
+    latest_version: Option<String>, // Newly added field: latest version
     error: Option<String>,
-    /// 已定位到可执行文件、但 `--version` 报错退出（装了却跑不起来，如 Node 版本不达标）。
-    /// 供前端区分"未安装"与"已安装·无法运行"，无需匹配 error 文案反推语义。
+    /// The executable was found, but `--version` exited with an error
+    /// (installed but not runnable, such as an unsupported Node version).
+    /// Lets the frontend distinguish "not installed" from "installed but broken"
+    /// without inferring semantics from the error text.
     installed_but_broken: bool,
-    /// 工具运行环境: "windows", "wsl", "macos", "linux", "unknown"
+    /// Tool runtime environment: "windows", "wsl", "macos", "linux", "unknown"
     env_type: String,
-    /// 当 env_type 为 "wsl" 时，返回该工具绑定的 WSL distro（用于按 distro 探测 shells）
+    /// When `env_type` is "wsl", return the WSL distro bound to this tool
+    /// so shell probing can run per distro.
     wsl_distro: Option<String>,
 }
 
@@ -194,8 +198,9 @@ pub async fn run_tool_lifecycle_action(
         ToolLifecycleAction::Update => "tool_update",
     };
 
-    // build 阶段含锚定探测（对每个工具跑 `--version` 定位命令行实际命中那处），
-    // 与执行一并放进 blocking 线程，避免阻塞 async runtime。
+    // The build phase includes anchored probing
+    // (run `--version` per tool to locate the actual command-line target).
+    // Keep it in the blocking thread with execution to avoid blocking the async runtime.
     tokio::task::spawn_blocking(move || {
         let command_line =
             build_tool_lifecycle_command(&requested, action, wsl_shell_by_tool.as_ref())?;
@@ -205,25 +210,28 @@ pub async fn run_tool_lifecycle_action(
     .map_err(|e| format!("tool lifecycle task join error: {e}"))?
 }
 
-/// 静默执行工具安装/更新脚本：直接捕获子进程输出并阻塞到命令真正结束，
-/// 不再弹出可见终端窗口（与 `launch_terminal_running` 的"开窗即返回"形成对比，
-/// 后者仍保留给 provider 切换等需要交互式终端的场景）。
-/// 失败时回传 stderr/stdout 末尾若干行，供前端 toast 提示。
+/// Run the tool install/update script silently: capture child-process output
+/// directly and block until the command really exits.
+/// This no longer opens a visible terminal window, unlike `launch_terminal_running`,
+/// which is still kept for interactive-terminal flows such as provider switching.
+/// On failure, return the last few stderr/stdout lines for frontend toast messaging.
 #[cfg(not(target_os = "windows"))]
 fn run_tool_lifecycle_silently(command_line: &str, _label: &str) -> Result<(), String> {
     use std::process::Command;
-    // command_line 是 bash 风格脚本（含 `set -e` 与多行命令）；强制用 bash 执行，
-    // 避免用户默认 shell 为 fish/zsh 时 `set -e` 等语义不一致。
+    // `command_line` is a bash-style script (including `set -e` and multi-line commands).
+    // Force bash to avoid semantic drift in shells like fish or zsh.
     let output = Command::new("bash")
         .arg("-c")
         .arg(command_line)
         .output()
-        .map_err(|e| format!("启动安装进程失败: {e}"))?;
+        .map_err(|e| format!("Failed to start install process: {e}"))?;
     finish_lifecycle_output(&output)
 }
 
-/// Windows 静默执行：command_line 是 .bat 内容（@echo off + call/wsl 行，CRLF 分隔），
-/// 写临时 .bat 后用 `cmd /C` 执行，`CREATE_NO_WINDOW` 抑制 console 窗口。
+/// Windows silent execution: `command_line` is `.bat` content
+/// (`@echo off` plus `call`/`wsl` lines, CRLF-delimited).
+/// Write a temporary `.bat` and run it via `cmd /C`; `CREATE_NO_WINDOW`
+/// suppresses the console window.
 #[cfg(target_os = "windows")]
 fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), String> {
     use std::os::windows::process::CommandExt;
@@ -231,7 +239,8 @@ fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), St
 
     let bat_file =
         std::env::temp_dir().join(format!("cc_switch_{}_{}.bat", label, std::process::id()));
-    std::fs::write(&bat_file, command_line).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+    std::fs::write(&bat_file, command_line)
+        .map_err(|e| format!("Failed to write batch file: {e}"))?;
 
     let output = Command::new("cmd")
         .arg("/C")
@@ -240,11 +249,13 @@ fn run_tool_lifecycle_silently(command_line: &str, label: &str) -> Result<(), St
         .output();
     let _ = std::fs::remove_file(&bat_file);
 
-    finish_lifecycle_output(&output.map_err(|e| format!("启动安装进程失败: {e}"))?)
+    finish_lifecycle_output(&output.map_err(|e| format!("Failed to start install process: {e}"))?)
 }
 
-/// 把子进程退出结果转成 `Result`：成功返回 `Ok`；失败提取 stderr（空则回退 stdout）
-/// 的末尾若干行作为错误详情，避免把整段安装日志塞进 toast。
+/// Convert child-process exit output into `Result`.
+/// Return `Ok` on success; on failure, extract the last few stderr lines
+/// (or stdout if stderr is empty) as the error detail to avoid stuffing
+/// an entire install log into a toast.
 fn finish_lifecycle_output(output: &std::process::Output) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
@@ -258,13 +269,14 @@ fn finish_lifecycle_output(output: &std::process::Output) -> Result<(), String> 
     };
     let detail = last_lines(raw, 8);
     Err(if detail.is_empty() {
-        format!("命令执行失败 (exit code: {:?})", output.status.code())
+        format!("Command failed (exit code: {:?})", output.status.code())
     } else {
         detail
     })
 }
 
-/// 取文本末尾最多 `n` 行（npm / pip 的关键错误通常出现在输出尾部）。
+/// Return at most the last `n` lines of text.
+/// npm / pip usually put the key error near the end.
 fn last_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
@@ -382,9 +394,10 @@ fn build_tool_lifecycle_command(
 
     #[cfg(not(target_os = "windows"))]
     {
-        // set -e 让任一步失败即中止;set -o pipefail 保留为管道命令的兜底防线。
-        // 当前官方 installer 路径已避免 `curl | bash`,但未来若新增管道命令,
-        // 仍应让管道前段失败参与整条脚本判定。
+        // `set -e` stops on the first failed step; keep `set -o pipefail` as a
+        // safeguard for future pipeline commands.
+        // The current official installer path avoids `curl | bash`, but if a
+        // pipeline is added later, upstream failures must still fail the script.
         lines.push("set -e".to_string());
         lines.push("set -o pipefail".to_string());
     }
@@ -431,20 +444,22 @@ fn tool_display_name(tool: &str) -> &'static str {
     }
 }
 
-/// 官方 shell installer 都不用 `curl | bash` 这种 pipe 形式（仍然用 curl 下载，
-/// 只是先落到临时文件再交给 bash 执行）:WSL 分支会在
-/// `wsl.exe ... -- sh -c "<cmd>"` 子 shell 里执行命令,外层脚本的 `set -o pipefail`
-/// 不会继承进去;而 WSL 默认 shell 可能是 dash/ash,也不能假设支持 `set -o pipefail`。
-/// 先下载到 mktemp 文件再交给 bash,能让 curl 失败稳定变成整条命令失败。
+/// The official shell installers avoid `curl | bash`.
+/// They still use `curl`, but download to a temp file first and then pass it to `bash`.
+/// The WSL branch runs inside `wsl.exe ... -- sh -c "<cmd>"`, so outer
+/// `set -o pipefail` does not carry into that child shell, and the default WSL
+/// shell may be dash/ash, where `pipefail` cannot be assumed.
+/// Downloading to `mktemp` first makes curl failures reliably fail the whole command.
 const CLAUDE_INSTALL_UNIX: &str =
     "bash -c 'tmp=$(mktemp) && curl -fsSL https://claude.ai/install.sh -o $tmp && bash $tmp; status=$?; rm -f $tmp; exit $status'";
 const OPENCODE_INSTALL_UNIX: &str =
     "bash -c 'tmp=$(mktemp) && curl -fsSL https://opencode.ai/install -o $tmp && bash $tmp; status=$?; rm -f $tmp; exit $status'";
 
-/// Hermes 官方安装器会自带/选择合适的 Python 运行时。不要再用
-/// `python3 -m pip ... || python -m pip ...`:Hermes PyPI 包要求 Python >=3.11,
-/// 但 macOS 系统 `python3` 常是 3.9,而 pyenv 下 `python` shim 还可能不存在,会把
-/// 真正的 Python 版本问题盖成 "python command exists in these Python versions"。
+/// The Hermes official installer bundles or selects an appropriate Python runtime.
+/// Do not use `python3 -m pip ... || python -m pip ...`: the Hermes PyPI package
+/// requires Python >= 3.11, while macOS often ships `python3` as 3.9, and the
+/// pyenv `python` shim may not exist at all, which can hide the real Python
+/// version problem behind "python command exists in these Python versions".
 const HERMES_INSTALL_UNIX: &str =
     "bash -c 'tmp=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh -o $tmp && bash $tmp; status=$?; rm -f $tmp; exit $status'";
 const HERMES_UPDATE_UNIX: &str =
@@ -475,8 +490,9 @@ fn hermes_install_windows_command() -> String {
 
 #[cfg(target_os = "windows")]
 fn hermes_update_windows_command() -> String {
-    // fallback 是 powershell.exe，不是 .cmd/.bat；这里不需要 `call`。PowerShell 的
-    // `irm | iex` 已被 EncodedCommand 收进单一参数,避免 `cmd.exe` 解析管道符。
+    // The fallback is `powershell.exe`, not `.cmd`/`.bat`, so `call` is not needed here.
+    // PowerShell's `irm | iex` is already wrapped into one EncodedCommand argument,
+    // avoiding `cmd.exe` pipe parsing.
     format!("hermes update || {}", hermes_install_windows_command())
 }
 
@@ -521,8 +537,10 @@ fn chain_update_commands(
     }
     match shell {
         LifecycleCommandShell::Posix => format!("{primary} || {fallback}"),
-        // 这段最终会被外层再包成 `call <command>`。fallback 若是 npm.cmd/pnpm.cmd,
-        // `||` 右侧也必须显式 `call`,否则批处理会转移控制权并跳过后续工具。
+        // This block is later wrapped again as `call <command>`.
+        // If the fallback is `npm.cmd`/`pnpm.cmd`, the right side of `||` must
+        // also use explicit `call`, or batch control flow will jump away and skip
+        // the remaining tools.
         LifecycleCommandShell::WindowsBatch => format!("{primary} || call {fallback}"),
     }
 }
@@ -574,10 +592,11 @@ fn tool_action_shell_command(tool: &str, action: ToolLifecycleAction) -> Option<
     tool_action_shell_command_for_shell(tool, action, shell)
 }
 
-/// Windows host 上的 WSL 分支专用:`tool_action_shell_command` 在 Windows target 编译
-/// 出的版本会包含 Windows batch 语义(例如 `|| call npm ...`)且 hermes 会返回
-/// Windows PowerShell installer,但跨 `wsl.exe` 边界后跑的是 Linux。这个 wrapper
-/// 强制生成 POSIX 版命令。
+/// WSL-only wrapper for Windows hosts.
+/// The Windows-target build of `tool_action_shell_command` includes Windows batch
+/// semantics (such as `|| call npm ...`), and Hermes returns a Windows PowerShell
+/// installer, but after crossing the `wsl.exe` boundary the command runs on Linux.
+/// This wrapper forces POSIX-form commands.
 #[cfg(target_os = "windows")]
 fn wsl_tool_action_shell_command(tool: &str, action: ToolLifecycleAction) -> Option<String> {
     match action {
@@ -603,23 +622,27 @@ fn build_tool_action_line(
 ) -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        // ① WSL 工具(override 是 UNC `\\wsl$\<distro>\...`):锚定的绝对路径是 Windows
-        //    主机路径,跨 wsl.exe 进入 distro 文件系统后无效;且 enumerate 不参与 WSL。
-        //    install 走 POSIX 安装优先级,update 走 POSIX 静态/官方 update 命令,
-        //    再通过 wsl.exe -d distro -- sh 包一层。
-        //    **必须用 wsl_tool_action_shell_command 而非 tool_action_shell_command**:
-        //    后者在 Windows target 给 hermes 返回 PowerShell installer,且 Windows batch
-        //    语义也不适合跨 wsl.exe;这里统一替换为 POSIX 版安装/更新命令。
+        // 1. WSL tools (override is UNC `\\wsl$\<distro>\...`): anchored absolute
+        //    paths are Windows-host paths and become invalid after entering the
+        //    distro filesystem via `wsl.exe`; enumeration also does not cover WSL.
+        //    Install uses POSIX install precedence, update uses POSIX static or
+        //    official update commands, then wraps them with
+        //    `wsl.exe -d distro -- sh`.
+        //    We must use `wsl_tool_action_shell_command`, not
+        //    `tool_action_shell_command`: the Windows-target version returns a
+        //    PowerShell installer for Hermes and carries Windows batch semantics
+        //    that do not fit across `wsl.exe`.
         if let Some(distro) = wsl_distro_for_tool(tool) {
             let command = wsl_tool_action_shell_command(tool, action)
                 .ok_or_else(|| format!("Unsupported tool action target: {tool}"))?;
             return build_wsl_tool_action_line(&distro, &command, wsl_shell, wsl_shell_flag);
         }
-        // ② Windows 原生 update 锚定;install 走静态(install.sh 是 bash 脚本,Windows
-        //    无意义)。**`enumerate_tool_installations` 在这里 per-tool 重做、与前端
-        //    probe 阶段算过的结果不共享是 by design**:run_tool_lifecycle_action 是
-        //    独立 IPC 调用,不信任前端回传的命令字符串(避免命令注入面扩大);前端是
-        //    逐工具触发 lifecycle,batch 化会破坏"逐工具独立成败"的 UX。
+        // 2. Native Windows update uses anchoring; install stays static
+        //    (`install.sh` is a bash script and not meaningful on Windows).
+        //    `enumerate_tool_installations` is intentionally recomputed per tool
+        //    here instead of sharing frontend probe results: `run_tool_lifecycle_action`
+        //    is a separate IPC call, so it should not trust command strings echoed
+        //    back from the frontend, and batching would break the per-tool success/failure UX.
         let command = match action {
             ToolLifecycleAction::Update => {
                 let installs = enumerate_tool_installations(tool);
@@ -633,20 +656,24 @@ fn build_tool_action_line(
         if command.is_empty() {
             return Err(format!("Unsupported tool action target: {tool}"));
         }
-        // .bat 调用 .cmd/.bat 必须用 `call` 否则当前脚本被替换、后续 `if errorlevel`
-        // 行被跳过;对 .exe 加 call 无害(等同直接调用)。锚定命令头部可能是 .cmd
-        // (npm/pnpm)或 .exe(volta),静态命令头部是 `npm`(也是 .cmd)、`py` 等——
-        // 全部加 `call ` 前缀,风格统一且语义正确。含空格的头部已被 `win_quote_path_for_batch`
-        // 加上双引号,call 对带引号的路径解析正常。
+        // `.bat` must use `call` when invoking `.cmd`/`.bat`, or the current script
+        // is replaced and later `if errorlevel` lines are skipped.
+        // Adding `call` to `.exe` is harmless. Anchored command heads may be `.cmd`
+        // (`npm`/`pnpm`) or `.exe` (`volta`), while static commands may start with
+        // `npm` or `py`, so apply the `call ` prefix uniformly.
+        // Space-containing heads are already quoted by `win_quote_path_for_batch`,
+        // and `call` handles quoted paths correctly.
         return Ok(format!("call {command}"));
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         let _ = (wsl_shell, wsl_shell_flag);
-        // update 锚定到命令行实际命中的那处（写回同一个 node / brew / 原生安装器），
-        // 而非裸 `npm` 落到 PATH 第一个 npm；install 走「上游推荐 || npm 兜底」短路链
-        // （有 native installer 的工具如 claude/opencode/hermes），其余仍裸 npm。
+        // Update anchors to the actual command-line target so it writes back to
+        // the same node / brew / native installer location instead of the first
+        // bare `npm` on PATH. Install uses the "upstream recommendation || npm fallback"
+        // short-circuit chain for tools with native installers such as
+        // claude/opencode/hermes; the rest still use bare npm.
         let command = match action {
             ToolLifecycleAction::Update => {
                 let installs = enumerate_tool_installations(tool);
@@ -695,11 +722,12 @@ fn build_wsl_tool_action_line(
     ))
 }
 
-/// Windows 双引号包裹基础原语:无条件加引号 + 内部 `"` 转义为 `\"`。
-/// `windows_cmd_double_quote_arg`(给 wsl.exe 传 bash 命令字符串用)与
-/// `win_quote_path_for_batch`(给锚定路径用)都基于它,避免两份 quoter 各自演化、
-/// 未来对同一路径产生不一致引用形态。镜像 POSIX 侧 `shell_single_quote` 与
-/// `quote_path_if_spaced` 的"重量基础 + 轻量条件包装"两层结构。
+/// Windows double-quote primitive: always add outer quotes and escape inner `"` as `\"`.
+/// Both `windows_cmd_double_quote_arg` (for passing bash command strings into `wsl.exe`)
+/// and `win_quote_path_for_batch` (for anchored paths) build on this helper so two
+/// quoters do not drift and produce inconsistent representations for the same path.
+/// This mirrors the POSIX split between `shell_single_quote` and the lighter
+/// conditional wrapper `quote_path_if_spaced`.
 #[cfg(target_os = "windows")]
 fn win_double_quote(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\\\""))
@@ -710,7 +738,7 @@ fn windows_cmd_double_quote_arg(value: &str) -> String {
     win_double_quote(value)
 }
 
-/// 获取单个工具的版本信息（内部实现）
+/// Get version information for a single tool (internal implementation).
 async fn get_single_tool_version_impl(
     tool: &str,
     wsl_shell: Option<&str>,
@@ -721,26 +749,28 @@ async fn get_single_tool_version_impl(
         "unexpected tool name in get_single_tool_version_impl: {tool}"
     );
 
-    // 判断该工具的运行环境 & WSL distro（如有）
+    // Determine the tool runtime environment and WSL distro, if any.
     let (env_type, wsl_distro) = tool_env_type_and_wsl_distro(tool);
 
-    // 使用全局 HTTP 客户端（已包含代理配置）
+    // Use the global HTTP client, which already includes proxy configuration.
     let client = crate::proxy::http_client::get();
 
-    // 1. 获取本地版本
+    // 1. Get the local version.
     let probe = if let Some(distro) = wsl_distro.as_deref() {
         try_get_version_wsl(tool, distro, wsl_shell, wsl_shell_flag)
     } else {
         #[cfg(target_os = "windows")]
         {
-            // Windows 上只执行已经定位到的真实可执行文件，避免 `cmd /C tool`
-            // 误触发 App Execution Alias 或协议处理器。
+            // On Windows, only execute the real executable that has already been
+            // resolved to avoid `cmd /C tool` accidentally hitting an App Execution
+            // Alias or protocol handler.
             scan_cli_version(tool)
         }
 
         #[cfg(not(target_os = "windows"))]
         {
-            // PATH 第一个命令优先；只有它确实没装(NotFound)才去常见目录兜底扫描。
+            // Prefer the first PATH command; fall back to common-directory scanning
+            // only when it is truly not installed (`NotFound`).
             match try_get_version(tool) {
                 ShellProbe::NotFound(_) => scan_cli_version(tool),
                 found => found,
@@ -753,7 +783,8 @@ async fn get_single_tool_version_impl(
         ShellProbe::NotFound(e) => (None, Some(e), false),
     };
 
-    // 2. 获取远程最新版本（npm 工具在本地领先 latest 时会按预发布通道补查，见
+    // 2. Get the latest remote version. For npm tools, if the local version is
+    // ahead of `latest`, also check prerelease channels as described in
     //    fetch_npm_latest_for_tool / npm_prerelease_tags）
     let local = local_version.as_deref();
     let latest_version = match tool {
@@ -787,16 +818,20 @@ async fn get_single_tool_version_impl(
     }
 }
 
-/// 该工具在 npm 上的预发布通道 tag(靠前者优先)。仅当本地版本已**严格领先**
-/// `latest` 时才会被补查 —— 让主动在抢先通道的用户(如走 Claude Code 的 `next`)
-/// 看到与所在通道对齐的"最新版本",同时绝不把稳定通道用户暴露给预发布版。
-/// 返回空切片表示该工具只看 `latest`、不补查。
+/// The tool's npm prerelease channel tags, in priority order.
+/// They are checked only when the local version is already strictly ahead of
+/// `latest`, so users who deliberately track an early channel (for example,
+/// Claude Code `next`) see the latest version for that channel without exposing
+/// stable-channel users to prereleases.
+/// An empty slice means the tool only uses `latest`.
 ///
-/// 为何不通用覆盖所有工具:各家预发布 tag 命名互不统一(codex=alpha/beta/native、
-/// gemini=nightly/preview、openclaw=alpha/beta),且 codex 的 beta/native 是
-/// `0.1.x` 时间戳式版本、gemini 有误发的 `false` tag —— 这些脏值虽会被
-/// `pick_latest_version` 的版本比较挡掉,但维护成本与误报风险不值当,故暂只为
-/// Claude Code 启用。
+/// This is not generalized across all tools because prerelease tag naming is
+/// inconsistent (`codex=alpha/beta/native`, `gemini=nightly/preview`,
+/// `openclaw=alpha/beta`), and some tags are noisy or malformed
+/// (`codex` beta/native timestamp-like `0.1.x` versions, Gemini's mistaken
+/// `false` tag). `pick_latest_version` filters those out during comparison, but
+/// the maintenance cost and false-positive risk are not worth it yet, so this
+/// is currently enabled only for Claude Code.
 fn npm_prerelease_tags(tool: &str) -> &'static [&'static str] {
     match tool {
         "claude" => &["next"],
@@ -804,11 +839,14 @@ fn npm_prerelease_tags(tool: &str) -> &'static [&'static str] {
     }
 }
 
-/// 解析 "2.1.156" / "2.1.156-beta.1" → (主版本三段, 预发布段)。无法解析返回 None。
-/// 与前端 `src/lib/version.ts` 的 parseVersion 语义对称(跨语言各实现一份)。
-/// patch 用 u64 以容纳 codex 的 `0.1.2505172116` 时间戳式版本而不溢出。
+/// Parse `"2.1.156"` / `"2.1.156-beta.1"` into
+/// `(three-part core version, prerelease segment)`.
+/// Return `None` on parse failure.
+/// This mirrors the frontend `parseVersion` semantics in `src/lib/version.ts`.
+/// `patch` uses `u64` so timestamp-like Codex versions such as
+/// `0.1.2505172116` do not overflow.
 fn parse_semver(v: &str) -> Option<([u64; 3], Vec<String>)> {
-    // 忽略 `+build` 元数据,再以首个 `-` 切出预发布段。
+    // Ignore `+build` metadata, then split the prerelease segment at the first `-`.
     let core_and_pre = v.trim().split('+').next().unwrap_or("");
     let (core, pre) = match core_and_pre.split_once('-') {
         Some((c, p)) => (c, Some(p)),
@@ -819,7 +857,7 @@ fn parse_semver(v: &str) -> Option<([u64; 3], Vec<String>)> {
     let minor = parts.next()?.parse::<u64>().ok()?;
     let patch = parts.next()?.parse::<u64>().ok()?;
     if parts.next().is_some() {
-        return None; // 多于三段,非法
+        return None; // More than three core segments is invalid.
     }
     let pre_segments = pre
         .map(|p| p.split('.').map(|s| s.to_string()).collect())
@@ -827,9 +865,12 @@ fn parse_semver(v: &str) -> Option<([u64; 3], Vec<String>)> {
     Some(([major, minor, patch], pre_segments))
 }
 
-/// 比较两个版本号(遵循 semver:主版本三段优先;core 相等时有预发布 < 无预发布;
-/// 预发布段逐段比 —— 数字段按数值、数字段 < 非数字段、非数字段按 ASCII、前缀相同
-/// 则段更多者更大)。任一无法解析返回 None,调用方据此保守处理。
+/// Compare two versions using semver rules.
+/// The three core segments are compared first; when the core matches,
+/// prerelease < release, and prerelease identifiers are compared segment by
+/// segment: numeric by numeric value, numeric < non-numeric, non-numeric by
+/// ASCII, and if all shared prefixes match, the longer segment list wins.
+/// Return `None` if either version cannot be parsed so callers can handle it conservatively.
 fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     use std::cmp::Ordering;
     let (ac, ap) = parse_semver(a)?;
@@ -849,7 +890,7 @@ fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     for (x, y) in ap.iter().zip(bp.iter()) {
         let ord = match (x.parse::<u64>(), y.parse::<u64>()) {
             (Ok(xv), Ok(yv)) => xv.cmp(&yv),
-            (Ok(_), Err(_)) => Ordering::Less, // 数字段 < 非数字段
+            (Ok(_), Err(_)) => Ordering::Less, // Numeric segment < non-numeric segment
             (Err(_), Ok(_)) => Ordering::Greater,
             (Err(_), Err(_)) => x.as_str().cmp(y.as_str()),
         };
@@ -860,11 +901,14 @@ fn compare_semver(a: &str, b: &str) -> Option<std::cmp::Ordering> {
     Some(ap.len().cmp(&bp.len()))
 }
 
-/// 从一次 registry 请求得到的完整 dist-tags 出发,挑选要展示的"最新版本"。
+/// Pick the "latest version" to display from the full `dist-tags`
+/// returned by a single registry request.
 ///
-/// 规则:默认就是 `latest`;仅当本地版本已**严格领先** `latest`(说明用户主动在
-/// 抢先通道)时,才把 `prerelease_tags` 指向的版本纳入比较,取其中能被解析、且
-/// 高于 `latest` 的最高者。无法解析或不高于 latest 的脏 tag 一律落选。
+/// Rule: default to `latest`. Only when the local version is already strictly
+/// ahead of `latest` (meaning the user deliberately tracks an early channel)
+/// are versions referenced by `prerelease_tags` compared, and only those that
+/// parse successfully and are higher than `latest` can win.
+/// Malformed tags or tags not higher than `latest` are always ignored.
 fn pick_latest_version(
     dist_tags: &serde_json::Map<String, serde_json::Value>,
     prerelease_tags: &[&str],
@@ -873,7 +917,8 @@ fn pick_latest_version(
     use std::cmp::Ordering;
     let latest = dist_tags.get("latest").and_then(|v| v.as_str())?;
 
-    // 本地是否严格领先 latest;任一无法解析则按"未领先"保守处理(只看 latest)。
+    // Is the local version strictly ahead of `latest`? If either side fails to parse,
+    // handle it conservatively as "not ahead" and use only `latest`.
     let local_ahead = local_version
         .and_then(|local| compare_semver(local, latest))
         .map(|ord| ord == Ordering::Greater)
@@ -893,7 +938,8 @@ fn pick_latest_version(
     Some(best)
 }
 
-/// 拉取 npm 包的完整 dist-tags(单次请求即含 latest/next/beta/...)。
+/// Fetch the full npm package `dist-tags` set in one request
+/// (`latest`/`next`/`beta`/...).
 async fn fetch_npm_dist_tags(
     client: &reqwest::Client,
     package: &str,
@@ -904,8 +950,10 @@ async fn fetch_npm_dist_tags(
     json.get("dist-tags")?.as_object().cloned()
 }
 
-/// 查询某 npm 工具要展示的"最新版本":取 `latest`,并在本地版本领先时按工具的
-/// 预发布通道(见 `npm_prerelease_tags`)补查 —— 复用同一次 registry 响应,无额外请求。
+/// Query the "latest version" to display for an npm tool:
+/// use `latest`, and when the local version is ahead, also check that tool's
+/// prerelease channels (see `npm_prerelease_tags`) using the same registry
+/// response with no extra requests.
 async fn fetch_npm_latest_for_tool(
     client: &reqwest::Client,
     package: &str,
@@ -957,11 +1005,11 @@ async fn fetch_pypi_latest_version(client: &reqwest::Client, package: &str) -> O
     }
 }
 
-/// 预编译的版本号正则表达式
+/// Precompiled version-number regular expression.
 static VERSION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"\d+\.\d+\.\d+(-[\w.]+)?").expect("Invalid version regex"));
 
-/// 从版本输出中提取纯版本号
+/// Extract the bare version number from version output.
 fn extract_version(raw: &str) -> String {
     VERSION_RE
         .find(raw)
@@ -969,30 +1017,37 @@ fn extract_version(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
-/// 工具未安装时的统一错误文案；WSL 路径会再拼上 `[WSL:{distro}] ` 前缀。
+/// Standard error text for a tool that is not installed.
+/// WSL paths prepend `[WSL:{distro}] `.
 const NOT_INSTALLED: &str = "not installed or not executable";
 
-/// CLI 版本探测的三态结果，跨平台统一各 probe（`try_get_version` /
-/// `try_get_version_wsl` / `scan_cli_version`）的返回，进而在 `ToolVersion` 上给出
-/// 结构化的 `installed_but_broken` 信号——避免前端靠匹配错误文案反推语义。
+/// Three-state result for CLI version probing.
+/// This unifies the return shape of `try_get_version`, `try_get_version_wsl`,
+/// and `scan_cli_version` across platforms and exposes a structured
+/// `installed_but_broken` signal on `ToolVersion`, so the frontend does not
+/// need to infer semantics from matching error text.
 ///
-/// 关键区分"没装"与"装了但 `--version` 自身报错退出"（如工具要求更高的 Node 版本）：
-/// 后者必须如实上报、不去别处捞旧版掩盖，否则"升级到新版却跑不起来"会被旧版盖住，
-/// 表现为"升级成功但版本号不变"。
+/// The key distinction is between "not installed" and "installed but
+/// `--version` itself exited with an error" (for example, a higher Node
+/// version is required). The latter must be reported faithfully instead of
+/// being hidden by finding an older copy elsewhere.
 enum ShellProbe {
-    /// 成功拿到版本号
+    /// Successfully obtained a version number.
     Found(String),
-    /// 可执行存在、但 `--version` 非零退出（携带诊断信息，如 stderr 末尾若干行）
+    /// The executable exists, but `--version` exited non-zero
+    /// with diagnostic information such as the last few stderr lines.
     FoundButFailed(String),
-    /// 没找到该命令（携带描述性消息，供 UI 展示）
+    /// The command was not found, with a descriptive message for the UI.
     NotFound(String),
 }
 
-/// 在非 Windows 平台用用户 shell 执行 `{tool} --version` 探测版本。
+/// Probe a version by running `{tool} --version` via the user's shell
+/// on non-Windows platforms.
 ///
-/// Windows 不走此路径：`cmd /C {tool}` 可能误触发 App Execution Alias /
-/// 协议处理器（曾导致 Windows 版整体被禁用），那里改由 `scan_cli_version`
-/// 只执行已定位到的真实可执行文件。
+/// Windows does not use this path: `cmd /C {tool}` can accidentally trigger
+/// an App Execution Alias or protocol handler, which previously caused the
+/// Windows build to be disabled. Windows uses `scan_cli_version` instead and
+/// executes only the already-resolved real executable.
 #[cfg(not(target_os = "windows"))]
 fn try_get_version(tool: &str) -> ShellProbe {
     use std::process::Command;
@@ -1021,8 +1076,9 @@ fn try_get_version(tool: &str) -> ShellProbe {
                     ShellProbe::Found(extract_version(raw))
                 }
             } else {
-                // exit 127 = shell 找不到命令（可放心 fallback 到搜索路径）；其它非零码
-                // = 命令存在但 --version 自身报错退出，须如实上报、不 fallback 掩盖。
+                // exit 127 means the shell could not find the command, so it is safe
+                // to fall back to search paths. Other non-zero codes mean the command
+                // exists but `--version` itself failed, and that must be reported directly.
                 let err = if stderr.is_empty() { stdout } else { stderr };
                 if out.status.code() == Some(127) || err.is_empty() {
                     ShellProbe::NotFound(NOT_INSTALLED.to_string())
@@ -1035,8 +1091,8 @@ fn try_get_version(tool: &str) -> ShellProbe {
     }
 }
 
-/// 校验 WSL 发行版名称是否合法
-/// WSL 发行版名称只允许字母、数字、连字符和下划线
+/// Validate that a WSL distro name is legal.
+/// WSL distro names may contain only letters, digits, hyphens, and underscores.
 #[cfg(target_os = "windows")]
 fn is_valid_wsl_distro_name(name: &str) -> bool {
     !name.is_empty()
@@ -1104,7 +1160,8 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
-/// 获取用户默认 shell 的完整路径；异常或被污染的 SHELL 回退到平台默认值。
+/// Get the full path to the user's default shell.
+/// Fall back to the platform default if `SHELL` is missing or polluted.
 fn get_user_shell() -> String {
     std::env::var("SHELL")
         .ok()
@@ -1112,7 +1169,8 @@ fn get_user_shell() -> String {
         .unwrap_or_else(|| fallback_user_shell().to_string())
 }
 
-/// 构建 exec 行：引号保护 shell 路径，交还用户 shell 让其按默认规则加载 rc 配置。
+/// Build the `exec` line: quote the shell path and hand control back to the
+/// user's shell so it loads rc configuration with its default behavior.
 fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
     let quoted_shell = shell_single_quote(shell);
 
@@ -1131,7 +1189,8 @@ fn build_exec_line(shell: &str, cwd: Option<&Path>) -> String {
     }
 }
 
-/// 构建 provider 命令行：通过用户 shell 的交互模式执行，确保 GUI 启动的终端也加载用户 PATH。
+/// Build the provider command line by running in the user's shell interactive
+/// mode so even GUI-launched terminals load the user's PATH.
 fn build_provider_command_line(shell: &str, config_path: &str, cwd: Option<&Path>) -> String {
     let claude_command = format!("claude --settings {}", shell_single_quote(config_path));
     let command = cwd
@@ -1183,15 +1242,15 @@ fn try_get_version_wsl(
 ) -> ShellProbe {
     use std::process::Command;
 
-    // 防御性断言：tool 只能是预定义的值
+    // Defensive assertion: `tool` must be one of the predefined values.
     debug_assert!(VALID_TOOLS.contains(&tool), "unexpected tool name: {tool}");
 
-    // 校验 distro 名称，防止命令注入
+    // Validate the distro name to prevent command injection.
     if !is_valid_wsl_distro_name(distro) {
         return ShellProbe::NotFound(format!("[WSL:{distro}] invalid distro name"));
     }
 
-    // 构建 Shell 脚本检测逻辑
+    // Build the shell-script probing logic.
     let (shell, flag, cmd) = if let Some(shell) = force_shell {
         // Defensive validation: never allow an arbitrary executable name here.
         if !is_valid_shell(shell) {
@@ -1215,7 +1274,7 @@ fn try_get_version_wsl(
             }
             format!("\"${{SHELL:-sh}}\" {flag} '{tool} --version'")
         } else {
-            // 兜底：自动尝试 -lic, -lc, -c
+            // Fallback: automatically try `-lic`, `-lc`, and `-c`.
             format!(
                 "\"${{SHELL:-sh}}\" -lic '{tool} --version' 2>/dev/null || \"${{SHELL:-sh}}\" -lc '{tool} --version' 2>/dev/null || \"${{SHELL:-sh}}\" -c '{tool} --version'"
             )
@@ -1242,8 +1301,10 @@ fn try_get_version_wsl(
                 }
             } else {
                 let err = if stderr.is_empty() { stdout } else { stderr };
-                // wsl.exe 透传的退出码不总可靠，故同时用 exit 127 与 "command not found"
-                // 文本兜底判别"没装"；其余非零退出视作"装了但 --version 报错"。
+                // Exit codes propagated through `wsl.exe` are not always reliable,
+                // so use both exit 127 and the "command not found" text as the
+                // fallback signal for "not installed". Other non-zero exits mean
+                // "installed but `--version` failed".
                 let not_found = err.is_empty()
                     || out.status.code() == Some(127)
                     || err.contains("command not found")
@@ -1262,9 +1323,10 @@ fn try_get_version_wsl(
     }
 }
 
-/// 非 Windows 平台的 WSL 版本检测存根
-/// 注意：此函数实际上不会被调用，因为 `wsl_distro_from_path` 在非 Windows 平台总是返回 None。
-/// 保留此函数是为了保持 API 一致性，防止未来重构时遗漏。
+/// WSL version-probing stub for non-Windows platforms.
+/// This function is not expected to be called because `wsl_distro_from_path`
+/// always returns `None` on non-Windows platforms.
+/// It is kept to preserve API symmetry and to avoid missing it during future refactors.
 #[cfg(not(target_os = "windows"))]
 fn try_get_version_wsl(
     _tool: &str,
@@ -1415,10 +1477,11 @@ fn extend_windows_cli_manager_search_paths(paths: &mut Vec<std::path::PathBuf>, 
     push_unique_path(paths, program_data.join("scoop").join("shims"));
 }
 
-/// OpenCode install.sh 路径优先级（见 https://github.com/anomalyco/opencode README）:
+/// OpenCode `install.sh` path precedence
+/// (see the OpenCode README):
 ///   $OPENCODE_INSTALL_DIR > $XDG_BIN_DIR > $HOME/bin > $HOME/.opencode/bin
-/// 额外扫描 Bun 默认全局安装路径（~/.bun/bin）
-/// 和 Go 安装路径（~/go/bin、$GOPATH/*/bin）。
+/// Also scan the default Bun global path (`~/.bun/bin`)
+/// and Go install paths (`~/go/bin`, `$GOPATH/*/bin`).
 fn opencode_extra_search_paths(
     home: &Path,
     opencode_install_dir: Option<std::ffi::OsString>,
@@ -1483,13 +1546,14 @@ fn extend_mise_node_search_paths(paths: &mut Vec<std::path::PathBuf>, home: &Pat
     }
 }
 
-/// 构建某工具的候选搜索目录（原生安装优先，PATH 兜底）。
-/// 单探兜底 (`scan_cli_version`) 与全量枚举 (`enumerate_tool_installations`) 共用，
-/// 确保两条路径看到的是同一组安装位置。
+/// Build candidate search directories for a tool.
+/// Prefer native installs first, with PATH as a fallback.
+/// Shared by `scan_cli_version` and `enumerate_tool_installations`
+/// so both paths see the same install set.
 fn build_tool_search_paths(tool: &str) -> Vec<std::path::PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
 
-    // 常见的安装路径（原生安装优先）
+    // Common install paths, preferring native installs first.
     let mut search_paths: Vec<std::path::PathBuf> = Vec::new();
     if !home.as_os_str().is_empty() {
         push_unique_path(&mut search_paths, home.join(".local/bin"));
@@ -1661,7 +1725,7 @@ fn run_windows_tool_version_command(
         .output()
 }
 
-/// 扫描常见路径查找 CLI（PATH 主命令未命中时的兜底单探）。
+/// Scan common paths for a CLI when the primary PATH command was not found.
 fn scan_cli_version(tool: &str) -> ShellProbe {
     #[cfg(not(target_os = "windows"))]
     use std::process::Command;
@@ -1671,9 +1735,9 @@ fn scan_cli_version(tool: &str) -> ShellProbe {
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    // 记录"可执行文件存在、但 `--version` 非零退出"时的首个诊断信息。
-    // 典型场景：工具已安装但当前环境跑不起来（如 openclaw 要求 Node v22.19+）。
-    // 这类信息比笼统的 "not installed" 有用得多，循环结束未探到版本时回传。
+    // Record the first diagnostic from "executable exists but `--version`
+    // exited non-zero". This is more useful than a generic "not installed"
+    // result when the tool is installed but not runnable.
     let mut exec_diagnostic: Option<String> = None;
 
     for path in &search_paths {
@@ -1718,41 +1782,41 @@ fn scan_cli_version(tool: &str) -> ShellProbe {
         }
     }
 
-    // 有诊断 = 找到了可执行文件但 --version 报错（装了跑不起来）；否则视作未安装。
+    // A diagnostic means the executable was found but `--version` failed.
+    // Otherwise treat the tool as not installed.
     match exec_diagnostic {
         Some(detail) => ShellProbe::FoundButFailed(detail),
         None => ShellProbe::NotFound(NOT_INSTALLED.to_string()),
     }
 }
 
-/// 单个工具在系统中的一处安装，用于"多处安装互相打架"的冲突诊断。
-/// 字段保持 snake_case（与 `ToolVersion` 一致），前端按同名字段读取。
+/// One install location for a tool, used for conflict diagnostics when
+/// multiple installs compete. Keep fields in `snake_case`.
 #[derive(Debug, serde::Serialize)]
 pub struct ToolInstallation {
-    /// 候选入口路径（用户实际在 PATH 里看到/输入的那个，未解析软链）。
+    /// Candidate entry path: what the user actually sees or types on PATH, before symlink resolution.
     path: String,
-    /// `--version` 成功时解析出的版本号。
+    /// Parsed version when `--version` succeeds.
     version: Option<String>,
-    /// `--version` 是否 exit 0（装了且能在当前环境跑起来）。
+    /// Whether `--version` exited 0, meaning installed and runnable.
     runnable: bool,
-    /// 跑不起来时的诊断信息末尾若干行。
+    /// The last few diagnostic lines when the tool is not runnable.
     error: Option<String>,
-    /// 由路径前缀推断的安装来源（nvm/homebrew/...），驱动 UI 徽章。
+    /// Install source inferred from the path prefix (`nvm`, `homebrew`, ...).
     source: String,
-    /// 是否为 PATH 解析到的那处（= 命令行默认，也是升级会作用的目标）。
+    /// Whether this is the PATH-resolved default and therefore the update target.
     is_path_default: bool,
-    /// canonicalize 解析后的真身路径(brew 形如 `Cellar/<formula>/...`、claude 原生形如
-    /// `~/.local/share/claude/versions/...`),用于 `anchored_command_from_paths` 的真身
-    /// 判定。`enumerate_tool_installations` 已经为去重算过一次,这里复用避免上游
-    /// `installs_anchored_command` 再 canonicalize 一遍——消除冗余 syscall + 闭合
-    /// "enumerate 与 anchor 看到同一真身"的一致性边界(否则两次 canonicalize 之间
-    /// symlink 被换会让锚定指向不同真身)。`#[serde(skip)]` 不外露给前端。
+    /// Canonicalized real target path used by `anchored_command_from_paths`.
+    /// Reused from enumeration to avoid redundant canonicalization and keep
+    /// enumeration and anchoring aligned to the same real target.
+    /// `#[serde(skip)]` keeps it hidden from the frontend.
     #[serde(skip)]
     real: std::path::PathBuf,
 }
 
-/// 由可执行文件路径前缀推断安装来源。纯字符串匹配、无副作用。
-/// 顺序敏感：Homebrew 的 Cellar 真身要先于通用规则命中。
+/// Infer install source from executable-path prefixes.
+/// Pure string matching with no side effects.
+/// Order matters: a Homebrew Cellar path must match before generic rules.
 fn infer_install_source(path: &Path) -> &'static str {
     let s = path
         .to_string_lossy()
@@ -1762,8 +1826,8 @@ fn infer_install_source(path: &Path) -> &'static str {
         "nvm"
     } else if s.contains("/homebrew/") || s.contains("/cellar/") {
         "homebrew"
-    // `.volta` 是 macOS/Linux 默认安装(`~/.volta/bin`),`/volta/` 兜底覆盖
-    // Windows 的 `%LOCALAPPDATA%\Volta\bin` / `%VOLTA_HOME%\bin`(无前导点)。
+    // `.volta` is the default macOS/Linux install location; `/volta/`
+    // also covers Windows `%LOCALAPPDATA%\\Volta\\bin` / `%VOLTA_HOME%\\bin`.
     } else if s.contains("/.volta/") || s.contains("/volta/") {
         "volta"
     } else if s.contains("fnm_multishells") {
@@ -1772,8 +1836,7 @@ fn infer_install_source(path: &Path) -> &'static str {
         "mise"
     } else if s.contains("/.bun/") {
         "bun"
-    // pnpm 全局包目录: macOS 一般 `~/.local/share/pnpm`(已 normalize 到 `/pnpm/`)
-    // 与 Windows `%LOCALAPPDATA%\pnpm` / `%PNPM_HOME%` 都命中 `/pnpm/`。
+    // pnpm global package directories on both macOS and Windows normalize to `/pnpm/`.
     } else if s.contains("/pnpm/") {
         "pnpm"
     } else if s.contains("/scoop/") {
@@ -1788,15 +1851,15 @@ fn infer_install_source(path: &Path) -> &'static str {
     }
 }
 
-/// 从 shell 输出里挑出第一个绝对路径行（trim 后以 `/` 开头），跳过交互式登录 shell
-/// （`-lic`）里 .zshrc 打印的欢迎语/提示符等噪音。canonicalize 由调用方做（碰 FS）。
+/// Pick the first absolute-path line from shell output, skipping greeting or
+/// prompt noise from interactive login shells. Canonicalization stays with the caller.
 #[cfg(not(target_os = "windows"))]
 fn first_abs_path_line(raw: &str) -> Option<&str> {
     raw.lines().map(str::trim).find(|l| l.starts_with('/'))
 }
 
-/// 用与 `try_get_version` 相同的登录 shell 解析 PATH 默认命中的可执行文件路径，
-/// canonicalize 后作为"命令行默认 / 升级目标"的锚点（与升级会作用的那处对齐）。
+/// Resolve the executable path hit by PATH using the same login-shell strategy
+/// as `try_get_version`, then canonicalize it and use it as the anchor.
 #[cfg(not(target_os = "windows"))]
 fn resolve_path_default(tool: &str) -> Option<std::path::PathBuf> {
     use std::process::Command;
@@ -1814,8 +1877,8 @@ fn resolve_path_default(tool: &str) -> Option<std::path::PathBuf> {
         return None;
     }
     let raw = decode_command_output(&out.stdout);
-    // 不能死取第一行：交互式 .zshrc 可能先打印欢迎语（如 "🚀 Welcome back"），
-    // command -v 的真实路径在其后；取第一个 `/` 开头的行才稳。
+    // Do not blindly take the first line: interactive shells may print a greeting first.
+    // The first `/`-prefixed line is the stable choice.
     let first = first_abs_path_line(&raw)?;
     std::fs::canonicalize(first).ok()
 }
@@ -1843,9 +1906,9 @@ fn resolve_path_default(tool: &str) -> Option<std::path::PathBuf> {
     std::fs::canonicalize(preferred).ok()
 }
 
-/// 枚举工具在系统中的所有安装（不短路）。与 `scan_cli_version` 共用
-/// `build_tool_search_paths`，但不在首个命中处停止——而是对每个去重后的真实
-/// 可执行文件都跑一次 `--version`，从而能发现"升级写入 A 处、PATH 实际用 B 处"。
+/// Enumerate all installs for a tool without short-circuiting.
+/// Reuse `build_tool_search_paths`, but probe every deduped real executable so
+/// mismatches between update targets and actual PATH usage stay visible.
 fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
     #[cfg(not(target_os = "windows"))]
     use std::process::Command;
@@ -1869,8 +1932,8 @@ fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
             if !tool_path.exists() {
                 continue;
             }
-            // canonicalize 解析软链后去重：/opt/homebrew/bin/x → Cellar/...、nvm shim 等
-            // 多个入口可能指向同一真实文件，只算一处安装。
+            // Deduplicate after canonicalizing symlinks. Multiple entrypoints may
+            // still point at the same real file and should count as one install.
             let real = std::fs::canonicalize(&tool_path).unwrap_or_else(|_| tool_path.clone());
             if !seen.insert(real.clone()) {
                 continue;
@@ -1917,20 +1980,20 @@ fn enumerate_tool_installations(tool: &str) -> Vec<ToolInstallation> {
                 error,
                 source: source.to_string(),
                 is_path_default,
-                // 复用上面 line ~1357 已 canonicalize 的真身,避免下游
-                // installs_anchored_command 再 canonicalize 一遍同一文件。
+                // Reuse the real path already canonicalized above so downstream
+                // anchoring does not repeat the same work.
                 real: real.clone(),
             });
         }
     }
 
-    // PATH 默认那处排最前，UI 一眼看到"命令行默认用的是哪处"。
+    // Put the PATH default first so the UI can immediately show which install the command line uses.
     installs.sort_by_key(|i| std::cmp::Reverse(i.is_path_default));
     installs
 }
 
-/// 工具对应的 npm 包名（hermes 走自己的 CLI/installer，不在此表）。锚定升级据此拼 `npm i -g`。
-/// 全平台共用一张表——Windows 锚定层(`anchored_command_from_paths` 的 windows 版)也读这里。
+/// npm package names for tools. Hermes uses its own CLI/installer and is not in this table.
+/// Anchored updates use this mapping to build `npm i -g`.
 fn npm_package_for(tool: &str) -> Option<&'static str> {
     match tool {
         "claude" => Some("@anthropic-ai/claude-code"),
@@ -1942,15 +2005,8 @@ fn npm_package_for(tool: &str) -> Option<&'static str> {
     }
 }
 
-/// 取路径的父目录(纯字符串截断,不碰 fs):`/a/b/npm` → `/a/b`、`C:\a\b\npm.cmd`
-/// → `C:\a\b`、混合分隔符 `C:\a/b\npm` → `C:\a/b`。无父目录返回空串。
-///
-/// 平台无关:`\` 和 `/` 都识别,取两者最右出现位置。`Option<usize>` 的 Ord 让
-/// `None < Some(_)`,所以 `rfind('\\').max(rfind('/'))` 自动取存在的那个、两者都
-/// 存在时取靠右的——比 `or_else` 优先取一种正确(混合分隔符不会拿错父目录)。
-/// 跨平台 fs separator 在两侧均接受,使 macOS/Linux 上的 cargo test 也能跑 Windows
-/// 路径用例(`parent_dir_cases::mixed_separators_takes_rightmost`)。空串语义由上游
-/// `sibling_bin` 的 `is_empty()` 检查转成 None → 锚定整体退化到静态兜底。
+/// Return the parent directory using pure string slicing, without touching the filesystem.
+/// Supports both `/` and `\\`, and chooses the rightmost separator.
 fn parent_dir(p: &str) -> String {
     match p.rfind('\\').max(p.rfind('/')) {
         Some(i) if i > 0 => p[..i].to_string(),
@@ -1958,11 +2014,8 @@ fn parent_dir(p: &str) -> String {
     }
 }
 
-/// 从 canonicalize 后的真身路径提取 Homebrew formula 名：
-/// `/opt/homebrew/Cellar/gemini-cli/0.13.0/...` → `Some("gemini-cli")`。
-/// 非 Cellar 路径（= 不是 formula，可能是 Homebrew 的 node 装的 npm 全局包）返回 None。
-/// 关键区分：formula 即便内部用 node，真身也落在 `Cellar/<formula>/` 下；而 Homebrew
-/// npm 全局包落在 `/opt/homebrew/lib/node_modules`（不含 Cellar）。两者升级命令不同。
+/// Extract a Homebrew formula name from a canonicalized real path.
+/// Non-Cellar paths return `None`.
 #[cfg(not(target_os = "windows"))]
 fn brew_formula_from_path(real: &str) -> Option<String> {
     let mut segs = real.split('/');
@@ -1974,15 +2027,8 @@ fn brew_formula_from_path(real: &str) -> Option<String> {
     None
 }
 
-/// 含空格才用 POSIX 单引号包一层,否则保持裸路径——命令展示更干净。
-/// claude / brew / volta / bun / npm 五个锚定分支共用,避免"含空格"判定漂移。
-///
-/// **仅按空格判定,不防其他 shell 元字符**(`$` / `` ` `` / `'` / `"` / `;` 等)。
-/// 调用方传入的是探测得到的可执行路径(`enumerate_tool_installations` 里来源于
-/// `Path::display()`),实际 macOS/Linux 上 home dir 名几乎不允许这类字符、
-/// npm/brew/volta/bun 也不会装到含这类字符的路径,与 diff 前内联在 npm 分支里的
-/// `if npm.contains(' ')` 实现等价。若未来要扩广,改成 `shell_single_quote` 无条件
-/// 包裹即可,但会失去"无空格时的清洁展示"。
+/// Wrap a POSIX path in single quotes only when it contains spaces.
+/// This shared helper keeps anchored command display clean.
 #[cfg(not(target_os = "windows"))]
 fn quote_path_if_spaced(p: &str) -> String {
     if p.contains(' ') {
@@ -1992,40 +2038,20 @@ fn quote_path_if_spaced(p: &str) -> String {
     }
 }
 
-/// 锚定路径走 `.bat` 文件且**被 `call` 调用**,需要为 batch 特殊字符做两层防御:
-///
-/// **(1) `%` 经历两轮 percent expansion → 用 4 个 `%` 转义**。.bat 中字面 `%` 的
-/// 标准转义是 `%%`,但 `call` 命令(Microsoft `call /?`:"percent (%) expansion is
-/// performed on each parameter")**在 batch parser 处理完 `%%` → `%` 后自己再做一轮**。
-/// 所以源 .bat 里写 `%%FOO%%`,batch 一轮变 `%FOO%`,call 二轮当成 variable reference
-/// 又展开一次——要让最终 call 看到字面 `%FOO%` 必须写 `%%%%FOO%%%%`(一轮 → `%%FOO%%`,
-/// 二轮 → `%FOO%` 字面)。这是 cmd 唯一**引号无法保护**的字符:引号内的 `%` 仍参与
-/// 两轮 expansion。
-///
-/// **(2) token 边界 / escape 字符触发外层双引号**:`' '` `'&'` `'('` `')'` `'^'`
-/// `';'` `'<'` `'>'` `'|'` `','` 任一出现即包引号。NTFS 允许这些字符出现在路径中,
-/// 不包会让 cmd 把路径切成多 token、`^` 又会触发 escape;引号内它们是字面意义,
-/// 而且 call 二次解析对引号内的它们也不会做特殊处理(`^` 在引号内失去 escape 作用,
-/// token 边界字符在引号内是字面)。
-///
-/// `!`(delayed expansion)只在 `setlocal enabledelayedexpansion` 下生效——我们
-/// .bat 头只有 `@echo off`、没开,所以不需要处理。`'` 在 cmd 中无特殊意义。
-///
-/// 镜像 POSIX `quote_path_if_spaced` 的"轻量条件包装"语义:不含任何特殊字符就保持
-/// 裸路径(命令展示更干净),否则用 `win_double_quote` 包并做必要转义。
+/// Quote an anchored batch path safely for `.bat` files invoked through `call`.
+/// `%` needs four-way escaping because it expands once in batch parsing and
+/// again inside `call`. Token-boundary and escape characters require outer
+/// double quotes. This keeps the Windows behavior aligned with the POSIX helper.
 #[cfg(target_os = "windows")]
 fn win_quote_path_for_batch(p: &str) -> String {
-    // `%` 经历两轮 expansion:.bat parser 一轮 + `call` 二轮(Microsoft `call /?`:
-    // "percent (%) expansion is performed on each parameter")。要让 call 最终看到
-    // 字面 `%` 需要 4 个 → `%%%%`(batch 一轮 → `%%`,call 二轮 → `%` 字面)。
-    // 引号内仍参与两轮 expansion,所以这一步独立于外层引号、必须无条件做。
+    // `%` expands twice: once in batch parsing and once in `call`, so a literal
+    // percent sign must become `%%%%`.
     let escaped = if p.contains('%') {
         p.replace('%', "%%%%")
     } else {
         p.to_string()
     };
-    // 注:`needs_quote` 基于**原路径** `p` 判断,不能用 `escaped`——后者引入的 `%`
-    // 字符不算"特殊触发字符",否则含 `%` 的路径会被错误地额外加引号。
+    // `needs_quote` must be based on the original path, not the escaped form.
     let needs_quote = p
         .chars()
         .any(|c| matches!(c, ' ' | '&' | '(' | ')' | '^' | ';' | '<' | '>' | '|' | ','));
@@ -2036,28 +2062,10 @@ fn win_quote_path_for_batch(p: &str) -> String {
     }
 }
 
-/// Windows 版 sibling 推导:在 `<bin_path 父目录>` 下按 `ext_candidates` 顺序找
-/// 第一个存在的 `<exe_basename>.<ext>` 文件,返回该绝对路径。
-///
-/// **与 POSIX `sibling_bin` 的关键区别:这里碰 fs**——Windows 上 npm/pnpm 的入口
-/// 实际扩展名可能是 `.cmd` 也可能是 `.exe`(Node.js installer 装的是 `npm.cmd`、
-/// 部分 pnpm 是 `pnpm.exe`),纯字符串拼接无法知道哪个真的存在,猜错会拼出
-/// "GUI 执行时 file not found" 的命令。fs 检查放进 helper、单测用 tempdir 覆盖,
-/// 让上层 `anchored_command_from_paths` 仍保持"接收已锚定路径"的接口形态。
-///
-/// **TOCTOU 是 by design**:预检 `is_file` 是为了让确认对话框展示真实命令字符串;
-/// 检查到执行之间被外部进程(卸载器 / nvm switch / 杀软隔离)移走文件 → cmd /C
-/// 报 ENOENT,toast 显示错误。不要在执行前再做二次预检——双重 syscall 也解决不了 race。
-///
-/// 候选扩展名顺序按工具 idiom:npm/pnpm 优先 `.cmd`(node 装的),volta 优先 `.exe`
-/// (Volta 是 Rust 写的 native binary)。
-///
-/// **不用 `which::which_in` 的理由**:per-tool 扩展名优先级(volta 偏 `.exe`、npm/pnpm
-/// 偏 `.cmd`)与 PATHEXT 的固定顺序不一致,而且只为这一处加 `which` 依赖收益不抵 audit
-/// surface。`PathBuf::join` 让 separator 选择交给 std,避免 `format!("{dir}\\...")`
-/// 硬编码 `\\` 在混合分隔符 bin_path 下产出丑陋路径。
-///
-/// 空 dir 或所有候选都不存在 → None,上游退化到静态命令,与 POSIX 路径同款语义。
+/// Windows sibling resolution: look in the parent directory of `bin_path` and
+/// return the first existing `<exe_basename>.<ext>` in `ext_candidates` order.
+/// Unlike POSIX sibling resolution, this must touch the filesystem because
+/// `.cmd` vs `.exe` cannot be inferred safely from string concatenation alone.
 #[cfg(target_os = "windows")]
 fn sibling_bin_with_ext(
     bin_path: &str,
@@ -2078,17 +2086,9 @@ fn sibling_bin_with_ext(
     None
 }
 
-/// 返回 `<bin_path 同目录>/<exe>` 的绝对路径。bin_path 是命令行命中的入口
-/// (如 `/opt/homebrew/bin/gemini`、`~/.volta/bin/codex`),`exe` 是与之共处一个
-/// bin 目录的另一个可执行(`brew` / `volta` / `bun` / `npm`)——这些包管理器
-/// 都把自己的 cli 跟它们安装的命令并列放在同一个 bin 目录,所以"同目录推导"
-/// 是可靠的绝对路径来源。
-///
-/// **dir 为空(bin_path 不含 `/`) → 返回 None**:此时无法推导出绝对路径,让上游
-/// `anchored_command_from_paths` 整体退化为 None,调用方落到静态命令兜底——而非
-/// 悄悄拼出 `npm i -g <pkg>` 这种依赖 PATH 的指令,违背"必须绝对路径"不变量。
-/// 实际从 `enumerate_tool_installations` 走的 bin_path 都是 `Path::display()` 出
-/// 来的绝对路径,这条防线不期望被触发,但闭合了 helper 与函数文档的语义一致。
+/// Return the absolute `<bin_path dir>/<exe>` path.
+/// If `bin_path` has no directory component, return `None` so callers do not
+/// silently fall back to PATH-dependent commands.
 #[cfg(not(target_os = "windows"))]
 fn sibling_bin(bin_path: &str, exe: &str) -> Option<String> {
     let dir = parent_dir(bin_path);
@@ -2109,15 +2109,9 @@ fn anchored_official_update_command(tool: &str, bin_path: &str) -> Option<String
     official_update_args(tool).map(|args| format!("{} {args}", win_quote_path_for_batch(bin_path)))
 }
 
-/// 哪些工具的"官方 self-update"优先于包管理器升级（生成 `<tool> update || <pkg-mgr>`）。
-///
-/// **codex 刻意不在此列**：`codex update` 在 npm 安装上只是裸 `npm install -g
-/// @openai/codex`（无 `@latest` / `--include=optional` / 不先卸载），却只检查 exit code、
-/// 无条件打印 “Update ran successfully”。当 npm 把平台二进制 optional 依赖
-/// `@openai/codex-<triple>` 漏装时它仍 **exit 0 假成功**，使外层 `||` 兜底被短路、损坏被
-/// 成功 toast 掩盖（用户报告的 “Missing optional dependency” 即源于此）。因此 codex 一律走
-/// npm 锚定升级；真正损坏（`runnable=false`）时由 `installs_anchored_command` 的门控改用
-/// `codex_repair_command` 的 uninstall+install 自愈，而非交给 codex 自身的 self-update。
+/// Which tools should prefer official self-update over package-manager updates.
+/// Codex is intentionally excluded because its npm-installed `codex update`
+/// can report success while still missing the platform binary.
 fn prefers_official_update(tool: &str, shell: LifecycleCommandShell) -> bool {
     match shell {
         LifecycleCommandShell::Posix => {
@@ -2126,48 +2120,59 @@ fn prefers_official_update(tool: &str, shell: LifecycleCommandShell) -> bool {
         LifecycleCommandShell::WindowsBatch => {
             matches!(
                 tool,
-                // OpenCode 的 Windows `upgrade` 在 anomalyco/opencode#17295 修复前可能因
-                // 安装方式探测失败弹交互 prompt（spawn npm.cmd 没传 shell:true）；静默
-                // lifecycle 没有 stdin 会挂死，Windows 先锚到包管理器路径，等上游修了
-                // 再把 opencode 加回这里。
+                // OpenCode's Windows `upgrade` can prompt interactively when install
+                // detection fails (it spawns `npm.cmd` without `shell:true`).
+                // Silent lifecycle flows have no stdin and would hang, so Windows
+                // currently anchors to the package-manager path first. Add opencode
+                // back here after the upstream fix lands.
                 "claude" | "openclaw"
             )
         }
     }
 }
 
-/// Codex 平台分发包损坏的自愈命令。Codex 的 npm 包是「主包 `@openai/codex`（纯 JS
-/// launcher）+ 平台二进制 optional 依赖 `@openai/codex-<triple>`」的分发模式（同 esbuild/swc）。
-/// 当平台二进制缺失时 codex 跑不起来——`enumerate_tool_installations` 跑 `--version` 会拿到
-/// “Missing optional dependency” 的非 0 退出，标记 `runnable=false`。此状态下普通
-/// `npm i -g @pkg@latest` 是 **no-op**：npm 视 optional 依赖缺失为非致命，reify 又认为主包已是
-/// 最新（外加半损坏留下的空 nested `node_modules` 残骸强化「tree 已满足」判断），不会补回平台
-/// 二进制。唯一实测可靠的修复是先 `uninstall` 清掉残骸、再 `install` 装回完整的主包 + 平台二进制
-/// （实测输出 `added 2 packages`）。
+/// Self-healing command for a broken Codex platform package distribution.
+/// The npm package is distributed as a main package, `@openai/codex`
+/// (a pure-JS launcher), plus a platform-binary optional dependency
+/// `@openai/codex-<triple>`, similar to esbuild/swc.
+/// When the platform binary is missing, Codex cannot run.
+/// `enumerate_tool_installations` sees a non-zero `--version` exit with
+/// "Missing optional dependency" and marks the install as `runnable=false`.
+/// In that state, a normal `npm i -g @pkg@latest` is a no-op: npm treats the
+/// missing optional dependency as non-fatal and may decide the main package is
+/// already current, especially if half-broken nested `node_modules` leftovers
+/// remain. The only fix that has proven reliable in practice is `uninstall`
+/// followed by `install`, which restores both the main package and the platform
+/// binary.
 ///
-/// 锚定到与 codex 入口同目录的 npm（与升级路径一致，不依赖 GUI 非登录进程的 PATH）。`|| true`
-/// 让 uninstall 失败（如 nvm 上对半损坏包静默返回非 0）不触发外层 `set -e` 中止，但随后的
-/// install 若失败仍会被 `set -e` 捕获并上报给前端 toast。
+/// Anchor to the `npm` next to the Codex entrypoint, matching the normal update
+/// path and avoiding dependence on GUI non-login PATH state. `|| true` keeps an
+/// uninstall failure from tripping outer `set -e`, but a later install failure
+/// still propagates to the frontend toast.
 ///
-/// **仅对会锚定到 sibling npm 的 node 管理器来源（nvm/fnm/mise/homebrew npm）生效**：
-/// `runnable=false` 是宽信号（权限 / node 版本 / 任意 `--version` 失败皆可触发），非 npm
-/// 全局安装各有自己的二进制分发与修复方式，无脑套 npm uninstall+install 会出错——Homebrew
-/// formula（real 在 `Cellar/`）本应 `brew upgrade codex`，npm 够不到它反而旁路装第二份 npm
-/// 全局 codex；Volta/Bun 本应 `volta install`/`bun add`，且 `~/.bun/bin` 下没有 npm、
-/// `sibling_bin` 会拼出不存在的路径；system/未知来源无可靠 sibling npm。这些来源一律返回
-/// None，让上游继续走 source-specific 的 `anchored_command_from_paths`。白名单与
-/// `package_manager_anchored_command_from_paths` 的 sibling-npm 分支对齐。
-/// 刻意**不**额外用 `inst.error` 文本确认「确系缺二进制」：enumerate 只保留 stderr 末尾 4 行，
-/// 而 codex.js 抛错的 "Missing optional dependency" 行会被尾部 node stack `at ...` 行挤出窗口
-/// （实测用户原始错误即如此），强加该条件反而漏修真实缺包；对 npm 全局安装，uninstall+install
-/// 对各类损坏都是合理且不会更糟的修复。
+/// This applies only to node-manager sources that can anchor to sibling npm
+/// (`nvm`/`fnm`/`mise`/Homebrew npm). `runnable=false` is intentionally broad,
+/// so blindly applying `npm uninstall+install` to non-npm-global installs would
+/// be wrong: Homebrew formulas should use `brew upgrade codex`, Volta/Bun should
+/// use `volta install`/`bun add`, and system or unknown sources may not have a
+/// reliable sibling npm. Those sources return `None` and continue through the
+/// source-specific anchored path.
+/// The allowlist is aligned with the sibling-npm branch in
+/// `package_manager_anchored_command_from_paths`.
+/// We intentionally do not require `inst.error` text to prove the binary is
+/// missing: enumerate keeps only the last four stderr lines, and the original
+/// "Missing optional dependency" line can be pushed out by later Node stack
+/// frames. For npm-global installs, `uninstall+install` is a reasonable repair
+/// across multiple breakage modes.
 #[cfg(not(target_os = "windows"))]
 fn codex_repair_command(bin_path: &str, real: &str) -> Option<String> {
-    // brew formula（real 在 Cellar）→ 不归 npm 管，交回 anchored 走 brew upgrade。
+    // A brew formula (real path under Cellar) is not managed by npm; hand it
+    // back to the anchored brew-upgrade path.
     if brew_formula_from_path(real).is_some() {
         return None;
     }
-    // 只认会落到 sibling npm 的 node 管理器来源；volta/bun/system/未知交回 anchored。
+    // Only accept node-manager sources that land on sibling npm; hand
+    // volta/bun/system/unknown back to anchored handling.
     if !matches!(
         infer_install_source(Path::new(bin_path)),
         "nvm" | "fnm" | "mise" | "homebrew"
@@ -2182,9 +2187,11 @@ fn codex_repair_command(bin_path: &str, real: &str) -> Option<String> {
     ))
 }
 
-/// Windows 暂不做平台分发自愈：Windows 上 codex 的破坏模式不同（EPERM 文件锁 / 版本 bump
-/// 残留，见 openai/codex#21872、#19824），且 `.bat` 链的错误处理与 POSIX `set -e` 语义不同，
-/// 需要单独设计；先在本问题实际发生的 POSIX 平台落地。返回 None → 上游走正常锚定命令。
+/// Platform-distribution self-healing is not yet implemented on Windows.
+/// Windows Codex failures follow different patterns (EPERM file locks or
+/// version-bump leftovers; see `openai/codex#21872` and `#19824`), and `.bat`
+/// error handling differs from POSIX `set -e`, so the design should be separate.
+/// Returning `None` lets the caller continue with the normal anchored command.
 #[cfg(target_os = "windows")]
 fn codex_repair_command(_bin_path: &str, _real: &str) -> Option<String> {
     None
@@ -2213,42 +2220,41 @@ fn package_manager_anchored_command_from_paths(
                 quote_path_if_spaced(&bun)
             ));
         }
-        // 自带同级 npm 的 node 管理器：落到下面锚定到那处的 npm。
+        // Node managers with sibling npm fall through to the anchored npm branch below.
         "nvm" | "fnm" | "mise" | "homebrew" => {}
-        // system / 未知来源通常没有同级 npm，不能拼 `<dir>/npm`。若工具有官方
-        // self-update，上层会直接锚到 CLI 自身；否则返回 None 走静态兜底。
+        // System or unknown sources usually do not have sibling npm, so do not
+        // synthesize `<dir>/npm`. If the tool supports official self-update,
+        // upper layers anchor to the CLI itself; otherwise return `None` and use the static fallback.
         _ => return None,
     }
     let npm = sibling_bin(bin_path, "npm")?;
     Some(format!("{} i -g {pkg}@latest", quote_path_if_spaced(&npm)))
 }
 
-/// 给定工具、原始 bin 路径（命令行命中的入口）、canonicalize 后的真身路径，
-/// 推断"写回同一处"的锚定升级命令。**POSIX 版是纯函数（不碰 FS）**——真实 canonicalize
-/// 由调用方做（`installs_anchored_command` 复用 enumerate 时算出的 `inst.real`),
-/// 便于单测覆盖各包管理器分支。Windows 版同名函数因 sibling 扩展名歧义必须读 fs,
-/// 是刻意保留的平台差异(详见 Windows 版本 doc)。
+/// Given a tool, the original bin path that the command line actually hits, and
+/// the canonicalized real target path, infer the anchored update command that
+/// writes back to the same install location.
+/// The POSIX version is a pure function and does not touch the filesystem; the
+/// caller provides canonicalization from `inst.real`, which makes unit testing
+/// package-manager branches straightforward. The Windows version intentionally
+/// reads the filesystem because sibling extension ambiguity requires it.
 ///
-/// **关键不变量：返回的命令必须用绝对路径调用执行体，不依赖 PATH**。
-/// 这条命令最终在 `run_tool_lifecycle_silently` 的非登录 `bash -c` 里执行——
-/// GUI App 启动的进程 PATH 由 launchd / Windows Service / systemd 给,通常**不含**
-/// `~/.local/bin` / `/opt/homebrew/bin` / `~/.volta/bin` 等用户级 bin 目录;而探测
-/// 阶段 `try_get_version` 用的是 `$SHELL -lic`(登录+交互式,会读 .zshrc/.zprofile),
-/// 两者 PATH 不对称。裸 `claude update` / `brew upgrade ...` 在 GUI 进程里大概率
-/// `command not found`(exit 127)→ `set -e` 中止 → 用户看到失败 toast,锚定决策却
-/// 已展示给用户"将写回原生那处"——欺骗性故障。
+/// Key invariant: returned commands must invoke executables by absolute path and
+/// must not depend on PATH. These commands run later in non-login `bash -c`
+/// inside `run_tool_lifecycle_silently`, where GUI-launched PATH values often do
+/// not contain user bin directories such as `~/.local/bin`,
+/// `/opt/homebrew/bin`, or `~/.volta/bin`. Version probing uses `$SHELL -lic`,
+/// so probe-time PATH and execution-time PATH are intentionally asymmetric.
 ///
-/// 判定顺序（命中即返回）：
-/// ① Hermes → `<bin_path 绝对> update`;Hermes CLI 自己知道安装环境,避免 nexus-composer
-///    猜系统 `python3`/`python` 时撞上 Python 版本或 pyenv shim 问题。
-/// ② Claude 原生安装器（`~/.local/share/claude/versions/`）→ `<bin_path 绝对> update`；
-///    bin_path 指向 launcher,launcher 内部 dispatch update 子命令。它不归 npm 管,
-///    且在 PATH 里比 nvm/homebrew 更靠前,用 npm 升级会装到别处且被原生那份遮蔽。
-/// ③ Homebrew formula（真身在 `Cellar/<formula>/`）→ `<bin_path 同目录>/brew upgrade <formula>`;
-///    formula 由 Homebrew 拥有,避免 self-update 尝试改动包管理器管理的安装。
-/// ④ 其余支持官方自升级的工具 → `<bin_path 绝对> update/upgrade || <原锚定包管理器命令>`；
-///    Codex 的 self-update 只在部分 release 可用,所以保留 npm/brew/bun/volta fallback。
-/// ⑤ 不支持官方自升级的 npm 全局包(例如 Gemini CLI) → 锚定到"那处 bin 目录的 npm"。
+/// Matching order:
+/// 1. Hermes: `<absolute bin_path> update`.
+/// 2. Claude native installer (`~/.local/share/claude/versions/`):
+///    `<absolute bin_path> update`.
+/// 3. Homebrew formula (`Cellar/<formula>/`): `<bin_path dir>/brew upgrade <formula>`.
+/// 4. Other tools that support official self-update:
+///    `<absolute bin_path> update/upgrade || <anchored package-manager command>`.
+/// 5. npm-global tools without official self-update (for example Gemini CLI):
+///    anchor to the `npm` in that same bin directory.
 #[cfg(not(target_os = "windows"))]
 fn anchored_command_from_paths(tool: &str, bin_path: &str, real_target: &str) -> Option<String> {
     let real_lower = real_target.to_ascii_lowercase();
@@ -2295,8 +2301,9 @@ fn package_manager_anchored_command_from_paths(tool: &str, bin_path: &str) -> Op
                 win_quote_path_for_batch(&pnpm)
             ))
         }
-        // 兜底 = npm 类:Scoop / Chocolatey / winget / nvm-windows / MS Store nodejs /
-        // system / 任何识别不到专属来源的 → sibling npm.cmd。
+        // Fallback to the npm-like path: Scoop / Chocolatey / winget /
+        // nvm-windows / MS Store nodejs / system / anything without a
+        // recognized dedicated source -> sibling `npm.cmd`.
         _ => {
             let npm = sibling_bin_with_ext(bin_path, "npm", &["cmd", "exe"])?;
             Some(format!(
@@ -2307,33 +2314,33 @@ fn package_manager_anchored_command_from_paths(tool: &str, bin_path: &str) -> Op
     }
 }
 
-/// Windows 版锚定命令生成。对平台确认可静默运行的工具优先使用官方 CLI 自升级；
-/// 对 npm/Volta/pnpm 这类可确认写回位置的安装，再接一个包管理器 fallback。不存在 brew/bun/claude-native
-/// (Windows 没 Homebrew、Bun for Windows 仍 preview、claude.ai/install.sh 是 bash 脚本)。
-/// Scoop/Chocolatey/winget/nvm-windows/MS Store node 都归 npm 类——它们都只是"如何装
-/// node"的不同入口,全局包真正的 idiom 仍是 sibling `npm.cmd`。
+/// Generate anchored commands on Windows.
+/// Prefer official CLI self-update for tools known to run safely in silent mode.
+/// For npm/Volta/pnpm installs with a known write-back location, append a
+/// package-manager fallback. There is no brew/bun/claude-native branch on
+/// Windows.
+/// Scoop/Chocolatey/winget/nvm-windows/MS Store node all collapse into the npm
+/// class because the global-package idiom is still sibling `npm.cmd`.
 ///
-/// **与 POSIX 版的语义差异**:POSIX 版是纯函数(不碰 fs),Windows 版通过
-/// `sibling_bin_with_ext` 读 fs 来探明扩展名(`.cmd` vs `.exe`)——Node installer
-/// 装 `.cmd`、Volta 装 `.exe`,纯字符串拼接无法消歧。这一平台差异**被刻意保留**:
-/// 测试用 tempdir 隔离 fs,生产侧 TOCTOU 是 by design(见 `sibling_bin_with_ext` doc)。
+/// Unlike the POSIX version, the Windows version reads the filesystem through
+/// `sibling_bin_with_ext` to resolve `.cmd` vs `.exe`. That platform difference
+/// is intentional and covered with tempdir-based tests.
 ///
-/// `_real_target` 占位维持与 POSIX 版的签名对称——Windows 上未观测到需要真身路径
-/// 区分的等价类(无 Cellar、无 claude-native installer)。若未来加 Scoop persist 锚定
-/// (scoop 装的工具真身在 `<scoop_root>/persist/<app>/...`),从这里启用 `_real_target`。
+/// `_real_target` remains only to keep the signature symmetric with the POSIX
+/// version; Windows does not currently need real-path equivalence classes.
 ///
-/// **关键不变量同 POSIX 版:返回的命令必须用绝对路径,不依赖 PATH**。Windows GUI
-/// 进程 PATH 由 Service Control Manager / explorer.exe 给,通常不含用户 `%LOCALAPPDATA%`
-/// 下的 Volta/pnpm 路径;`$SHELL -lic` 的探测时 PATH 与执行时 PATH 不对称。
+/// The same absolute-path invariant applies here: returned commands must not
+/// depend on PATH.
 ///
-/// 判定顺序(命中即返回):
-/// ① hermes → `<bin_path> update`;Hermes CLI 自己处理安装环境。
-/// ② 支持官方自升级且 Windows 可安全静默执行的工具 → `<bin_path> update/upgrade || call <包管理器 fallback>`。
-/// ③ 其余 npm 工具 → sibling `npm.cmd`/`.exe` i -g <pkg>@latest。
+/// Matching order:
+/// 1. Hermes -> `<bin_path> update`.
+/// 2. Tools with safe official self-update on Windows ->
+///    `<bin_path> update/upgrade || call <package-manager fallback>`.
+/// 3. Other npm tools -> sibling `npm.cmd`/`.exe` `i -g <pkg>@latest`.
 ///
-/// 包管理器 fallback 的 sibling 探测都通过 `sibling_bin_with_ext`(碰 fs):该处无候选
-/// 扩展名存在时,支持官方自升级的工具仍返回 `<bin_path> update/upgrade`,其余工具
-/// 才返 None 让上游兜回静态命令、`anchored=false`。
+/// If `sibling_bin_with_ext` finds no package-manager candidate, tools with
+/// official self-update still return their direct update command; other tools
+/// return `None` so the caller can fall back to the static plan.
 #[cfg(target_os = "windows")]
 fn anchored_command_from_paths(tool: &str, bin_path: &str, _real_target: &str) -> Option<String> {
     if tool == "hermes" {
@@ -2352,11 +2359,13 @@ fn anchored_command_from_paths(tool: &str, bin_path: &str, _real_target: &str) -
     package_command
 }
 
-/// 从枚举结果里取"命令行实际命中的那处"：优先 `is_path_default`；否则（解析不到
-/// PATH 默认、但只有一处）取唯一那处；多处且无默认标记 → None（无从锚定）。
+/// Pick the install that the command line actually hits from enumeration results:
+/// prefer `is_path_default`; otherwise, if PATH default could not be resolved
+/// but there is only one install, use that one. If there are multiple installs
+/// and no default marker, return `None`.
 ///
-/// 全平台共用——POSIX 和 Windows 版的 `anchored_command_from_paths` 都通过
-/// `installs_anchored_command` 调它,取默认那处再 canonicalize 拿真身。
+/// Shared across platforms: both POSIX and Windows versions of
+/// `anchored_command_from_paths` reach this via `installs_anchored_command`.
 fn default_install(installs: &[ToolInstallation]) -> Option<&ToolInstallation> {
     installs.iter().find(|i| i.is_path_default).or_else(|| {
         if installs.len() == 1 {
@@ -2367,22 +2376,22 @@ fn default_install(installs: &[ToolInstallation]) -> Option<&ToolInstallation> {
     })
 }
 
-/// 基于已枚举的安装列表生成锚定升级命令（复用 enumerate 结果，避免二次探测）。
-/// 读取 enumerate 时已 canonicalize 写入的 `inst.real`,**不再二次 canonicalize**——
-/// 既消除冗余 syscall,也闭合"enumerate 与 anchor 看到同一真身"的一致性边界
-/// (两次 canonicalize 之间 symlink 被换会让锚定指向不同真身)。
+/// Build an anchored update command from an already-enumerated install list.
+/// Reuse `inst.real` from enumeration and do not canonicalize again, which
+/// removes redundant syscalls and keeps anchor-time and enumerate-time views of
+/// the same real target aligned.
 ///
-/// 全平台共用——`anchored_command_from_paths` 自身是 cfg 二选一(POSIX 五分支 /
-/// Windows 三分支),这里只负责取默认那处 + 转发。
+/// Shared across platforms: `anchored_command_from_paths` itself is cfg-split;
+/// this helper only picks the default install and forwards it.
 fn installs_anchored_command(tool: &str, installs: &[ToolInstallation]) -> Option<String> {
     let inst = default_install(installs)?;
     let real = inst.real.to_string_lossy();
-    // Codex 平台分发包损坏自愈：主包在但平台二进制缺失时 codex 跑不起来
-    // （runnable=false），此时正常锚定的 `npm i -g @latest` 是 no-op 修不好——改用
-    // uninstall+install 重装补回平台二进制。**但仅限会锚定到 sibling npm 的 node 管理器
-    // 来源**（codex_repair_command 内按 source/real 收窄，brew/volta/bun/system 交回下方
-    // source-specific 锚定，避免误用 npm 重装）。runnable=true 的正常升级也走下方普通锚定
-    // 路径（且因 codex 不在 prefers_official_update，不会再跑会假成功掩盖损坏的 `codex update`）。
+    // Repair a broken Codex platform package when the main package exists but
+    // the platform binary is missing (`runnable=false`).
+    // A normal anchored `npm i -g @latest` is a no-op in that state, so switch
+    // to uninstall+install. Restrict this to sources that can anchor to sibling
+    // npm; brew/volta/bun/system fall back to their source-specific anchored
+    // branches to avoid incorrect npm reinstalls.
     if tool == "codex" && !inst.runnable {
         if let Some(cmd) = codex_repair_command(&inst.path, &real) {
             return Some(cmd);
@@ -2391,9 +2400,9 @@ fn installs_anchored_command(tool: &str, installs: &[ToolInstallation]) -> Optio
     anchored_command_from_paths(tool, &inst.path, &real)
 }
 
-/// 静态命令（= 平台可安全静默执行的官方 CLI 自升级 || `npm i -g <pkg>@latest` /
-/// 官方 installer）。锚定探不到默认安装时回退到它；npm fallback 仍等同于
-/// "装到 PATH 第一个 npm"的旧行为。
+/// Static command: official CLI self-update when safe in silent mode, otherwise
+/// `npm i -g <pkg>@latest` or an official installer.
+/// This is the fallback when anchoring cannot find a default install.
 fn static_fallback_command_for(tool: &str, action: ToolLifecycleAction) -> String {
     tool_action_shell_command(tool, action).unwrap_or_default()
 }
@@ -2402,24 +2411,20 @@ fn static_fallback_command(tool: &str) -> String {
     static_fallback_command_for(tool, ToolLifecycleAction::Update)
 }
 
-/// 新装(install)的命令:对有官方 installer 的工具走「上游推荐 || npm 兜底」短路链,
-/// 其余工具透传到 install 静态命令。update fallback 会在平台可安全静默执行时
-/// 优先跑官方 CLI 自升级,但 install 端不能先跑 `tool update`,
-/// 否则“未安装时安装”的路径会多一次无效失败。
+/// Install commands use an "upstream recommendation || npm fallback" short
+/// circuit for tools with official installers; all others use the static
+/// install command. Update fallback may prefer official CLI self-update when it
+/// is safe, but install must not start with `tool update`.
 ///
-/// 设计理由:
-/// - install 没有锚点可言(从无到有),但**有"上游推荐方式"这一事实** ——
-///   Anthropic 和 SST(OpenCode)都已将自家 native installer 列为首推、把 npm 列为传统方式。
-///   把这层认知补进来,让 install 表与 update 端的锚定决策树共用同一份"上游事实"。
-/// - Hermes 使用官方 installer,避免用系统 Python/pip 安装时踩 Python >=3.11 与 pyenv
-///   `python` shim 问题;更新路径若能锚定已安装 CLI,则走 `<hermes> update`。
-///   **Hermes 没有 npm 包,install 端不享受 `||` 降级**——上游 installer 不可达就只能等。
-/// - 对**有 npm 包**的工具(claude/opencode),短路链(POSIX `||`)保证官方脚本不可达/
-///   防火墙拦截时仍能装上,降级到裸 `npm i -g`。官方脚本本身不用 pipe,
-///   所以这条路径在 WSL 的 `sh -c` 子 shell 中也不依赖外层 `pipefail`。
-/// - Windows 原生不启用:claude.ai/install.sh、opencode.ai/install 都是 bash 脚本,
-///   Windows 原生继续走 `tool_action_shell_command` 的 npm/PowerShell 命令;WSL 作为
-///   Linux 环境复用这套 POSIX 安装优先级。
+/// Rationale:
+/// - Install has no anchor, but upstream-recommended install methods are still
+///   meaningful product facts that should align with update planning.
+/// - Hermes uses the official installer to avoid Python >= 3.11 and pyenv shim
+///   problems. Hermes has no npm package, so there is no `||` downgrade path.
+/// - For npm-backed tools such as claude/opencode, POSIX `||` preserves an npm
+///   fallback when the official script is unreachable.
+/// - Native Windows keeps using the existing npm/PowerShell commands, while WSL
+///   reuses the POSIX install precedence.
 fn installer_with_npm_fallback(installer: &str, tool: &str) -> String {
     match npm_install_command_for(tool) {
         Some(npm) => chain_update_commands(
@@ -2445,19 +2450,13 @@ fn install_command_for(tool: &str) -> String {
     posix_install_command_for(tool)
 }
 
-/// 计算某工具的升级命令与"是否需确认"。全平台共用一份:
-/// - **Windows + WSL 工具**(override 是 `\\wsl$\<distro>\...` UNC 路径)的升级规划
-///   始终走 POSIX 静态命令、不锚定:锚定命令是 Windows 主机绝对路径,跨 `wsl.exe`
-///   边界进入 distro 文件系统后完全无效;且 `enumerate_tool_installations` 不参与
-///   WSL 文件系统、锚定无锚点。这一类显式短路到 `(unix_static, false, false)`,
-///   前端不会弹确认。
-///   **必须用 `wsl_tool_action_shell_command`(unix 版)而非 `static_fallback_command`**
-///   ——后者读 `tool_action_shell_command`,Windows target 给 hermes 返回 PowerShell
-///   installer,跨 wsl.exe 后不适用;`build_tool_action_line` 的 WSL 分支也用同一 wrapper,
-///   保证 plan 展示给前端的命令与实际执行落 .bat 的命令一致。
-/// - 其他平台与 Windows 原生工具走 `installs_anchored_command`:命中 → 锚定;
-///   None(无默认 / sibling 不存在等)→ 静态兜底、`anchored=false`,
-///   前端据此给"默认入口无法确定"诚实文案。
+/// Compute a tool's update command plus its confirmation requirements.
+/// Shared across platforms.
+/// - Windows-hosted WSL tools always use POSIX static commands with no anchoring
+///   because anchored Windows host paths are invalid inside the distro.
+/// - All other platforms, plus native Windows tools, use
+///   `installs_anchored_command`; if that fails, fall back to the static command
+///   with `anchored=false`.
 fn plan_command_for(tool: &str, installs: &[ToolInstallation]) -> (String, bool, bool) {
     #[cfg(target_os = "windows")]
     {
@@ -2473,8 +2472,9 @@ fn plan_command_for(tool: &str, installs: &[ToolInstallation]) -> (String, bool,
     }
 }
 
-/// 多处安装是否构成"真冲突"：≥2 处，且(版本分歧 或 有的能跑有的跑不起来)。
-/// 同版本装两份且都能跑不算冲突（不打扰用户）。诊断展示据此判定。
+/// Determine whether multiple installs form a real conflict:
+/// at least two installs, and either version divergence or mixed runnable state.
+/// Two runnable installs with the same version are not treated as a conflict.
 fn is_conflicting(installs: &[ToolInstallation]) -> bool {
     if installs.len() < 2 {
         return false;
@@ -2486,28 +2486,29 @@ fn is_conflicting(installs: &[ToolInstallation]) -> bool {
     distinct_versions.len() > 1 || runnable_mixed
 }
 
-/// 一次"探测工具安装分布"的结果：枚举到的所有安装 + 各项衍生判定。同时服务两条
-/// 路径——诊断展示（`is_conflict`）与升级确认（`needs_confirmation`/`command`/`anchored`）。
-/// 字段保持 snake_case（与 `ToolInstallation` 一致），前端按同名读取。
+/// Result of probing a tool's install layout:
+/// all enumerated installs plus derived decisions for diagnostics and upgrade confirmation.
+/// Keep field names in `snake_case` to match `ToolInstallation`.
 #[derive(Debug, serde::Serialize)]
 pub struct ToolInstallationReport {
     tool: String,
-    /// 该工具枚举到的所有安装。
+    /// All installs enumerated for this tool.
     installs: Vec<ToolInstallation>,
-    /// 严阈值：≥2 且(版本分歧或运行态混合)。诊断按钮/自动补诊据此展示冲突。
+    /// Strict threshold: at least two installs and either version divergence or mixed runnable state.
     is_conflict: bool,
-    /// 宽阈值：≥2 处。升级确认据此弹窗（升级只动一处，任何多处都该让用户知情）。
+    /// Broad threshold: at least two installs. Upgrade confirmation uses this because an update affects only one target.
     needs_confirmation: bool,
-    /// 锚定后将执行的升级命令（仅展示；真正执行时后端会重新生成，不信任前端回传）。
+    /// The anchored update command that would run. Display only; execution regenerates it server-side.
     command: String,
-    /// 是否成功锚定到某处具体安装。false = 退到裸 fallback 命令（无法确定命令行实际
-    /// 命中哪处，或该处无同级 npm）；前端据此给出"默认入口无法确定"的诚实文案。
+    /// Whether anchoring succeeded to a specific install.
+    /// `false` means the plan fell back to an unanchored command because the
+    /// actual command-line target could not be determined or had no sibling npm.
     anchored: bool,
 }
 
-/// 探测各工具的安装分布：枚举所有安装、标记冲突、生成锚定升级命令。只读、无副作用。
-/// 诊断按钮、升级前确认、升级后补诊共用此命令，各取所需字段——避免对同一份枚举结果
-/// 散落多套下游判定。
+/// Probe install layouts for tools: enumerate installs, mark conflicts,
+/// and generate anchored upgrade commands. Read-only and side-effect-free.
+/// Shared by diagnostics, pre-upgrade confirmation, and post-upgrade follow-up.
 #[tauri::command]
 pub async fn probe_tool_installations(
     tools: Vec<String>,
@@ -2553,8 +2554,8 @@ fn wsl_distro_for_tool(tool: &str) -> Option<String> {
     wsl_distro_from_path(&override_dir)
 }
 
-/// 从 UNC 路径中提取 WSL 发行版名称
-/// 支持 `\\wsl$\Ubuntu\...` 和 `\\wsl.localhost\Ubuntu\...` 两种格式
+/// Extract a WSL distro name from a UNC path.
+/// Supports both `\\wsl$\Ubuntu\...` and `\\wsl.localhost\Ubuntu\...`.
 #[cfg(target_os = "windows")]
 fn wsl_distro_from_path(path: &Path) -> Option<String> {
     use std::path::{Component, Prefix};
@@ -2578,10 +2579,10 @@ fn wsl_distro_from_path(path: &Path) -> Option<String> {
     }
 }
 
-/// 打开指定提供商的终端
+/// Open a terminal for the specified provider.
 ///
-/// 根据提供商配置的环境变量启动一个带有该提供商特定设置的终端
-/// 无需检查是否为当前激活的提供商，任何提供商都可以打开终端
+/// This launches a terminal with provider-specific environment variables from
+/// the provider configuration. It does not need to match the currently active provider.
 #[allow(non_snake_case)]
 #[tauri::command]
 pub async fn open_provider_terminal(
@@ -2593,26 +2594,27 @@ pub async fn open_provider_terminal(
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     let launch_cwd = resolve_launch_cwd(cwd)?;
 
-    // 获取提供商配置
+    // Load provider configuration.
     let providers = ProviderService::list(state.inner(), app_type.clone())
-        .map_err(|e| format!("获取提供商列表失败: {e}"))?;
+        .map_err(|e| format!("Failed to list providers: {e}"))?;
 
     let provider = providers
         .get(&providerId)
-        .ok_or_else(|| format!("提供商 {providerId} 不存在"))?;
+        .ok_or_else(|| format!("Provider {providerId} does not exist"))?;
 
-    // 从提供商配置中提取环境变量
+    // Extract environment variables from the provider config.
     let config = &provider.settings_config;
     let env_vars = extract_env_vars_from_config(config, &app_type);
 
-    // 根据平台启动终端，传入提供商ID用于生成唯一的配置文件名
+    // Launch the terminal for this platform. Pass the provider ID so the
+    // generated config filename stays unique.
     launch_terminal_with_env(env_vars, &providerId, launch_cwd.as_deref())
-        .map_err(|e| format!("启动终端失败: {e}"))?;
+        .map_err(|e| format!("Failed to launch terminal: {e}"))?;
 
     Ok(true)
 }
 
-/// 从提供商配置中提取环境变量
+/// Extract environment variables from provider configuration.
 fn extract_env_vars_from_config(
     config: &serde_json::Value,
     app_type: &AppType,
@@ -2623,7 +2625,7 @@ fn extract_env_vars_from_config(
         return env_vars;
     };
 
-    // 处理 env 字段（Claude/Gemini 通用）
+    // Handle the `env` field shared by Claude and Gemini.
     if let Some(env) = obj.get("env").and_then(|v| v.as_object()) {
         for (key, value) in env {
             if let Some(str_val) = value.as_str() {
@@ -2631,7 +2633,7 @@ fn extract_env_vars_from_config(
             }
         }
 
-        // 处理 base_url: 根据应用类型添加对应的环境变量
+        // Handle `base_url` by adding the matching environment variable for the app type.
         let base_url_key = match app_type {
             AppType::Claude | AppType::ClaudeDesktop => Some("ANTHROPIC_BASE_URL"),
             AppType::Gemini => Some("GOOGLE_GEMINI_BASE_URL"),
@@ -2645,14 +2647,14 @@ fn extract_env_vars_from_config(
         }
     }
 
-    // Codex 使用 auth 字段转换为 OPENAI_API_KEY
+    // Codex maps the `auth` field to `OPENAI_API_KEY`.
     if *app_type == AppType::Codex {
         if let Some(auth) = obj.get("auth").and_then(|v| v.as_str()) {
             env_vars.push(("OPENAI_API_KEY".to_string(), auth.to_string()));
         }
     }
 
-    // Gemini 使用 api_key 字段转换为 GEMINI_API_KEY
+    // Gemini maps the `api_key` field to `GEMINI_API_KEY`.
     if *app_type == AppType::Gemini {
         if let Some(api_key) = obj.get("api_key").and_then(|v| v.as_str()) {
             env_vars.push(("GEMINI_API_KEY".to_string(), api_key.to_string()));
@@ -2668,17 +2670,21 @@ fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
     };
 
     if raw_path.contains('\n') || raw_path.contains('\r') {
-        return Err("目录路径包含非法换行符".to_string());
+        return Err("Directory path contains an invalid newline".to_string());
     }
 
     let path = Path::new(&raw_path);
     if !path.exists() {
-        return Err(format!("目录不存在: {raw_path}"));
+        return Err(format!("Directory does not exist: {raw_path}"));
     }
 
-    let resolved = std::fs::canonicalize(path).map_err(|e| format!("解析目录失败: {e}"))?;
+    let resolved =
+        std::fs::canonicalize(path).map_err(|e| format!("Failed to resolve directory: {e}"))?;
     if !resolved.is_dir() {
-        return Err(format!("选择的路径不是文件夹: {}", resolved.display()));
+        return Err(format!(
+            "Selected path is not a directory: {}",
+            resolved.display()
+        ));
     }
 
     // Strip Windows extended-length prefix that canonicalize produces,
@@ -2699,8 +2705,8 @@ fn resolve_launch_cwd(cwd: Option<String>) -> Result<Option<PathBuf>, String> {
     Ok(Some(resolved))
 }
 
-/// 创建临时配置文件并启动 claude 终端
-/// 使用 --settings 参数传入提供商特定的 API 配置
+/// Create a temporary config file and launch a Claude terminal.
+/// Pass provider-specific API config through `--settings`.
 fn launch_terminal_with_env(
     env_vars: Vec<(String, String)>,
     provider_id: &str,
@@ -2713,7 +2719,7 @@ fn launch_terminal_with_env(
         std::process::id()
     ));
 
-    // 创建并写入配置文件
+    // Create and write the config file.
     write_claude_config(&config_file, &env_vars)?;
 
     #[cfg(target_os = "macos")]
@@ -2735,10 +2741,10 @@ fn launch_terminal_with_env(
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    Err("不支持的操作系统".to_string())
+    Err("Unsupported operating system".to_string())
 }
 
-/// 写入 claude 配置文件
+/// Write the Claude config file.
 fn write_claude_config(
     config_file: &std::path::Path,
     env_vars: &[(String, String)],
@@ -2752,13 +2758,14 @@ fn write_claude_config(
 
     config_obj.insert("env".to_string(), serde_json::Value::Object(env_obj));
 
-    let config_json =
-        serde_json::to_string_pretty(&config_obj).map_err(|e| format!("序列化配置失败: {e}"))?;
+    let config_json = serde_json::to_string_pretty(&config_obj)
+        .map_err(|e| format!("Failed to serialize config: {e}"))?;
 
-    std::fs::write(config_file, config_json).map_err(|e| format!("写入配置文件失败: {e}"))
+    std::fs::write(config_file, config_json)
+        .map_err(|e| format!("Failed to write config file: {e}"))
 }
 
-/// macOS: 根据用户首选终端启动
+/// macOS: launch using the user's preferred terminal.
 #[cfg(target_os = "macos")]
 fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -2776,7 +2783,8 @@ fn launch_macos_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> R
     let provider_command = build_provider_command_line(&shell, &config_path, cwd);
 
     // Write the shell script to a temp file
-    // 脚本使用 POSIX sh 语法确保可移植性，exec 行切换到用户交互式 shell
+    // The script uses portable POSIX `sh` syntax. The `exec` line switches into
+    // the user's interactive shell.
     let script_content = format!(
         r#"#!/usr/bin/env sh
 trap 'rm -f "{config_path}" "{script_file}"' EXIT
@@ -2793,11 +2801,12 @@ echo "{config_path}"
         exec_line = exec_line,
     );
 
-    std::fs::write(&script_file, &script_content).map_err(|e| format!("写入启动脚本失败: {e}"))?;
+    std::fs::write(&script_file, &script_content)
+        .map_err(|e| format!("Failed to write launch script: {e}"))?;
 
     // Make script executable
     std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+        .map_err(|e| format!("Failed to set script permissions: {e}"))?;
 
     // Try the preferred terminal first, fall back to Terminal.app if it fails
     // Note: Kitty doesn't need the -e flag, others do
@@ -2815,7 +2824,7 @@ echo "{config_path}"
     // If preferred terminal fails and it's not the default, try Terminal.app as fallback
     if result.is_err() && terminal != "terminal" {
         log::warn!(
-            "首选终端 {} 启动失败，回退到 Terminal.app: {:?}",
+            "Preferred terminal {} failed to launch, falling back to Terminal.app: {:?}",
             terminal,
             result.as_ref().err()
         );
@@ -2880,12 +2889,12 @@ fn run_terminal_osascript(applescript: &str, terminal_label: &str) -> Result<(),
         .arg("-e")
         .arg(applescript)
         .output()
-        .map_err(|e| format!("执行 osascript 失败: {e}"))?;
+        .map_err(|e| format!("Failed to run osascript: {e}"))?;
 
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
         return Err(format!(
-            "{terminal_label} 执行失败 (exit code: {:?}): {}",
+            "{terminal_label} failed (exit code: {:?}): {}",
             output.status.code(),
             stderr
         ));
@@ -2990,7 +2999,8 @@ fn launch_macos_ghostty(script_file: &std::path::Path) -> Result<(), String> {
     }
 }
 
-/// macOS: 使用 open -na 启动支持 --args 参数的终端（Alacritty/Kitty/WezTerm/Kaku）
+/// macOS: launch terminals that support `--args` via `open -na`
+/// (Alacritty/Kitty/WezTerm/Kaku).
 #[cfg(target_os = "macos")]
 fn launch_macos_open_app(
     app_name: &str,
@@ -3012,12 +3022,12 @@ fn launch_macos_open_app(
 
     let output = cmd
         .output()
-        .map_err(|e| format!("启动 {app_name} 失败: {e}"))?;
+        .map_err(|e| format!("Failed to launch {app_name}: {e}"))?;
 
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
         return Err(format!(
-            "{} 启动失败 (exit code: {:?}): {}",
+            "{} failed to launch (exit code: {:?}): {}",
             app_name,
             output.status.code(),
             stderr
@@ -3065,11 +3075,13 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
     let warp_url = warp_url.to_string();
     cmd.arg(warp_url);
 
-    let output = cmd.output().map_err(|e| format!("启动 Warp 失败: {e}"))?;
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to launch Warp: {e}"))?;
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
         return Err(format!(
-            "Warp 启动失败 (exit code: {:?}): {}",
+            "Warp failed to launch (exit code: {:?}): {}",
             output.status.code(),
             stderr
         ));
@@ -3078,7 +3090,7 @@ fn launch_macos_warp(script_file: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Linux: 根据用户首选终端启动
+/// Linux: launch using the user's preferred terminal.
 #[cfg(target_os = "linux")]
 fn launch_linux_terminal(config_file: &std::path::Path, cwd: Option<&Path>) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
@@ -3124,10 +3136,11 @@ echo "{config_path}"
         exec_line = exec_line,
     );
 
-    std::fs::write(&script_file, &script_content).map_err(|e| format!("写入启动脚本失败: {e}"))?;
+    std::fs::write(&script_file, &script_content)
+        .map_err(|e| format!("Failed to write launch script: {e}"))?;
 
     std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-        .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+        .map_err(|e| format!("Failed to set script permissions: {e}"))?;
 
     // Build terminal list: preferred terminal first (if specified), then defaults
     let terminals_to_try: Vec<(&str, Vec<&str>)> = if let Some(ref pref) = preferred {
@@ -3153,7 +3166,7 @@ echo "{config_path}"
             .collect()
     };
 
-    let mut last_error = String::from("未找到可用的终端");
+    let mut last_error = String::from("No available terminal found");
 
     for (terminal, args) in terminals_to_try {
         // Check if terminal exists in common paths
@@ -3172,7 +3185,7 @@ echo "{config_path}"
             match result {
                 Ok(_) => return Ok(()),
                 Err(e) => {
-                    last_error = format!("执行 {} 失败: {}", terminal, e);
+                    last_error = format!("Failed to run {}: {}", terminal, e);
                 }
             }
         }
@@ -3195,7 +3208,7 @@ fn which_command(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Windows: 根据用户首选终端启动
+/// Windows: launch using the user's preferred terminal.
 #[cfg(target_os = "windows")]
 fn launch_windows_terminal(
     temp_dir: &std::path::Path,
@@ -3224,7 +3237,7 @@ del \"%~f0\" >nul 2>&1
         cwd_command = cwd_command,
     );
 
-    std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+    std::fs::write(&bat_file, &content).map_err(|e| format!("Failed to write batch file: {e}"))?;
 
     let bat_path = bat_file.to_string_lossy();
     let ps_cmd = format!("& '{}'", bat_path);
@@ -3242,7 +3255,7 @@ del \"%~f0\" >nul 2>&1
     // If preferred terminal fails and it's not the default, try cmd as fallback
     if result.is_err() && terminal != "cmd" {
         log::warn!(
-            "首选终端 {} 启动失败，回退到 cmd: {:?}",
+            "Preferred terminal {} failed to launch, falling back to cmd: {:?}",
             terminal,
             result.as_ref().err()
         );
@@ -3303,12 +3316,12 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
         .args(&full_args)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .map_err(|e| format!("启动 {} 失败: {e}", terminal_name))?;
+        .map_err(|e| format!("Failed to launch {}: {e}", terminal_name))?;
 
     if !output.status.success() {
         let stderr = decode_command_output(&output.stderr);
         return Err(format!(
-            "{} 启动失败 (exit code: {:?}): {}",
+            "{} failed to launch (exit code: {:?}): {}",
             terminal_name,
             output.status.code(),
             stderr
@@ -3318,12 +3331,14 @@ fn run_windows_start_command(args: &[&str], terminal_name: &str) -> Result<(), S
     Ok(())
 }
 
-/// 打开用户首选终端并在其中执行一段可信命令脚本。脚本尾部 `read -r` / `pause`
-/// 是刻意设计的——让命令退出后窗口不要瞬间关闭，用户才看得到 `command
-/// not found` / `ModuleNotFoundError` 这类诊断信息。
+/// Open the user's preferred terminal and run a trusted command script inside it.
+/// The trailing `read -r` / `pause` is intentional so the window does not close
+/// immediately and users can still read diagnostics such as `command not found`
+/// or `ModuleNotFoundError`.
 ///
-/// **Security**：`command_line` 会被原样拼进 shell/batch 脚本，调用方必须
-/// 保证它是可信字符串（当前只由后端硬编码调用）。
+/// Security: `command_line` is interpolated directly into the shell/batch
+/// script, so the caller must ensure it is trusted. Currently only backend
+/// hardcoded call sites use it.
 pub(crate) fn launch_terminal_running(command_line: &str, label: &str) -> Result<(), String> {
     let temp_dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -3353,9 +3368,9 @@ read -r _
         use std::os::unix::fs::PermissionsExt;
 
         std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
+            .map_err(|e| format!("Failed to write launch script: {e}"))?;
         std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+            .map_err(|e| format!("Failed to set script permissions: {e}"))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let terminal = preferred.as_deref().unwrap_or("terminal");
@@ -3373,7 +3388,7 @@ read -r _
 
         if result.is_err() && terminal != "terminal" {
             log::warn!(
-                "首选终端 {} 启动失败，回退到 Terminal.app: {:?}",
+                "Preferred terminal {} failed to launch, falling back to Terminal.app: {:?}",
                 terminal,
                 result.as_ref().err()
             );
@@ -3388,9 +3403,9 @@ read -r _
         use std::process::Command;
 
         std::fs::write(&script_file, &script_content)
-            .map_err(|e| format!("写入启动脚本失败: {e}"))?;
+            .map_err(|e| format!("Failed to write launch script: {e}"))?;
         std::fs::set_permissions(&script_file, std::fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("设置脚本权限失败: {e}"))?;
+            .map_err(|e| format!("Failed to set script permissions: {e}"))?;
 
         let preferred = crate::settings::get_preferred_terminal();
         let default_terminals = [
@@ -3424,7 +3439,7 @@ read -r _
                 .collect()
         };
 
-        let mut last_error = String::from("未找到可用的终端");
+        let mut last_error = String::from("No available terminal found");
 
         for (terminal, args) in terminals_to_try {
             let terminal_exists = which_command(terminal)
@@ -3441,7 +3456,7 @@ read -r _
                 match spawn_result {
                     Ok(_) => return Ok(()),
                     Err(e) => {
-                        last_error = format!("执行 {} 失败: {}", terminal, e);
+                        last_error = format!("Failed to run {}: {}", terminal, e);
                     }
                 }
             }
@@ -3462,7 +3477,8 @@ read -r _
             label = label,
             cmd = command_line,
         );
-        std::fs::write(&bat_file, &content).map_err(|e| format!("写入批处理文件失败: {e}"))?;
+        std::fs::write(&bat_file, &content)
+            .map_err(|e| format!("Failed to write batch file: {e}"))?;
 
         let bat_path = bat_file.to_string_lossy();
         let ps_cmd = format!("& '{}'", bat_path);
@@ -3478,7 +3494,7 @@ read -r _
 
         let final_result = if result.is_err() && terminal != "cmd" {
             log::warn!(
-                "首选终端 {} 启动失败，回退到 cmd: {:?}",
+                "Preferred terminal {} failed to launch, falling back to cmd: {:?}",
                 terminal,
                 result.as_ref().err()
             );
@@ -3499,11 +3515,11 @@ read -r _
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = (temp_dir, pid, command_line, label);
-        Err("不支持的操作系统".to_string())
+        Err("Unsupported operating system".to_string())
     }
 }
 
-/// 设置窗口主题（Windows/macOS 标题栏颜色）
+/// Set the window theme (Windows/macOS title-bar color).
 /// theme: "dark" | "light" | "system"
 #[tauri::command]
 pub async fn set_window_theme(window: tauri::Window, theme: String) -> Result<(), String> {
@@ -3591,12 +3607,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_get_user_shell_fallback() {
-        // $SHELL 未设置时应按平台 fallback
-        // 此测试验证 fallback 逻辑，但不验证环境变量值（取决于运行环境）
+        // If `$SHELL` is unset, platform fallback should apply.
+        // This test checks the fallback logic, not the exact environment value.
         let shell = get_user_shell();
-        // 至少应返回一个合法的绝对路径
+        // It should return at least one valid absolute path.
         assert!(valid_user_shell_path(&shell));
-        // basename 应为合法 shell 名
+        // The basename should be a valid shell name.
         let basename = shell.rsplit('/').next().unwrap_or("sh");
         assert!(["sh", "bash", "zsh", "fish", "dash"].contains(&basename));
     }
@@ -3659,22 +3675,22 @@ mod tests {
         );
         assert_eq!(compare_semver("2.1.154", "2.1.156"), Some(Ordering::Less));
         assert_eq!(compare_semver("2.1.156", "2.1.156"), Some(Ordering::Equal));
-        // 预发布 < 同核心正式版
+        // A prerelease is lower than the release with the same core version.
         assert_eq!(
             compare_semver("2.1.156-beta.1", "2.1.156"),
             Some(Ordering::Less)
         );
-        // core 更高的预发布仍高于较低的正式版（gemini nightly 场景）
+        // A prerelease with a higher core version still beats a lower stable release.
         assert_eq!(
             compare_semver("0.45.0-nightly.1", "0.44.1"),
             Some(Ordering::Greater)
         );
-        // 大 patch（codex 时间戳式）不溢出
+        // Large patch values such as Codex timestamp builds should not overflow.
         assert_eq!(
             compare_semver("0.1.2505172116", "0.135.0"),
             Some(Ordering::Less)
         );
-        // 无法解析返回 None（gemini 的 `false` 脏 tag）
+        // Unparseable versions return `None`, such as Gemini's mistaken `false` tag.
         assert_eq!(compare_semver("false", "1.0.0"), None);
     }
 
@@ -3688,27 +3704,27 @@ mod tests {
         });
         let map = tags.as_object().unwrap();
 
-        // 本地领先 latest（在 next 通道）→ 补查到 next，数字对齐
+        // If local is ahead of `latest` on `next`, resolve to `next`.
         assert_eq!(
             pick_latest_version(map, &["next"], Some("2.1.156")),
             Some("2.1.156".to_string())
         );
-        // 本地等于 latest → 不补查，仍显示 latest
+        // If local equals `latest`, do not check prerelease tags.
         assert_eq!(
             pick_latest_version(map, &["next"], Some("2.1.154")),
             Some("2.1.154".to_string())
         );
-        // 本地落后 latest（稳定通道用户）→ 不补查，不被推向预发布版
+        // If local is behind `latest`, stay on `latest` and do not push a stable user to prerelease.
         assert_eq!(
             pick_latest_version(map, &["next"], Some("2.1.145")),
             Some("2.1.154".to_string())
         );
-        // 无预发布白名单 → 永远只看 latest（不解析 local，避免脏 local 触发）
+        // Without an allowlist, always use `latest`.
         assert_eq!(
             pick_latest_version(map, &[], Some("2.1.156")),
             Some("2.1.154".to_string())
         );
-        // 本地版本未知 → 保守只看 latest
+        // If the local version is unknown, conservatively use `latest`.
         assert_eq!(
             pick_latest_version(map, &["next"], None),
             Some("2.1.154".to_string())
@@ -3718,21 +3734,21 @@ mod tests {
     #[test]
     fn test_pick_latest_version_filters_dirty_prerelease() {
         use serde_json::json;
-        // 模拟 codex：beta 是低于 latest 的时间戳式脏版本
+        // Simulate Codex: `beta` is a timestamp-like prerelease lower than `latest`.
         let tags = json!({
             "latest": "0.135.0",
             "beta": "0.1.2505172116"
         });
         let map = tags.as_object().unwrap();
-        // 即便本地领先 latest，低于 latest 的脏 beta 也不会被选
+        // Even if local is ahead of `latest`, a lower dirty beta must not win.
         assert_eq!(
             pick_latest_version(map, &["beta"], Some("0.200.0")),
             Some("0.135.0".to_string())
         );
     }
 
-    /// `parent_dir` 是锚定层"由 bin 路径推导同目录绝对路径"的基石,跨平台共用——
-    /// 这里固化 `\`/`/`/混合分隔符/根边界四种情况,避免未来重构悄悄改语义。
+    /// `parent_dir` is the cross-platform primitive used by anchored path derivation.
+    /// These tests lock in slash, backslash, mixed-separator, and root-edge behavior.
     mod parent_dir_cases {
         use super::super::*;
 
@@ -3754,8 +3770,8 @@ mod tests {
 
         #[test]
         fn mixed_separators_takes_rightmost() {
-            // Windows 上 `Path::join` 与字符串拼接可能产出混合分隔符;取**两种之中最右
-            // 出现**的位置,而非"优先 `\`"——后者在混合时会取错父目录。
+            // Mixed separators can appear on Windows. Use the rightmost separator,
+            // not a fixed preference for `\\`.
             assert_eq!(
                 parent_dir("C:\\Users\\me/Code/openclaw\\codex.cmd"),
                 "C:\\Users\\me/Code/openclaw"
@@ -3764,30 +3780,27 @@ mod tests {
 
         #[test]
         fn no_separator_returns_empty() {
-            // 无父目录 → 空串,锚定层据此返 None、回退静态命令。
+            // No parent directory yields an empty string, so anchoring falls back to the static command.
             assert_eq!(parent_dir("codex"), "");
         }
 
         #[test]
         fn separator_at_root_returns_empty() {
-            // `/codex`:根目录是 index 0,`i > 0` 不满足 → 空串。同款行为对 Windows
-            // 上的 `\codex` 也成立(实际不会出现,但语义对齐)。
+            // `/codex` has its separator at index 0, so the result is empty.
+            // The same behavior applies to `\\codex`.
             assert_eq!(parent_dir("/codex"), "");
             assert_eq!(parent_dir("\\codex"), "");
         }
     }
 
-    /// Windows-only 锚定升级回归(等价类压缩到 3 种 idiom:volta/pnpm/npm)。整块通过
-    /// `cfg(target_os = "windows")` gate,在 macOS/Linux 上不参与 cargo test;Windows
-    /// CI 跑全套验证。tempdir 模拟 sibling 入口存在/不存在,锁定"扩展名顺序优先级 +
-    /// 含空格路径自动加双引号 + 探不到 sibling → None 退静态"三件事。
+    /// Windows-only regression tests for anchored upgrades.
+    /// These cover the three main idioms: volta, pnpm, and npm.
     #[cfg(target_os = "windows")]
     mod anchored_upgrade_windows {
         use super::super::*;
 
-        /// 在 tempdir 下创建子目录 `subdir`(空字符串则用 tempdir 根),放入 `entry`
-        /// 与若干 `siblings` 假文件。返回 `(TempDir, 子目录, 入口绝对路径)`——TempDir
-        /// 必须保活,否则析构后 fs 文件消失、`is_file()` 失败,测试假绿。
+        /// Create a subdirectory under `tempdir`, populate `entry` and sibling
+        /// placeholder files, and return `(TempDir, subdir, absolute entry path)`.
         fn setup_sibling(
             subdir: &str,
             entry: &str,
@@ -3808,15 +3821,8 @@ mod tests {
             (dir, sub, bin_path)
         }
 
-        /// **必须与 `win_quote_path_for_batch` 主体保持镜像**——给 anchored 测试动态算
-        /// expected,让用例在 temp 根目录含空格 / `&` / `(` / `%` 等特殊字符的开发机上
-        /// 也能通过(默认 Windows `%TEMP%` = `C:\Users\<user>\AppData\Local\Temp`,
-        /// 用户名带空格的机器整条 path 含空格、生产代码会正确加引号、测试硬编码无引号
-        /// expected 会假失败)。
-        ///
-        /// 镜像引入"两边必须同步"的隐性依赖——回归防护层是 `win_quote_*` 那 7 个独立
-        /// 单测,它们用硬编码字面值锁住 quoting 规则本身,即便此镜像漂移也会被那一组
-        /// 测试 catch;反之亦然。
+        /// Keep this mirrored with `win_quote_path_for_batch` so expected values
+        /// remain correct on machines whose temp paths contain spaces or special characters.
         fn expect_quoted_path(p: &str) -> String {
             let escaped = p.replace('%', "%%%%");
             let needs_quote = p
@@ -3831,10 +3837,7 @@ mod tests {
 
         #[test]
         fn volta_windows_uses_volta_install() {
-            // tempdir 路径里不含 "volta" 子串,所以在 tempdir 下手建一个 `Volta` 子目录
-            // 才能让 `infer_install_source` 通过路径 normalize 后命中 `/volta/` 分支。
-            // sibling 候选顺序 `[exe, cmd]`——Volta 是 Rust 写的 native binary,首选 .exe。
-            // expected 通过 `expect_quoted_path` 算出,以适应 temp 根目录含特殊字符的环境。
+            // Build a path that classifies as Volta and prefers `.exe`.
             let (_dir, sub, bin_path) = setup_sibling("Volta", "codex.cmd", &["volta.exe"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let volta_full = format!("{}\\volta.exe", sub.to_string_lossy());
@@ -3848,9 +3851,7 @@ mod tests {
 
         #[test]
         fn pnpm_windows_uses_pnpm_add() {
-            // bin_path 落 `%LOCALAPPDATA%\pnpm\codex.cmd`,sibling 有 `pnpm.cmd` → 锚定到
-            // `<dir>\pnpm.cmd add -g @openai/codex@latest`。用 add+@latest 而非 update,
-            // 兼容"之前没通过 pnpm 装过"的幂等性场景。
+            // pnpm should anchor to sibling `pnpm.cmd add -g ...@latest`.
             let (_dir, sub, bin_path) = setup_sibling("pnpm", "codex.cmd", &["pnpm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let pnpm_full = format!("{}\\pnpm.cmd", sub.to_string_lossy());
@@ -3883,8 +3884,7 @@ mod tests {
 
         #[test]
         fn npm_windows_default_branch() {
-            // 任意 system 类路径(不命中 volta/pnpm)→ 兜底 sibling npm.cmd 锚定。
-            // 模拟 nvm-windows 的实际形态:`<NVM_HOME>\v22.0.0\codex.cmd`。
+            // System-like paths should fall back to sibling `npm.cmd`.
             let (_dir, sub, bin_path) = setup_sibling("v22.0.0", "codex.cmd", &["npm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
@@ -3898,8 +3898,7 @@ mod tests {
 
         #[test]
         fn windows_no_sibling_uses_cli_update_without_package_fallback() {
-            // sibling npm.cmd 不存在(纯独立二进制)时,仍可锚定到 CLI 自身跑官方 update。
-            // 只是没有包管理器 fallback。
+            // With no sibling package manager, anchor to CLI self-update only.
             let (_dir, _sub, bin_path) = setup_sibling("", "codex.cmd", &[]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let expected = format!("{} update", expect_quoted_path(&bin_path));
@@ -3908,8 +3907,7 @@ mod tests {
 
         #[test]
         fn hermes_windows_uses_cli_update() {
-            // Hermes 自带 `hermes update`,不要再回退到 py/python/pip。即便同目录有
-            // npm.cmd,也不应走 npm 分支。
+            // Hermes should stay on `hermes update`, never Python or npm fallback.
             let (_dir, _sub, bin_path) = setup_sibling("", "hermes.exe", &["npm.cmd"]);
             let cmd = anchored_command_from_paths("hermes", &bin_path, &bin_path);
             let expected = format!("{} update", expect_quoted_path(&bin_path));
@@ -3971,9 +3969,7 @@ mod tests {
 
         #[test]
         fn windows_path_with_space_is_double_quoted() {
-            // 含空格的路径(`C:\Program Files\...`)在生成命令时必须用双引号包,否则
-            // bat / cmd /C 解析会把第一个空格当 token 分隔符,后续参数串错。**精确等值断言
-            // 锁定引号位置**(starts_with+contains 会放过"双引号位置错了但仍能命中"的回归)。
+            // Space-containing paths must be quoted exactly, or `cmd` tokenization breaks.
             let (_dir, sub, bin_path) = setup_sibling("Program Files", "codex.cmd", &["npm.cmd"]);
             let cmd = anchored_command_from_paths("codex", &bin_path, &bin_path);
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
@@ -3987,19 +3983,12 @@ mod tests {
 
         #[test]
         fn windows_full_batch_line_for_percent_path_uses_quadruple_escape() {
-            // **完整生成的 batch 行**(`call ` + anchored cmd)对含字面 `%` 的路径必须
-            // 4 倍转义 `%foo%` → `%%%%foo%%%%`:.bat parser 一轮还原为 `%%foo%%`,call
-            // 二轮再还原为 `%foo%` 字面。helper 单测验证的是 `win_quote_path_for_batch`
-            // 内部转义,这条 integration 测验证 anchored_command_from_paths 输出 + call
-            // 包装后,**最终落到 .bat 的字符串**仍然闭合两轮 expansion。
+            // The fully generated batch line must quadruple-escape literal `%...%`.
             let (_dir, sub, bin_path) = setup_sibling("path%foo%", "codex.cmd", &["npm.cmd"]);
             let anchored = anchored_command_from_paths("codex", &bin_path, &bin_path).unwrap();
-            // build_tool_action_line Windows 分支最终拼的就是 `call <anchored>`(中间
-            // 没有其他变换),这里直接用 format! 复刻那一步,无需暴露内部 API。
+            // Recreate the final `call <anchored>` batch line directly.
             let batch_line = format!("call {anchored}");
-            // 用 `expect_quoted_path` 算 npm 全路径的期望 quoting,**同时覆盖 temp 根
-            // 含空格的环境**(否则 sub 本身含空格 + 子目录 `path%foo%` 触发 4 倍 `%` 转义
-            // 会让 expected 漏引号、假失败)。
+            // Compute the expected quoted npm path dynamically.
             let npm_full = format!("{}\\npm.cmd", sub.to_string_lossy());
             let expected = format!(
                 "call {} update || call {} i -g @openai/codex@latest",
@@ -4007,29 +3996,26 @@ mod tests {
                 expect_quoted_path(&npm_full)
             );
             assert_eq!(batch_line, expected);
-            // 双重锁定:确认 4 倍转义子串存在 + 不出现"残留的二倍转义或字面 `%foo%`"。
+            // Lock both expectations: quadruple escape exists, literal `%foo%` does not.
             assert!(
                 batch_line.contains("%%%%foo%%%%"),
-                "batch 行应含 4 倍转义 `%%%%foo%%%%`: {batch_line}"
+                "Batch line should contain quadruple escape `%%%%foo%%%%`: {batch_line}"
             );
             assert!(
                 !batch_line.contains("path%foo%"),
-                "batch 行不应含未转义的字面 `%foo%`(会被 call 二次解析展开): {batch_line}"
+                "Batch line should not contain literal `%foo%`, which `call` would expand again: {batch_line}"
             );
         }
     }
 
-    /// Windows-only helpers 单测——在 macOS/Linux 上整块通过 cfg 排除,不参与 `cargo test`。
-    /// Windows CI(或本机 Windows 跑 cargo test)会激活这些用例。覆盖:①双引号
-    /// quoting 镜像 POSIX 版;②sibling_bin_with_ext 在 fs 上按 ext 顺序探到第一个存在的、
-    /// 全部不存在/空 dir 时返 None。tempdir 提供干净 fs 沙盒。
+    /// Windows-only helper tests covering quoting and sibling resolution.
     #[cfg(target_os = "windows")]
     mod windows_helpers {
         use super::super::*;
 
         #[test]
         fn win_quote_clean_path_stays_bare() {
-            // 普通路径不含特殊字符 → 不加引号,命令展示干净。
+            // Clean paths without special characters stay unquoted.
             assert_eq!(
                 win_quote_path_for_batch("C:\\Users\\me\\npm.cmd"),
                 "C:\\Users\\me\\npm.cmd"
@@ -4046,8 +4032,7 @@ mod tests {
 
         #[test]
         fn win_quote_ampersand_path_gets_quoted() {
-            // `&` 是 cmd 命令分隔符,NTFS 允许在路径中出现;没有引号会让 `call C:\A&B\npm.cmd`
-            // 被解析为 `call C:\A` + `B\npm.cmd` 两条命令,执行错乱。
+            // `&` is a `cmd` command separator and must be protected by quotes.
             assert_eq!(
                 win_quote_path_for_batch("C:\\Tools&Dev\\npm.cmd"),
                 "\"C:\\Tools&Dev\\npm.cmd\""
@@ -4056,7 +4041,7 @@ mod tests {
 
         #[test]
         fn win_quote_parens_path_gets_quoted() {
-            // `(` / `)` 在 .bat 中是代码块语义,引号内才是字面意义。
+            // Parentheses need quotes because they are block syntax in batch.
             assert_eq!(
                 win_quote_path_for_batch("C:\\Foo(x86)\\npm.cmd"),
                 "\"C:\\Foo(x86)\\npm.cmd\""
@@ -4065,7 +4050,7 @@ mod tests {
 
         #[test]
         fn win_quote_caret_path_gets_quoted() {
-            // `^` 是 cmd 的 escape character;包引号后是字面意义。
+            // `^` is `cmd`'s escape character and needs quotes for literal treatment.
             assert_eq!(
                 win_quote_path_for_batch("C:\\foo^bar\\npm.cmd"),
                 "\"C:\\foo^bar\\npm.cmd\""
@@ -4074,10 +4059,7 @@ mod tests {
 
         #[test]
         fn win_quote_percent_is_escaped_to_quadruple_percent() {
-            // `%` 经历 .bat 一轮 + call 二轮 expansion,要让 call 最终看到字面 `%FOO%`
-            // 需要源 .bat 里写 `%%%%FOO%%%%`(一轮 → `%%FOO%%`,二轮 → `%FOO%` 字面)。
-            // 用 `%%` 二倍转义只在 echo / 直接执行场景对,call 调用时会被还原成 variable
-            // reference 进而被替换。**这一条用例锁住"call 二次解析"必须被 4 倍转义闭合**。
+            // Literal `%FOO%` requires quadruple escaping when the batch line is invoked via `call`.
             assert_eq!(
                 win_quote_path_for_batch("C:\\path%foo%\\npm.cmd"),
                 "C:\\path%%%%foo%%%%\\npm.cmd"
@@ -4086,7 +4068,7 @@ mod tests {
 
         #[test]
         fn win_quote_percent_with_space_gets_both() {
-            // `%` 4 倍转义与外层引号正交——含空格触发引号、含 `%` 触发 `%%%%` 转义,叠加。
+            // Space quoting and percent escaping stack independently.
             assert_eq!(
                 win_quote_path_for_batch("C:\\my %dir%\\npm.cmd"),
                 "\"C:\\my %%%%dir%%%%\\npm.cmd\""
@@ -4095,18 +4077,17 @@ mod tests {
 
         #[test]
         fn win_quote_needs_quote_uses_original_path() {
-            // 回归 guard:`needs_quote` 判定基于**原路径**,不能用 escape 后字符串——
-            // 否则原本无 token 边界字符的路径(如 `C:\path%foo%\npm.cmd`)在 escape
-            // 引入更多 `%` 后被错误识别成"需要引号"。这是实现 bug 的隐性入口。
-            // 入参不含任何 token 边界字符 → 不应加外层引号、只做 `%` 4 倍转义。
+            // `needs_quote` must use the original path, not the escaped form.
             let out = win_quote_path_for_batch("C:\\foo%bar%\\npm.cmd");
-            assert!(!out.starts_with('"'), "纯 `%` 路径不应加外层引号: {out}");
+            assert!(
+                !out.starts_with('"'),
+                "A pure-percent path should not gain outer quotes: {out}"
+            );
         }
 
         #[test]
         fn sibling_bin_picks_first_existing_extension() {
-            // 同目录同时存在 `npm.cmd` 和 `npm.exe` 时,候选顺序 `[cmd, exe]` 应取 .cmd——
-            // 这是 Node.js 官方 installer 装出来的 idiom(.cmd 是入口、.exe 是 wrapper)。
+            // If both exist, `[cmd, exe]` should prefer `.cmd`.
             let dir = tempfile::tempdir().unwrap();
             let cmd_path = dir.path().join("npm.cmd");
             let exe_path = dir.path().join("npm.exe");
@@ -4120,8 +4101,7 @@ mod tests {
 
         #[test]
         fn sibling_bin_volta_prefers_exe() {
-            // Volta 是 Rust 写的 native binary,扩展名顺序应是 [exe, cmd]——若只有 .exe
-            // 存在(常见情形),探到的就是它。
+            // Volta prefers `[exe, cmd]`.
             let dir = tempfile::tempdir().unwrap();
             let exe_path = dir.path().join("volta.exe");
             std::fs::write(&exe_path, "").unwrap();
@@ -4133,7 +4113,7 @@ mod tests {
 
         #[test]
         fn sibling_bin_returns_none_when_none_exist() {
-            // 同目录下没有任何候选 → None,锚定层据此退到静态命令。
+            // No candidates means no sibling and a static fallback.
             let dir = tempfile::tempdir().unwrap();
             let codex = dir.path().join("codex.cmd").to_string_lossy().to_string();
             assert!(sibling_bin_with_ext(&codex, "npm", &["cmd", "exe"]).is_none());
@@ -4141,19 +4121,18 @@ mod tests {
 
         #[test]
         fn sibling_bin_returns_none_when_no_parent() {
-            // bin_path 没有目录部分(纯文件名) → parent_dir 空串 → 返 None。
+            // A bare filename has no parent directory and therefore no sibling.
             assert!(sibling_bin_with_ext("codex.cmd", "npm", &["cmd"]).is_none());
         }
 
         #[test]
         fn wsl_hermes_command_uses_unix_installer_not_powershell_or_pip() {
-            // 跨 wsl.exe 边界后跑的是 Linux,Windows PowerShell installer 不适用;
-            // 也不要再走 python3/python pip 链,避免 Python 版本/pyenv shim 问题。
+            // Once inside WSL, use the Unix installer path and avoid PowerShell or pip.
             let update_cmd =
                 wsl_tool_action_shell_command("hermes", ToolLifecycleAction::Update).unwrap();
             assert!(
                 update_cmd.starts_with("hermes update || bash -c 'tmp=$(mktemp) && curl -fsSL "),
-                "WSL hermes 更新应先尝试 CLI 自更新再回退官方 installer,得到: {update_cmd}"
+                "WSL Hermes update should try CLI self-update before the official installer: {update_cmd}"
             );
             let fallback = update_cmd
                 .split_once("||")
@@ -4164,18 +4143,18 @@ mod tests {
                     && fallback.contains(" -o $tmp && bash $tmp")
                     && !update_cmd.contains("powershell")
                     && !update_cmd.contains("pip"),
-                "WSL hermes fallback 不能依赖 pipefail/Windows installer/pip,得到: {update_cmd}"
+                "WSL Hermes fallback must not depend on pipefail, Windows installers, or pip: {update_cmd}"
             );
 
             let install_cmd =
                 wsl_tool_action_shell_command("hermes", ToolLifecycleAction::Install).unwrap();
             assert!(
                 install_cmd.starts_with("bash -c 'tmp=$(mktemp) && curl -fsSL "),
-                "WSL hermes 安装应直接走官方 Unix installer,得到: {install_cmd}"
+                "WSL Hermes install should go directly through the official Unix installer: {install_cmd}"
             );
             assert!(
                 !install_cmd.contains('|') && install_cmd.contains(" -o $tmp && bash $tmp"),
-                "WSL hermes 安装不应依赖 pipefail,得到: {install_cmd}"
+                "WSL Hermes install should not depend on pipefail: {install_cmd}"
             );
         }
 
@@ -4186,7 +4165,7 @@ mod tests {
             assert!(line.starts_with("wsl.exe -d Ubuntu -- sh -c "));
             assert!(
                 !line.contains("| bash") && line.contains(" -o $tmp && bash $tmp"),
-                "WSL 子 shell 内不能出现 curl 管道安装器: {line}"
+                "A WSL child shell must not contain a curl pipeline installer: {line}"
             );
         }
 
@@ -4218,8 +4197,7 @@ mod tests {
 
         #[test]
         fn wsl_npm_tools_use_posix_update_chain_without_batch_call() {
-            // WSL 内跑的是 POSIX shell,不能带 Windows batch 的 `call`。同时 update
-            // fallback 仍应先尝试官方 CLI 自升级。
+            // WSL commands must stay POSIX and avoid Windows batch `call`.
             let cmd = wsl_tool_action_shell_command("claude", ToolLifecycleAction::Update).unwrap();
             assert_eq!(
                 cmd,
@@ -4228,10 +4206,7 @@ mod tests {
         }
     }
 
-    /// `infer_install_source` 是判定锚定 idiom 的入口——nvm/homebrew/volta/pnpm/...
-    /// 各对应不同的升级命令形态。函数内部已 `replace('\\','/').to_ascii_lowercase()`
-    /// 归一化,Windows 反斜杠 + 大小写差异在此处不需要分平台。这里固化"哪条路径
-    /// 算哪种来源"的归类断言,避免未来调整子串顺序时静默改变分类。
+    /// Classification tests for `infer_install_source`.
     mod install_source_classification {
         use super::super::*;
         use std::path::Path;
@@ -4246,8 +4221,7 @@ mod tests {
 
         #[test]
         fn windows_volta_localappdata_no_dot() {
-            // `%LOCALAPPDATA%\Volta\bin\codex.exe` —— 没有前导点,靠兜底的 `/volta/`
-            // 命中(归一化后小写)。如果只识别 `/.volta/`,Windows 这一类会落到 system。
+            // Windows Volta paths should still classify as `volta` without a leading dot.
             assert_eq!(
                 infer_install_source(Path::new(
                     "C:\\Users\\me\\AppData\\Local\\Volta\\bin\\codex.exe"
@@ -4258,8 +4232,7 @@ mod tests {
 
         #[test]
         fn windows_pnpm_localappdata() {
-            // `%LOCALAPPDATA%\pnpm\codex.cmd` —— pnpm 全局 bin 目录,识别为 pnpm 后
-            // 锚定命令走 `pnpm add -g <pkg>@latest`,而不是 sibling npm。
+            // Windows pnpm global-bin paths should classify as `pnpm`.
             assert_eq!(
                 infer_install_source(Path::new("C:\\Users\\me\\AppData\\Local\\pnpm\\codex.cmd")),
                 "pnpm"
@@ -4268,10 +4241,7 @@ mod tests {
 
         #[test]
         fn windows_nvm_falls_back_to_system() {
-            // nvm-windows 安装的工具路径不含 `.nvm`(它通常装在 `%APPDATA%\nvm` 或
-            // `C:\Program Files\nodejs` symlink),刻意不识别成专属 source——锚定层
-            // 会按 system → sibling npm.cmd 处理,跟 nvm-windows 的实际 idiom 一致
-            // (它的全局包就是当前选中的 node 的 npm 装的)。
+            // nvm-windows paths intentionally fall back to `system`.
             assert_eq!(
                 infer_install_source(Path::new(
                     "C:\\Users\\me\\AppData\\Roaming\\nvm\\v22.0.0\\codex.cmd"
@@ -4282,8 +4252,7 @@ mod tests {
 
         #[test]
         fn windows_scoop_still_identified() {
-            // Scoop 已有 `/scoop/` 分支;我们的 6 个工具都不是 scoop formula,所以这条
-            // 实际不影响锚定决策(锚定层会用 sibling npm.cmd),但归类保留方便未来。
+            // Scoop remains classified explicitly for future flexibility.
             assert_eq!(
                 infer_install_source(Path::new("C:\\Users\\me\\scoop\\shims\\codex.cmd")),
                 "scoop"
@@ -4291,9 +4260,7 @@ mod tests {
         }
     }
 
-    /// 锚定升级命令生成：用真实勘察到的安装路径固化为回归断言——
-    /// 一台机器上 4 个工具恰好对应 4 种升级方式（原生 self-update / brew / nvm npm /
-    /// homebrew npm），任何改动若打破其中一种都会立刻被这些用例拦下。
+    /// Regression tests for anchored upgrade command generation.
     #[cfg(not(target_os = "windows"))]
     mod anchored_upgrade {
         use super::super::*;
@@ -4307,21 +4274,14 @@ mod tests {
                 error: None,
                 source: infer_install_source(Path::new(path)).to_string(),
                 is_path_default: is_default,
-                // 测试场景下不需要走 fs canonicalize——POSIX 锚定测试关心的是
-                // path/real 都被传给 anchored_command_from_paths 的纯字符串判定,
-                // 已有用例(brew_formula_extraction / claude_native_*)是直接
-                // 调 anchored_command_from_paths,不通过 installs_anchored_command,
-                // 这里 real 是给上层 default_install + read 用,填同值即可。
+                // These tests only need string-level path/real classification.
                 real: std::path::PathBuf::from(path),
             }
         }
 
         #[test]
         fn claude_native_installer_uses_self_update() {
-            // ~/.local/bin/claude → 真身在 ~/.local/share/claude/versions/,自带 self-update;
-            // 它不归 npm 管,且在 PATH 里比 nvm/homebrew 更靠前,用 npm 升级纯属白装。
-            // **绝对路径调用 launcher** 避免 GUI 非登录 `bash -c` 时 PATH 没有
-            // ~/.local/bin 导致 `claude: not found`(exit 127)而失败。
+            // Claude native installs should use launcher self-update by absolute path.
             let cmd = anchored_command_from_paths(
                 "claude",
                 "/Users/me/.local/bin/claude",
@@ -4332,10 +4292,7 @@ mod tests {
 
         #[test]
         fn gemini_homebrew_formula_uses_brew_upgrade() {
-            // /opt/homebrew/bin/gemini → Cellar/gemini-cli/...:是 brew formula 而非 npm 全局包,
-            // 且 formula 名(gemini-cli) ≠ npm 包名(@google/gemini-cli)。
-            // **brew 与 formula 入口同目录**,用 `<dir>/brew` 绝对路径调用,避免 GUI
-            // 非登录 `bash -c` 时 PATH 没有 /opt/homebrew/bin 导致 `brew: not found`。
+            // A Homebrew formula should use `brew upgrade`, not npm.
             let cmd = anchored_command_from_paths(
                 "gemini",
                 "/opt/homebrew/bin/gemini",
@@ -4349,8 +4306,7 @@ mod tests {
 
         #[test]
         fn codex_homebrew_formula_uses_brew_not_self_update() {
-            // Homebrew formula 归 brew 管理;即使 Codex 有 self-update,也不先改动
-            // Cellar 内的安装内容。
+            // Homebrew formulas remain under brew management.
             let cmd = anchored_command_from_paths(
                 "codex",
                 "/opt/homebrew/bin/codex",
@@ -4376,9 +4332,7 @@ mod tests {
 
         #[test]
         fn codex_nvm_anchors_to_that_npm() {
-            // Codex 不走 self-update（`codex update` 在 npm 安装上只是裸 `npm install -g`，
-            // 却会假成功掩盖平台二进制漏装）——直接锚定到同一个 node 的 npm，而非 PATH
-            // 第一个 npm。损坏时的 uninstall+install 自愈见 codex_missing_platform_binary_*。
+            // Codex npm installs should anchor directly to the matching npm, not self-update.
             let cmd = anchored_command_from_paths(
                 "codex",
                 "/Users/me/.nvm/versions/node/v22.14.0/bin/codex",
@@ -4392,8 +4346,7 @@ mod tests {
 
         #[test]
         fn homebrew_npm_global_package_anchors_not_brew() {
-            // openclaw 装在 Homebrew node 的全局目录(lib/node_modules，非 Cellar)：
-            // 是 npm 全局包，官方 update 失败后走 npm 锚定而非 brew upgrade。
+            // A Homebrew Node global package is still an npm-global install, not a formula upgrade.
             let cmd = anchored_command_from_paths(
                 "openclaw",
                 "/opt/homebrew/bin/openclaw",
@@ -4407,10 +4360,7 @@ mod tests {
 
         #[test]
         fn volta_self_update_chain_anchors_to_volta() {
-            // `~/.volta/bin` 通常不在 GUI 非登录 `bash -c` 的 PATH 里,且用户可能
-            // PATH 上还有另一份 volta → 必须绝对路径锚定到命令行命中的这一份。
-            // 用 openclaw（仍在 prefers_official_update）覆盖 volta 分支的 self-update 链;
-            // codex 已改为不 self-update（见 codex_volta_anchors_to_volta_install）。
+            // Volta installs must anchor to the exact Volta binary used on PATH.
             let cmd = anchored_command_from_paths(
                 "openclaw",
                 "/Users/me/.volta/bin/openclaw",
@@ -4424,7 +4374,7 @@ mod tests {
 
         #[test]
         fn codex_volta_anchors_to_volta_install() {
-            // codex 锚定到命令行命中的那份 volta，但不 self-update：纯 `volta install`。
+            // Codex on Volta should use `volta install`, not self-update.
             let cmd = anchored_command_from_paths(
                 "codex",
                 "/Users/me/.volta/bin/codex",
@@ -4438,7 +4388,7 @@ mod tests {
 
         #[test]
         fn bun_uses_bun_add() {
-            // OpenCode 先跑官方 upgrade;失败后 bun 同 volta:绝对路径写回原安装源。
+            // OpenCode on Bun should try official upgrade first, then anchored Bun fallback.
             let cmd = anchored_command_from_paths(
                 "opencode",
                 "/Users/me/.bun/bin/opencode",
@@ -4452,7 +4402,7 @@ mod tests {
 
         #[test]
         fn volta_path_with_space_is_quoted() {
-            // volta 分支用 `<dir>/volta`,目录含空格时同样要 POSIX 引号包裹。
+            // Volta paths with spaces still need POSIX quoting.
             let cmd = anchored_command_from_paths(
                 "codex",
                 "/Users/my name/.volta/bin/codex",
@@ -4466,8 +4416,7 @@ mod tests {
 
         #[test]
         fn bun_path_with_space_is_quoted() {
-            // bun 分支与 volta 共享 sibling_bin + quote_path_if_spaced,
-            // 这条用例锁住 `bun add -g` 命令头部的引号包裹形态。
+            // Bun shares the same sibling-path quoting behavior.
             let cmd = anchored_command_from_paths(
                 "opencode",
                 "/Users/my name/.bun/bin/opencode",
@@ -4481,8 +4430,7 @@ mod tests {
 
         #[test]
         fn hermes_uses_cli_update_anchor() {
-            // Hermes 自带 `hermes update`;锚定到命令行默认那处 CLI,避免 nexus-composer 猜
-            // 系统 Python/pip 时撞上 Python >=3.11 或 pyenv shim 问题。
+            // Hermes should anchor to CLI self-update, never inferred Python tooling.
             let cmd = anchored_command_from_paths(
                 "hermes",
                 "/usr/local/bin/hermes",
@@ -4493,8 +4441,7 @@ mod tests {
 
         #[test]
         fn opencode_native_install_uses_cli_upgrade_without_package_fallback() {
-            // opencode install.sh 装到 ~/.opencode/bin（独立二进制、无同级 npm）：
-            // 不能锚定到 `<dir>/npm`（必失败），但可以锚定到 CLI 自身跑官方 upgrade。
+            // Native OpenCode installs have no sibling npm and should use CLI upgrade.
             let cmd = anchored_command_from_paths(
                 "opencode",
                 "/Users/me/.opencode/bin/opencode",
@@ -4508,7 +4455,7 @@ mod tests {
 
         #[test]
         fn go_bin_opencode_uses_cli_upgrade_without_package_fallback() {
-            // ~/go/bin 同理：无同级 npm，但 OpenCode 官方 upgrade 可由 CLI 自己处理。
+            // Go-bin installs follow the same no-sibling-npm rule.
             let cmd = anchored_command_from_paths(
                 "opencode",
                 "/Users/me/go/bin/opencode",
@@ -4519,7 +4466,7 @@ mod tests {
 
         #[test]
         fn fnm_install_anchors_to_that_npm() {
-            // fnm 是自带同级 npm 的 node 管理器 → 锚定到那处的 npm。
+            // fnm should anchor to its sibling npm.
             let cmd = anchored_command_from_paths(
                 "codex",
                 "/Users/me/.local/share/fnm_multishells/12345_abc/bin/codex",
@@ -4548,8 +4495,7 @@ mod tests {
 
         #[test]
         fn claude_native_path_with_space_is_quoted() {
-            // claude 分支同样要 POSIX 引号包裹含空格的 bin_path,
-            // 否则 `/Users/my name/.local/bin/claude update` 会被 shell 拆词。
+            // Claude native paths with spaces still need POSIX quoting.
             let cmd = anchored_command_from_paths(
                 "claude",
                 "/Users/my name/.local/bin/claude",
@@ -4563,7 +4509,7 @@ mod tests {
 
         #[test]
         fn brew_path_with_space_is_quoted() {
-            // brew 分支用 `<bin_path 同目录>/brew`,目录含空格时同样要引号包裹。
+            // Brew sibling paths with spaces must also be quoted.
             let cmd = anchored_command_from_paths(
                 "gemini",
                 "/opt/my brew/bin/gemini",
@@ -4582,7 +4528,7 @@ mod tests {
                     .as_deref(),
                 Some("gemini-cli")
             );
-            // node 全局包不在 Cellar 下 → 不是 formula。
+            // Node globals outside Cellar are not formulas.
             assert_eq!(
                 brew_formula_from_path("/opt/homebrew/lib/node_modules/openclaw/openclaw.mjs"),
                 None
@@ -4595,14 +4541,10 @@ mod tests {
 
         #[test]
         fn sibling_bin_returns_none_when_bin_path_has_no_directory() {
-            // bin_path 不含 `/` → parent_dir 返回空 → sibling_bin 不能拼出绝对路径
-            // → None,让上游 anchored_command_from_paths 整体退化为静态命令兜底,
-            // 而不是悄悄拼出 `npm i -g <pkg>` 这种依赖 PATH 的指令(违背"必须绝对路径"
-            // 不变量)。实际从 enumerate_tool_installations 走的 bin_path 都是绝对路径,
-            // 这条防线不期望被触发,但闭合了 helper 与函数文档的语义一致。
+            // Without a directory component, sibling resolution must fail cleanly.
             assert_eq!(sibling_bin("codex", "npm"), None);
             assert_eq!(sibling_bin("", "brew"), None);
-            // 含 `/` 即可拼出绝对路径——这是常规路径。
+            // A normal absolute path should still resolve.
             assert_eq!(
                 sibling_bin("/opt/homebrew/bin/gemini", "brew").as_deref(),
                 Some("/opt/homebrew/bin/brew")
@@ -4641,10 +4583,7 @@ mod tests {
 
         #[test]
         fn codex_missing_platform_binary_self_heals_via_uninstall_install() {
-            // 平台二进制缺失 → `codex --version` 报 "Missing optional dependency" 退出非 0
-            // → enumerate 标记 runnable=false。此状态下普通 `npm i -g @latest` 是 no-op 修不好,
-            // 升级路径改用 uninstall+install 重装补回平台二进制（`|| true` 让 uninstall 在
-            // set -e 下对半损坏包返回非 0 时仍继续 install）。
+            // Missing platform binaries should trigger npm uninstall+install repair.
             let mut broken = inst("/Users/me/.nvm/versions/node/v22.14.0/bin/codex", true);
             broken.runnable = false;
             assert_eq!(
@@ -4655,8 +4594,7 @@ mod tests {
 
         #[test]
         fn codex_runnable_uses_plain_npm_not_self_heal() {
-            // 正常（runnable=true）的 codex 升级：锚定 npm，既不重装、也不跑会假成功
-            // 掩盖损坏的 `codex update`。
+            // Healthy Codex installs should use plain anchored npm updates.
             let healthy = inst("/Users/me/.nvm/versions/node/v22.14.0/bin/codex", true);
             let cmd = installs_anchored_command("codex", &[healthy]);
             assert_eq!(
@@ -4668,9 +4606,7 @@ mod tests {
 
         #[test]
         fn codex_broken_homebrew_formula_uses_brew_not_npm_repair() {
-            // brew formula 装的坏 codex（real 在 Cellar）：自愈门控必须收窄放行，回落到
-            // `brew upgrade codex`——若误走 npm 重装，npm 够不到 Cellar 那份、反而旁路
-            // 装第二份 npm 全局 codex 制造双安装。
+            // Broken Homebrew-formula Codex installs must fall back to brew, not npm repair.
             let broken = ToolInstallation {
                 path: "/opt/homebrew/bin/codex".to_string(),
                 version: None,
@@ -4688,7 +4624,7 @@ mod tests {
 
         #[test]
         fn codex_broken_volta_uses_volta_install_not_npm_repair() {
-            // volta 装的坏 codex：回落到 `volta install`，不走 npm 重装。
+            // Broken Volta Codex installs must fall back to `volta install`.
             let mut broken = inst("/Users/me/.volta/bin/codex", true);
             broken.runnable = false;
             assert_eq!(
@@ -4699,8 +4635,7 @@ mod tests {
 
         #[test]
         fn codex_broken_bun_uses_bun_add_not_phantom_npm() {
-            // bun 装的坏 codex：回落到 `bun add`，且**绝不**拼出 `~/.bun/bin/npm`
-            // （bun 目录下没有 npm，那条路径不存在、执行会直接失败）。
+            // Broken Bun Codex installs must use `bun add`, never a phantom sibling npm.
             let mut broken = inst("/Users/me/.bun/bin/codex", true);
             broken.runnable = false;
             let cmd = installs_anchored_command("codex", &[broken]);
@@ -4713,18 +4648,17 @@ mod tests {
 
         #[test]
         fn first_abs_path_line_skips_shell_noise() {
-            // 交互式 .zshrc 先打印欢迎语（如 powerlevel10k / 自定义提示），
-            // command -v 的真实路径在其后 → 跳过噪音取真路径。
+            // Interactive shell noise should be skipped before taking the first absolute path.
             assert_eq!(
                 first_abs_path_line("🚀 Welcome back!\n/Users/me/.local/bin/claude\n"),
                 Some("/Users/me/.local/bin/claude")
             );
-            // 无噪音时取第一行。
+            // With no noise, the first line wins.
             assert_eq!(
                 first_abs_path_line("/opt/homebrew/bin/gemini\n"),
                 Some("/opt/homebrew/bin/gemini")
             );
-            // 输出里没有任何绝对路径 → None。
+            // No absolute path means `None`.
             assert_eq!(first_abs_path_line("welcome\nbye\n"), None);
         }
 
@@ -4739,19 +4673,19 @@ mod tests {
                 is_path_default: false,
                 real: std::path::PathBuf::from("/x"),
             };
-            // 单处 → 不冲突。
+            // One install is never a conflict.
             assert!(!is_conflicting(&[make(Some("1.0.0"), true)]));
-            // 两处同版本、都能跑 → 不冲突（同版本装两遍不打扰）。
+            // Two runnable installs with the same version are not a conflict.
             assert!(!is_conflicting(&[
                 make(Some("1.0.0"), true),
                 make(Some("1.0.0"), true)
             ]));
-            // 版本分歧 → 冲突。
+            // Version divergence is a conflict.
             assert!(is_conflicting(&[
                 make(Some("1.0.0"), true),
                 make(Some("2.0.0"), true)
             ]));
-            // 同版本但运行态混合（一个能跑、一个跑不起来）→ 冲突。
+            // Mixed runnable state is also a conflict.
             assert!(is_conflicting(&[
                 make(Some("1.0.0"), true),
                 make(Some("1.0.0"), false)
@@ -4759,16 +4693,14 @@ mod tests {
         }
     }
 
-    /// install 端的"上游推荐 || npm 兜底"短路链:把工具→官方安装方式这一上游事实
-    /// 固化为回归断言。任何方案改动若打破短路链结构或 URL,都会被这些用例拦下。
+    /// Regression tests for the install-side "upstream recommendation || npm fallback" chain.
     #[cfg(not(target_os = "windows"))]
     mod install_strategy {
         use super::super::*;
 
         #[test]
         fn claude_install_prefers_native_with_npm_fallback() {
-            // Anthropic 现在主推 native installer(claude.ai/install.sh),
-            // 网络不通时短路到 npm 仍能装上;两段都得在,顺序也得对。
+            // Anthropic currently prefers the native installer, with npm as a fallback.
             let cmd = install_command_for("claude");
             assert!(
                 cmd.contains("https://claude.ai/install.sh"),
@@ -4790,7 +4722,7 @@ mod tests {
 
         #[test]
         fn opencode_install_prefers_native_with_npm_fallback() {
-            // SST 自家 install.sh 与 claude 同形态:bash 脚本、网络下载、装到 ~/.opencode/bin。
+            // OpenCode uses the same native-installer pattern as Claude.
             let cmd = install_command_for("opencode");
             assert!(
                 cmd.contains("https://opencode.ai/install"),
@@ -4809,7 +4741,7 @@ mod tests {
 
         #[test]
         fn codex_install_keeps_static_npm() {
-            // OpenAI 暂无独立 native installer,保持原裸 npm,不引入兜底链(无东西可兜底)。
+            // OpenAI currently has no separate native installer, so Codex stays on bare npm.
             let cmd = install_command_for("codex");
             assert_eq!(cmd, "npm i -g @openai/codex@latest");
             assert!(!cmd.contains("||"));
@@ -4817,9 +4749,7 @@ mod tests {
 
         #[test]
         fn gemini_install_keeps_static_npm() {
-            // Google 文档同时支持 brew/npm,但本表保持与 update fallback 一致的 npm。
-            // 用户若已装 brew gemini-cli,update 路径的锚定会识别 formula → brew upgrade,
-            // 所以 install 端不强行替用户决策"用 brew 还是 npm"。
+            // Google documents both brew and npm, but install stays aligned with the npm update fallback.
             let cmd = install_command_for("gemini");
             assert_eq!(cmd, "npm i -g @google/gemini-cli@latest");
         }
@@ -4858,8 +4788,7 @@ mod tests {
 
         #[test]
         fn hermes_install_uses_official_installer() {
-            // Hermes 官方 installer 会处理 Python 3.11+/uv 等运行时;不要再从 nexus-composer
-            // 里走 `python3 || python` pip 链。
+            // Hermes uses its official installer instead of a Python/pip fallback chain.
             let cmd = install_command_for("hermes");
             assert!(
                 cmd.starts_with("bash -c 'tmp=$(mktemp) && curl -fsSL ")
@@ -4874,8 +4803,7 @@ mod tests {
 
         #[test]
         fn hermes_update_fallback_uses_cli_update_then_installer() {
-            // 锚定失败时也不回退 pip:先让 PATH 上的 hermes 自更新,找不到/失败再跑官方
-            // installer。这样 pyenv 的 `python` shim 不会参与错误路径。
+            // If anchoring fails, prefer CLI update and then the official installer, never pip.
             let cmd = static_fallback_command("hermes");
             assert!(
                 cmd.starts_with("hermes update || bash -c 'tmp=$(mktemp) && curl -fsSL "),
@@ -5132,7 +5060,7 @@ mod tests {
         let error = resolve_launch_cwd(Some(missing.to_string_lossy().into_owned()))
             .expect_err("missing directory should fail");
 
-        assert!(error.contains("目录不存在"));
+        assert!(error.contains("Directory does not exist"));
     }
 
     #[cfg(target_os = "macos")]

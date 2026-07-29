@@ -7,8 +7,7 @@ interface FailoverPriorityBadgeProps {
 }
 
 /**
- * 故障转移优先级徽章
- * 显示供应商在故障转移队列中的优先级顺序
+ * Badge showing a provider's priority in the failover queue.
  */
 export function FailoverPriorityBadge({
   priority,
@@ -25,7 +24,7 @@ export function FailoverPriorityBadge({
       )}
       title={t("failover.priority.tooltip", {
         priority,
-        defaultValue: `故障转移优先级 ${priority}`,
+        defaultValue: "Failover priority {{priority}}",
       })}
     >
       P{priority}

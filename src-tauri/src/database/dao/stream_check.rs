@@ -1,11 +1,11 @@
-//! 流式健康检查日志 DAO
+//! Streaming health-check log DAO.
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
 use crate::services::stream_check::{StreamCheckConfig, StreamCheckResult};
 
 impl Database {
-    /// 保存流式检查日志
+    /// Saves a streaming health-check log.
     pub fn save_stream_check_log(
         &self,
         provider_id: &str,
@@ -39,11 +39,11 @@ impl Database {
         Ok(conn.last_insert_rowid())
     }
 
-    /// 获取流式检查配置
+    /// Returns the streaming health-check configuration.
     pub fn get_stream_check_config(&self) -> Result<StreamCheckConfig, AppError> {
         match self.get_setting("stream_check_config")? {
             Some(json) => serde_json::from_str(&json)
-                .map_err(|e| AppError::Message(format!("解析配置失败: {e}"))),
+                .map_err(|e| AppError::Message(format!("Failed to parse configuration: {e}"))),
             None => Ok(StreamCheckConfig::default()),
         }
     }
@@ -65,10 +65,10 @@ impl Database {
         Ok(deleted as u64)
     }
 
-    /// 保存流式检查配置
+    /// Saves the streaming health-check configuration.
     pub fn save_stream_check_config(&self, config: &StreamCheckConfig) -> Result<(), AppError> {
         let json = serde_json::to_string(config)
-            .map_err(|e| AppError::Message(format!("序列化配置失败: {e}")))?;
+            .map_err(|e| AppError::Message(format!("Failed to serialize configuration: {e}")))?;
         self.set_setting("stream_check_config", &json)
     }
 }

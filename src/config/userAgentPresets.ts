@@ -1,15 +1,22 @@
 /**
- * 自定义 User-Agent 预设。
+ * Custom User-Agent presets.
  *
- * 取值来自 PR #3671 对 Kimi Coding Plan（api.kimi.com/coding）UA 白名单的 curl 实测：
- * `claude-cli/*`、`claude-code/*`、`Kilo-Code/*` 可通过；`codex-cli`、`kimi-cli` 会被 403。
- * 白名单只校验 UA 名称前缀、不看版本号，因此用静态值即可，版本不会因 Claude Code 升级而失效。
+ * Values are based on curl tests of the Kimi Coding Plan
+ * (api.kimi.com/coding) User-Agent allowlist from PR #3671:
+ * `claude-cli/*`, `claude-code/*`, and `Kilo-Code/*` pass, while `codex-cli`
+ * and `kimi-cli` receive HTTP 403. The allowlist checks only the User-Agent
+ * name prefix, not its version, so static values remain valid across Claude
+ * Code upgrades.
  *
- * 第一条是官方 Claude Code CLI 实际发送的完整格式（参见 `stream_check.rs` 里检测用的
- * `claude-cli/2.1.2 (external, cli)`），最贴近真实客户端、最稳过严格的 UA 校验；其余为简短变体。
+ * The first entry uses the complete format sent by the official Claude Code
+ * CLI; see `claude-cli/2.1.2 (external, cli)` used by `stream_check.rs`. It most
+ * closely resembles the real client and is safest for strict validation. The
+ * remaining entries are shorter variants.
  *
- * 这些预设主要用于"非白名单 Coding Agent（Codex/Gemini/Hermes/OpenClaw 等）想接入受 UA
- * 限制的上游"的场景——把转发请求伪装成已在白名单内的客户端。是否使用由用户显式选择。
+ * These presets primarily let coding agents outside the allowlist, including
+ * Codex, Gemini, Hermes, and OpenClaw, connect to upstreams restricted by
+ * User-Agent. They make forwarded requests resemble an allowed client and are
+ * used only when explicitly selected by the user.
  */
 export const USER_AGENT_PRESETS: readonly string[] = [
   "claude-cli/2.1.161 (external, cli)",

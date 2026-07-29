@@ -74,8 +74,8 @@ pub fn decode_base64_param(field: &str, raw: &str) -> Result<Vec<u8>, AppError> 
     }
 
     Err(AppError::InvalidInput(format!(
-        "{field} 参数 Base64 解码失败：{}。请确认链接参数已用 Base64 编码并经过 URL 转义（尤其是将 '+' 编码为 %2B，或使用 URL-safe Base64）。",
-        last_error.unwrap_or_else(|| "未知错误".to_string())
+        "Failed to Base64-decode the {field} parameter: {}. Confirm that the link parameter is Base64-encoded and URL-escaped (especially that '+' is encoded as %2B, or use URL-safe Base64).",
+        last_error.unwrap_or_else(|| "Unknown error".to_string())
     )))
 }
 

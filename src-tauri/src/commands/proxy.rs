@@ -1,13 +1,13 @@
-//! 代理服务相关的 Tauri 命令
+//! Tauri commands for the proxy service
 //!
-//! 提供前端调用的 API 接口
+//! Provides APIs for the frontend.
 
 use crate::error::AppError;
 use crate::proxy::types::*;
 use crate::proxy::{CircuitBreakerConfig, CircuitBreakerStats};
 use crate::store::AppState;
 
-/// 启动代理服务器（仅启动服务，不接管 Live 配置）
+/// Start the proxy server without taking over live configuration.
 pub(crate) async fn start_proxy_server_inner(state: &AppState) -> Result<ProxyServerInfo, String> {
     let started_here = !state.proxy_service.is_running().await;
     let info = state.proxy_service.start().await?;
@@ -36,7 +36,7 @@ pub async fn start_proxy_server(
     start_proxy_server_inner(state.inner()).await
 }
 
-/// 停止代理服务器（仅停止服务，不恢复/清理 Live 接管状态）
+/// Stop the proxy server without restoring or clearing live takeover state.
 #[tauri::command]
 pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let takeover = state.proxy_service.get_takeover_status().await?;
@@ -47,20 +47,21 @@ pub async fn stop_proxy_server(state: tauri::State<'_, AppState>) -> Result<(), 
         || takeover.openclaw
     {
         return Err(
-            "仍有应用处于代理接管状态，请先在设置中关闭对应应用接管后再停止本地路由。".to_string(),
+            "Some applications are still under proxy takeover. Disable takeover in settings before stopping local routing."
+                .to_string(),
         );
     }
 
     state.proxy_service.stop().await
 }
 
-/// 停止代理服务器（恢复 Live 配置）
+/// Stop the proxy server and restore live configuration.
 #[tauri::command]
 pub async fn stop_proxy_with_restore(state: tauri::State<'_, AppState>) -> Result<(), String> {
     state.proxy_service.stop_with_restore().await
 }
 
-/// 获取各应用接管状态
+/// Return the takeover status for each application.
 #[tauri::command]
 pub async fn get_proxy_takeover_status(
     state: tauri::State<'_, AppState>,
@@ -68,7 +69,7 @@ pub async fn get_proxy_takeover_status(
     state.proxy_service.get_takeover_status().await
 }
 
-/// 为指定应用开启/关闭接管
+/// Enable or disable takeover for an application.
 #[tauri::command]
 pub async fn set_proxy_takeover_for_app(
     state: tauri::State<'_, AppState>,
@@ -81,19 +82,19 @@ pub async fn set_proxy_takeover_for_app(
         .await
 }
 
-/// 获取代理服务器状态
+/// Return the proxy server status.
 #[tauri::command]
 pub async fn get_proxy_status(state: tauri::State<'_, AppState>) -> Result<ProxyStatus, String> {
     state.proxy_service.get_status().await
 }
 
-/// 获取代理配置
+/// Return the proxy configuration.
 #[tauri::command]
 pub async fn get_proxy_config(state: tauri::State<'_, AppState>) -> Result<ProxyConfig, String> {
     state.proxy_service.get_config().await
 }
 
-/// 更新代理配置
+/// Update the proxy configuration.
 #[tauri::command]
 pub async fn update_proxy_config(
     state: tauri::State<'_, AppState>,
@@ -104,9 +105,9 @@ pub async fn update_proxy_config(
 
 // ==================== Global & Per-App Config ====================
 
-/// 获取全局代理配置
+/// Return the global proxy configuration.
 ///
-/// 返回统一的全局配置字段（代理开关、监听地址、端口、日志开关）
+/// Includes shared proxy, listen address, port, and logging settings.
 #[tauri::command]
 pub async fn get_global_proxy_config(
     state: tauri::State<'_, AppState>,
@@ -117,9 +118,9 @@ pub async fn get_global_proxy_config(
         .map_err(|e| e.to_string())
 }
 
-/// 更新全局代理配置
+/// Update the global proxy configuration.
 ///
-/// 更新统一的全局配置字段，会同时更新三行（claude/codex/gemini）
+/// Updates the shared fields for the claude, codex, and gemini rows.
 #[tauri::command]
 pub async fn update_global_proxy_config(
     state: tauri::State<'_, AppState>,
@@ -131,9 +132,9 @@ pub async fn update_global_proxy_config(
         .map_err(|e| e.to_string())
 }
 
-/// 获取指定应用的代理配置
+/// Return the proxy configuration for an application.
 ///
-/// 返回应用级配置（enabled、auto_failover、超时、熔断器等）
+/// Includes enabled state, automatic failover, timeouts, and circuit breaker settings.
 #[tauri::command]
 pub async fn get_proxy_config_for_app(
     state: tauri::State<'_, AppState>,
@@ -145,9 +146,9 @@ pub async fn get_proxy_config_for_app(
         .map_err(|e| e.to_string())
 }
 
-/// 更新指定应用的代理配置
+/// Update the proxy configuration for an application.
 ///
-/// 更新应用级配置（enabled、auto_failover、超时、熔断器等）
+/// Updates enabled state, automatic failover, timeouts, and circuit breaker settings.
 #[tauri::command]
 pub async fn update_proxy_config_for_app(
     state: tauri::State<'_, AppState>,
@@ -183,7 +184,7 @@ pub async fn get_default_cost_multiplier_test_hook(
     get_default_cost_multiplier_internal(state, app_type).await
 }
 
-/// 获取默认成本倍率
+/// Return the default cost multiplier.
 #[tauri::command]
 pub async fn get_default_cost_multiplier(
     state: tauri::State<'_, AppState>,
@@ -212,7 +213,7 @@ pub async fn set_default_cost_multiplier_test_hook(
     set_default_cost_multiplier_internal(state, app_type, value).await
 }
 
-/// 设置默认成本倍率
+/// Set the default cost multiplier.
 #[tauri::command]
 pub async fn set_default_cost_multiplier(
     state: tauri::State<'_, AppState>,
@@ -240,7 +241,7 @@ pub async fn get_pricing_model_source_test_hook(
     get_pricing_model_source_internal(state, app_type).await
 }
 
-/// 获取计费模式来源
+/// Return the pricing model source.
 #[tauri::command]
 pub async fn get_pricing_model_source(
     state: tauri::State<'_, AppState>,
@@ -269,7 +270,7 @@ pub async fn set_pricing_model_source_test_hook(
     set_pricing_model_source_internal(state, app_type, value).await
 }
 
-/// 设置计费模式来源
+/// Set the pricing model source.
 #[tauri::command]
 pub async fn set_pricing_model_source(
     state: tauri::State<'_, AppState>,
@@ -281,19 +282,19 @@ pub async fn set_pricing_model_source(
         .map_err(|e| e.to_string())
 }
 
-/// 检查代理服务器是否正在运行
+/// Return whether the proxy server is running.
 #[tauri::command]
 pub async fn is_proxy_running(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     Ok(state.proxy_service.is_running().await)
 }
 
-/// 检查是否处于 Live 接管模式
+/// Return whether live takeover is active.
 #[tauri::command]
 pub async fn is_live_takeover_active(state: tauri::State<'_, AppState>) -> Result<bool, String> {
     state.proxy_service.is_takeover_active().await
 }
 
-/// 代理模式下切换供应商（热切换）
+/// Hot-switch providers in proxy mode.
 #[tauri::command]
 pub async fn switch_proxy_provider(
     state: tauri::State<'_, AppState>,
@@ -304,13 +305,10 @@ pub async fn switch_proxy_provider(
     let provider = state
         .db
         .get_provider_by_id(&provider_id, &app_type)
-        .map_err(|e| format!("读取供应商失败: {e}"))?
-        .ok_or_else(|| format!("供应商不存在: {provider_id}"))?;
+        .map_err(|e| format!("Failed to read provider: {e}"))?
+        .ok_or_else(|| format!("Provider not found: {provider_id}"))?;
     if provider.category.as_deref() == Some("official") {
-        return Err(
-            "代理接管模式下不能切换到官方供应商 (Cannot switch to official provider during proxy takeover)"
-                .to_string(),
-        );
+        return Err("Cannot switch to an official provider during proxy takeover".to_string());
     }
 
     state
@@ -319,9 +317,9 @@ pub async fn switch_proxy_provider(
         .await
 }
 
-// ==================== 故障转移相关命令 ====================
+// ==================== Failover Commands ====================
 
-/// 获取供应商健康状态
+/// Return provider health status.
 #[tauri::command]
 pub async fn get_provider_health(
     state: tauri::State<'_, AppState>,
@@ -334,11 +332,11 @@ pub async fn get_provider_health(
         .map_err(|e| e.to_string())
 }
 
-/// 重置熔断器
+/// Reset the circuit breaker.
 ///
-/// 重置后会检查是否应该切回队列中优先级更高的供应商：
-/// 1. 检查自动故障转移是否开启
-/// 2. 如果恢复的供应商在队列中优先级更高（queue_order 更小），则自动切换
+/// After reset, checks whether to return to a higher-priority provider:
+/// 1. Check whether automatic failover is enabled.
+/// 2. Switch when the recovered provider has a lower queue_order.
 #[tauri::command]
 pub async fn reset_circuit_breaker(
     app_handle: tauri::AppHandle,
@@ -346,20 +344,20 @@ pub async fn reset_circuit_breaker(
     provider_id: String,
     app_type: String,
 ) -> Result<(), String> {
-    // 1. 重置数据库健康状态
+    // 1. Reset health state in the database.
     let db = &state.db;
     db.update_provider_health(&provider_id, &app_type, true, None)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2. 如果代理正在运行，重置内存中的熔断器状态
+    // 2. Reset in-memory circuit breaker state when the proxy is running.
     state
         .proxy_service
         .reset_provider_circuit_breaker(&provider_id, &app_type)
         .await?;
 
-    // 3. 检查是否应该切回优先级更高的供应商（从 proxy_config 表读取）
-    // 只有当该应用已被代理接管（enabled=true）且开启了自动故障转移时才执行
+    // 3. Check proxy_config to determine whether to return to a higher-priority provider.
+    // Run only when takeover and automatic failover are enabled for the application.
     let (app_enabled, auto_failover_enabled) = match db.get_proxy_config_for_app(&app_type).await {
         Ok(config) => (config.enabled, config.auto_failover_enabled),
         Err(e) => {
@@ -369,18 +367,18 @@ pub async fn reset_circuit_breaker(
     };
 
     if app_enabled && auto_failover_enabled && state.proxy_service.is_running().await {
-        // 获取当前供应商 ID
+        // Get the current provider ID.
         let current_id = db
             .get_current_provider(&app_type)
             .map_err(|e| e.to_string())?;
 
         if let Some(current_id) = current_id {
-            // 获取故障转移队列
+            // Get the failover queue.
             let queue = db
                 .get_failover_queue(&app_type)
                 .map_err(|e| e.to_string())?;
 
-            // 找到恢复的供应商和当前供应商在队列中的位置（使用 sort_index）
+            // Find the restored and current providers by sort_index.
             let restored_order = queue
                 .iter()
                 .find(|item| item.provider_id == provider_id)
@@ -391,28 +389,28 @@ pub async fn reset_circuit_breaker(
                 .find(|item| item.provider_id == current_id)
                 .and_then(|item| item.sort_index);
 
-            // 如果恢复的供应商优先级更高（sort_index 更小），则切换
+            // Switch when the restored provider has a lower sort_index.
             if let (Some(restored), Some(current)) = (restored_order, current_order) {
                 if restored < current {
                     log::info!(
-                        "[Recovery] 供应商 {provider_id} 已恢复且优先级更高 (P{restored} vs P{current})，自动切换"
+                        "[Recovery] Provider {provider_id} recovered with higher priority (P{restored} vs P{current}); switching automatically"
                     );
 
-                    // 获取供应商名称用于日志和事件
+                    // Get the provider name for logs and events.
                     let provider_name = db
                         .get_all_providers(&app_type)
                         .ok()
                         .and_then(|providers| providers.get(&provider_id).map(|p| p.name.clone()))
                         .unwrap_or_else(|| provider_id.clone());
 
-                    // 创建故障转移切换管理器并执行切换
+                    // Create the failover switch manager and perform the switch.
                     let switch_manager =
                         crate::proxy::failover_switch::FailoverSwitchManager::new(db.clone());
                     if let Err(e) = switch_manager
                         .try_switch(Some(&app_handle), &app_type, &provider_id, &provider_name)
                         .await
                     {
-                        log::error!("[Recovery] 自动切换失败: {e}");
+                        log::error!("[Recovery] Automatic switch failed: {e}");
                     }
                 }
             }
@@ -422,7 +420,7 @@ pub async fn reset_circuit_breaker(
     Ok(())
 }
 
-/// 获取熔断器配置
+/// Return the circuit breaker configuration.
 #[tauri::command]
 pub async fn get_circuit_breaker_config(
     state: tauri::State<'_, AppState>,
@@ -433,7 +431,7 @@ pub async fn get_circuit_breaker_config(
         .map_err(|e| e.to_string())
 }
 
-/// 更新熔断器配置
+/// Update the circuit breaker configuration.
 #[tauri::command]
 pub async fn update_circuit_breaker_config(
     state: tauri::State<'_, AppState>,
@@ -441,12 +439,12 @@ pub async fn update_circuit_breaker_config(
 ) -> Result<(), String> {
     let db = &state.db;
 
-    // 1. 更新数据库配置
+    // 1. Update the database configuration.
     db.update_circuit_breaker_config(&config)
         .await
         .map_err(|e| e.to_string())?;
 
-    // 2. 如果代理正在运行，热更新内存中的熔断器配置
+    // 2. Hot-update the in-memory circuit breaker configuration.
     state
         .proxy_service
         .update_circuit_breaker_configs(config)
@@ -455,15 +453,15 @@ pub async fn update_circuit_breaker_config(
     Ok(())
 }
 
-/// 获取熔断器统计信息（仅当代理服务器运行时）
+/// Return circuit breaker statistics when the proxy server is running.
 #[tauri::command]
 pub async fn get_circuit_breaker_stats(
     state: tauri::State<'_, AppState>,
     provider_id: String,
     app_type: String,
 ) -> Result<Option<CircuitBreakerStats>, String> {
-    // 这个功能需要访问运行中的代理服务器的内存状态
-    // 目前先返回 None，后续可以通过 ProxyService 暴露接口来实现
+    // This requires access to the running proxy server's in-memory state.
+    // Return None until ProxyService exposes that state.
     let _ = (state, provider_id, app_type);
     Ok(None)
 }

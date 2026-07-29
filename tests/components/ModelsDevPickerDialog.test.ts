@@ -76,7 +76,7 @@ describe("formatPrice", () => {
   });
 
   it("never produces exponent notation", () => {
-    // 后端 Decimal::from_str 不接受科学计数法
+    // Backend Decimal::from_str does not accept exponent notation.
     expect(formatPrice(1e-8)).toBe("0");
     expect(formatPrice(1e21)).toBe("0");
     for (const value of [5, 0.5, 0.000123, 123456.789]) {
@@ -131,14 +131,14 @@ describe("flattenModels", () => {
     expect(newModel.cacheRead).toBe(0.3);
     expect(newModel.cacheWrite).toBe(3.75);
 
-    // 没有 name 的 provider 用 id 兜底；缺失的成本字段补 0
+    // Providers without names fall back to ID; missing cost fields default to zero.
     const bareModel = entries[1];
     expect(bareModel.providerName).toBe("bare");
     expect(bareModel.normalizedId).toBe("some-model");
     expect(bareModel.output).toBe(0);
     expect(bareModel.cacheRead).toBe(0);
 
-    // 完全没有定价的模型被过滤
+    // Models without any pricing are filtered out.
     expect(entries.some((e) => e.modelId === "free-model")).toBe(false);
   });
 });
