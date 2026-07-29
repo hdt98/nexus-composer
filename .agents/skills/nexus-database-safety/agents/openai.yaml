@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus Database Safety"
+  short_description: "Change storage and schemas with safe recovery"
+  default_prompt: "Use $nexus-database-safety to design or review a safe database or app-data change."

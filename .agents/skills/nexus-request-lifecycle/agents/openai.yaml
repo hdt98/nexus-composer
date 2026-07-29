@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus Request Lifecycle"
+  short_description: "Harden proxy streaming and terminal outcomes"
+  default_prompt: "Use $nexus-request-lifecycle to diagnose or change proxy request behavior safely."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus Localization"
+  short_description: "Maintain English and Vietnamese product language"
+  default_prompt: "Use $nexus-localization to update product language while preserving locale integrity."

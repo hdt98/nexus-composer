@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus Client Profile Safety"
+  short_description: "Protect client profiles during provider changes"
+  default_prompt: "Use $nexus-client-profile-safety to change provider activation without losing client state."

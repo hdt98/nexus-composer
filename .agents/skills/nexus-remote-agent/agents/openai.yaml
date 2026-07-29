@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus Remote Agent"
+  short_description: "Develop and recover SSH-managed remote agents"
+  default_prompt: "Use $nexus-remote-agent to implement or debug an SSH Remote Agent workflow."
