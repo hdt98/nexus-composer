@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus Provider Integration"
+  short_description: "Add and evolve providers across supported clients"
+  default_prompt: "Use $nexus-provider-integration to add or update a provider safely across supported clients."

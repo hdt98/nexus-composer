@@ -1,0 +1,4 @@
+interface:
+  display_name: "Nexus CI and Release"
+  short_description: "Validate changes and prepare reliable releases"
+  default_prompt: "Use $nexus-ci-release to validate a change and prepare its pull request or release."
