@@ -42,9 +42,6 @@ const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
 const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
-const AGENT_LOOP_COMPATIBILITY_INSTRUCTION: &str = "Chat Completions compatibility: a reply that contains only text and no tool call ends the turn and nothing executes. You MUST NOT send narration or progress updates as a standalone reply. Every reply MUST either call a tool, or be text-only only when the whole task is complete or you need user input.";
-const AGENT_LOOP_CONTINUATION_INSTRUCTION: &str = "Your previous reply contained only text and no tool call, so it executed nothing and ended the turn while tool results above show the task is unfinished. You MUST now reply with a tool call. Do not send a text-only reply unless the task is complete.";
-const AGENT_LOOP_TAIL_INSTRUCTION: &str = "Agent-loop control (not a new task): Continue the pending user task now. If the next step requires an available tool, call it in this same response. Do not reply with a promise, plan, or progress update such as \"let me check\" or \"I'll now\" without also making that tool call. Return text only when the pending task is complete or you need user input.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodexToolKind {
@@ -277,11 +274,7 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
 
     let mut messages = Vec::new();
     if let Some(instructions) = body.get("instructions") {
-        let mut instructions = instruction_text(instructions);
-        if !instructions.is_empty() && !tool_context.chat_tools().is_empty() {
-            instructions.push_str("\n\n");
-            instructions.push_str(AGENT_LOOP_COMPATIBILITY_INSTRUCTION);
-        }
+        let instructions = instruction_text(instructions);
         if !instructions.is_empty() {
             messages.push(json!({
                 "role": "system",
@@ -298,12 +291,14 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
             preserve_exact_history,
         )?;
     }
-    append_agent_loop_continuation_hint(&mut messages, &tool_context);
-    append_agent_loop_tail_instruction(&mut messages, &tool_context);
-    let messages = collapse_system_messages_to_head(messages);
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    let messages = if requires_single_leading_system_message(model) {
+        collapse_system_messages_to_head(messages)
+    } else {
+        messages
+    };
     result["messages"] = json!(messages);
 
-    let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(max_tokens) = body.get("max_output_tokens") {
         if super::transform::is_openai_o_series(model) {
             result["max_completion_tokens"] = max_tokens.clone();
@@ -508,10 +503,14 @@ fn map_reasoning_effort(effort: &str, mode: Option<&str>) -> Option<&'static str
     }
 }
 
+fn requires_single_leading_system_message(model: &str) -> bool {
+    model.to_ascii_lowercase().contains("minimax")
+}
+
 /// MiniMax 严格要求 messages 中只能首条出现 `role=system`，
 /// 否则返回 `invalid params, chat content has invalid message role: system (2013)`。
 /// 把所有 system 消息合并到首位，避免中间 system（如 Codex 的 `developer` 指令）触发该约束；
-/// 该重排对 OpenAI / DeepSeek 等宽松兼容层也是无损的。
+/// Runs only for MiniMax because mid-history developer/system placement is time-sensitive.
 fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     let mut system_chunks: Vec<String> = Vec::new();
     let mut rest: Vec<Value> = Vec::with_capacity(messages.len());
@@ -540,87 +539,104 @@ fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     out
 }
 
-/// A text-only assistant reply ends the Codex turn with nothing executed. When the
-/// transcript already contains tool results and the model's last message was such a
-/// reply, append a temporary system hint so the next turn continues with a tool call
-/// instead of idling. This runs on both history modes because the cutoff happens on
-/// either; the hint is recomputed per request and never persists into recorded history.
-fn append_agent_loop_continuation_hint(messages: &mut Vec<Value>, tool_context: &CodexToolContext) {
-    if tool_context.chat_tools().is_empty() {
-        return;
-    }
-    let has_tool_results = messages
-        .iter()
-        .any(|msg| msg.get("role").and_then(|v| v.as_str()) == Some("tool"));
-    let last_is_text_only_assistant = messages.last().is_some_and(|msg| {
-        msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
-            && msg
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .is_none_or(|calls| calls.is_empty())
-            && msg
-                .get("content")
-                .and_then(|v| v.as_str())
-                .is_some_and(|content| !content.trim().is_empty())
-    });
-    if has_tool_results && last_is_text_only_assistant {
-        log::warn!(
-            "[Codex] History-preserving transform saw a text-only trailing assistant reply mid-task; \
-             appending agent-loop continuation hint"
-        );
-        messages.push(json!({
-            "role": "system",
-            "content": AGENT_LOOP_CONTINUATION_INSTRUCTION
-        }));
-    }
+pub(crate) fn append_progress_continuation_request(
+    body: &Value,
+    progress: &str,
+) -> Result<Value, ProxyError> {
+    let mut continued = body.clone();
+    let mut input = match continued.get("input") {
+        Some(Value::Array(items)) => items.clone(),
+        Some(Value::String(text)) => vec![json!({
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": text}]
+        })],
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => {
+            return Err(ProxyError::TransformError(
+                "Responses input must be a string or array for continuation".to_string(),
+            ))
+        }
+    };
+    input.push(json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": progress}]
+    }));
+    input.push(json!({
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "Continue."}]
+    }));
+    continued["input"] = Value::Array(input);
+    Ok(continued)
 }
 
-/// Keep the agent-loop rule next to the latest task state. Long Chat histories can
-/// underweight the equivalent system instruction at the head, and a fresh user turn
-/// means the trailing-assistant continuation detector above cannot fire. This
-/// temporary reminder is added only to the upstream request and never recorded in
-/// Codex history.
-fn append_agent_loop_tail_instruction(messages: &mut Vec<Value>, tool_context: &CodexToolContext) {
-    if tool_context.chat_tools().is_empty() {
-        return;
-    }
-
-    let awaits_tool_result = messages.last().is_some_and(|message| {
-        message.get("role").and_then(Value::as_str) == Some("assistant")
-            && message
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .is_some_and(|calls| !calls.is_empty())
-    });
-    if awaits_tool_result {
-        return;
-    }
-
-    if let Some(last) = messages
-        .last_mut()
-        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-    {
-        match last.get_mut("content") {
-            Some(Value::String(content)) => {
-                content.push_str("\n\n");
-                content.push_str(AGENT_LOOP_TAIL_INSTRUCTION);
-                return;
-            }
-            Some(Value::Array(content)) => {
-                content.push(json!({
-                    "type": "text",
-                    "text": AGENT_LOOP_TAIL_INSTRUCTION
-                }));
-                return;
-            }
-            _ => {}
+pub(crate) fn merge_continuation_response(base: &mut Value, continuation: Value) {
+    if let Some(output) = continuation.get("output").and_then(Value::as_array) {
+        if !base.get("output").is_some_and(Value::is_array) {
+            base["output"] = json!([]);
+        }
+        if let Some(base_output) = base.get_mut("output").and_then(Value::as_array_mut) {
+            base_output.extend(output.iter().cloned());
         }
     }
 
-    messages.push(json!({
-        "role": "user",
-        "content": AGENT_LOOP_TAIL_INSTRUCTION
-    }));
+    for field in ["status", "model", "incomplete_details", "error"] {
+        if let Some(value) = continuation.get(field) {
+            base[field] = value.clone();
+        } else if matches!(field, "incomplete_details" | "error") {
+            if let Some(object) = base.as_object_mut() {
+                object.remove(field);
+            }
+        }
+    }
+
+    let continuation_usage = continuation.get("usage");
+    if let (Some(base_usage), Some(continuation_usage)) =
+        (base.get_mut("usage"), continuation_usage)
+    {
+        merge_responses_usage(base_usage, continuation_usage);
+    }
+}
+
+pub(crate) fn merge_responses_usage(base: &mut Value, continuation: &Value) {
+    for field in ["input_tokens", "output_tokens", "total_tokens"] {
+        let sum = base
+            .get(field)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(continuation.get(field).and_then(Value::as_u64).unwrap_or(0));
+        base[field] = json!(sum);
+    }
+    for (parent, field) in [
+        ("input_tokens_details", "cached_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+    ] {
+        let sum = base
+            .pointer(&format!("/{parent}/{field}"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(
+                continuation
+                    .pointer(&format!("/{parent}/{field}"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            );
+        if sum > 0 {
+            base[parent][field] = json!(sum);
+        }
+    }
+    for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
+        let sum = base
+            .get(field)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_add(continuation.get(field).and_then(Value::as_u64).unwrap_or(0));
+        if sum > 0 {
+            base[field] = json!(sum);
+        }
+    }
 }
 
 fn instruction_text(value: &Value) -> String {
@@ -1915,19 +1931,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_tool_requests_warn_chat_models_that_text_only_progress_ends_the_turn() {
+    fn codex_tool_requests_preserve_harness_instructions_and_user_text() {
         let result = responses_to_chat_completions(json!({
             "model": "kimi-k3",
             "instructions": "Keep working until the task is complete.",
             "input": [{
-                "type": "custom_tool_call",
-                "call_id": "exec:0",
-                "name": "exec",
-                "input": "inspect"
-            }, {
-                "type": "custom_tool_call_output",
-                "call_id": "exec:0",
-                "output": "result"
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the repository."}]
             }],
             "tools": [{
                 "type": "custom",
@@ -1937,20 +1948,20 @@ mod tests {
         }))
         .unwrap();
 
-        let instructions = result["messages"][0]["content"].as_str().unwrap();
-        assert!(
-            instructions.contains("a reply that contains only text and no tool call ends the turn"),
-            "{instructions}"
+        let messages = result["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[0]["content"],
+            "Keep working until the task is complete."
         );
-        assert!(
-            instructions
-                .contains("MUST NOT send narration or progress updates as a standalone reply"),
-            "{instructions}"
-        );
+        assert_eq!(messages[1]["content"], "Inspect the repository.");
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("Agent-loop control"));
+        assert!(!serialized.contains("MUST NOT send narration"));
+        assert!(!serialized.contains("executed nothing and ended the turn"));
     }
 
     #[test]
-    fn tool_enabled_current_user_turn_gets_tail_loop_control() {
+    fn text_only_history_is_not_rewritten_with_loop_control() {
         let input = || {
             json!({
                 "model": "kimi-k3",
@@ -1980,162 +1991,112 @@ mod tests {
                 responses_to_chat_completions_with_reasoning_history(input(), None, preserve)
                     .unwrap();
             let last = result["messages"].as_array().unwrap().last().unwrap();
-            let content = last["content"].as_str().unwrap();
 
             assert_eq!(last["role"], "user");
-            assert!(content.starts_with("Will the other sessions hit it too?"));
-            assert!(
-                content.contains("Continue the pending user task now"),
-                "tool-enabled turns need a tail instruction in both history modes: {result}"
-            );
+            assert_eq!(last["content"], "Will the other sessions hit it too?");
+            let serialized = serde_json::to_string(&result).unwrap();
+            assert!(!serialized.contains("MUST now reply with a tool call"));
+            assert!(!serialized.contains("Agent-loop control"));
         }
     }
 
     #[test]
-    fn tail_loop_control_requires_tools_and_a_model_action() {
-        let no_tools = responses_to_chat_completions(json!({
+    fn continuation_request_preserves_progress_and_uses_neutral_resume_turn() {
+        let original = json!({
             "model": "kimi-k3",
             "input": [{
-                "type": "message", "role": "user",
-                "content": [{"type": "input_text", "text": "Answer directly."}]
-            }]
-        }))
-        .unwrap();
-        assert_eq!(no_tools["messages"][0]["content"], "Answer directly.");
-
-        let awaiting_result = responses_to_chat_completions(json!({
-            "model": "kimi-k3",
-            "input": [{
-                "type": "function_call", "call_id": "call_1",
-                "name": "exec", "arguments": "{}"
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Inspect the repository."}]
             }],
             "tools": [{
-                "type": "function", "name": "exec",
-                "description": "Run a command",
+                "type": "function",
+                "name": "exec",
                 "parameters": {"type": "object", "properties": {}}
-            }]
-        }))
+            }],
+            "stream": true
+        });
+
+        let continued = append_progress_continuation_request(
+            &original,
+            "Checking the provider configuration now.",
+        )
         .unwrap();
-        let last = awaiting_result["messages"]
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap();
-        assert_eq!(last["role"], "assistant");
-        assert_eq!(last["tool_calls"][0]["function"]["name"], "exec");
+        let input = continued["input"].as_array().unwrap();
+
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0], original["input"][0]);
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(
+            input[1]["content"][0]["text"],
+            "Checking the provider configuration now."
+        );
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"][0]["text"], "Continue.");
+        let serialized = serde_json::to_string(&continued).unwrap();
+        assert!(!serialized.contains("MUST"));
+        assert!(!serialized.contains("Do not send narration"));
     }
 
     #[test]
-    fn text_only_trailing_reply_mid_task_triggers_continuation_hint() {
-        let input = || {
-            json!({
-                "model": "kimi-k3",
-                "instructions": "Keep working until the task is complete.",
-                "input": [{
-                    "type": "function_call", "call_id": "call_1",
-                    "name": "exec", "arguments": "{}"
-                }, {
-                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
-                }, {
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Now the mandatory preflight."}]
-                }],
-                "tools": [{
-                    "type": "function", "name": "exec",
-                    "description": "Run a command",
-                    "parameters": {"type": "object", "properties": {}}
-                }]
-            })
-        };
-        let hint = "so it executed nothing and ended the turn";
+    fn continuation_response_preserves_commentary_and_accumulates_usage() {
+        let mut first = json!({
+            "id": "resp_first",
+            "status": "completed",
+            "model": "kimi-k3",
+            "output": [{
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Checking the provider now."}]
+            }],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "input_tokens_details": {"cached_tokens": 3},
+                "cache_read_input_tokens": 3
+            }
+        });
+        let second = json!({
+            "id": "resp_second",
+            "status": "completed",
+            "model": "kimi-k3",
+            "output": [{
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "exec",
+                "arguments": "{}"
+            }],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 3,
+                "total_tokens": 15,
+                "input_tokens_details": {"cached_tokens": 4},
+                "output_tokens_details": {"reasoning_tokens": 1},
+                "cache_read_input_tokens": 4,
+                "cache_creation_input_tokens": 2
+            }
+        });
 
-        let preserved =
-            responses_to_chat_completions_with_reasoning_history(input(), None, true).unwrap();
+        merge_continuation_response(&mut first, second);
+
+        assert_eq!(first["id"], "resp_first");
+        assert_eq!(first["output"].as_array().unwrap().len(), 2);
         assert_eq!(
-            preserved["messages"][0]["content"]
-                .as_str()
-                .unwrap()
-                .matches(hint)
-                .count(),
+            first["output"][0]["content"][0]["text"],
+            "Checking the provider now."
+        );
+        assert_eq!(first["output"][1]["name"], "exec");
+        assert_eq!(first["usage"]["input_tokens"], 22);
+        assert_eq!(first["usage"]["output_tokens"], 5);
+        assert_eq!(first["usage"]["total_tokens"], 27);
+        assert_eq!(first["usage"]["input_tokens_details"]["cached_tokens"], 7);
+        assert_eq!(
+            first["usage"]["output_tokens_details"]["reasoning_tokens"],
             1
         );
-        assert_eq!(
-            preserved["messages"][2]["role"], "tool",
-            "tool history must stay ordered after the collapsed head system message"
-        );
-
-        let baseline = responses_to_chat_completions(input()).unwrap();
-        assert_eq!(
-            baseline["messages"][0]["content"]
-                .as_str()
-                .unwrap()
-                .matches(hint)
-                .count(),
-            1,
-            "non-history-preserving path must also gain the hint"
-        );
-    }
-
-    #[test]
-    fn no_continuation_hint_when_meanwhile_work_is_settled() {
-        let cases = [
-            // Trailing tool call: the model is mid-work correctly.
-            json!({
-                "input": [{
-                    "type": "function_call", "call_id": "call_1",
-                    "name": "exec", "arguments": "{}"
-                }, {
-                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
-                }, {
-                    "type": "function_call", "call_id": "call_2",
-                    "name": "exec", "arguments": "{}"
-                }],
-                "tools": [{"type": "function", "name": "exec", "description": "Run",
-                    "parameters": {"type": "object", "properties": {}}}]
-            }),
-            // No tool results yet: a text-only opening reply is not a mid-task cutoff.
-            json!({
-                "input": [{
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": "I will start now."}]
-                }],
-                "tools": [{"type": "function", "name": "exec", "description": "Run",
-                    "parameters": {"type": "object", "properties": {}}}]
-            }),
-            // Tool results exist but no tools are offered this request: nothing to call.
-            json!({
-                "input": [{
-                    "type": "function_call", "call_id": "call_1",
-                    "name": "exec", "arguments": "{}"
-                }, {
-                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
-                }, {
-                    "type": "message", "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Done."}]
-                }]
-            }),
-        ];
-        let hint = "so it executed nothing and ended the turn";
-
-        for input in cases {
-            for preserve in [true, false] {
-                let result = responses_to_chat_completions_with_reasoning_history(
-                    input.clone(),
-                    None,
-                    preserve,
-                )
-                .unwrap();
-                let leaked = result["messages"].as_array().unwrap().iter().any(|msg| {
-                    msg.get("content")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|content| content.contains(hint))
-                });
-                assert!(
-                    !leaked,
-                    "hint must not appear (preserve={preserve}): {result}"
-                );
-            }
-        }
+        assert_eq!(first["usage"]["cache_read_input_tokens"], 7);
+        assert_eq!(first["usage"]["cache_creation_input_tokens"], 2);
     }
 
     #[test]
@@ -2816,6 +2777,35 @@ mod tests {
         assert!(head_content.contains("You are Codex."));
         assert!(head_content.contains("Permissions block"));
         assert!(head_content.contains("Collaboration Mode: Default"));
+    }
+
+    #[test]
+    fn responses_request_to_chat_preserves_mid_stream_system_order_for_kimi() {
+        let input = json!({
+            "model": "kimi-k3",
+            "instructions": "You are Codex.",
+            "input": [
+                {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "First task state."}]},
+                {"type": "message", "role": "developer",
+                    "content": [{"type": "input_text", "text": "New collaboration mode."}]},
+                {"type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "Continue."}]}
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are Codex.");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "First task state.");
+        assert_eq!(messages[2]["role"], "system");
+        assert_eq!(messages[2]["content"], "New collaboration mode.");
+        assert_eq!(messages[3]["role"], "user");
+        assert_eq!(messages[3]["content"], "Continue.");
     }
 
     #[test]

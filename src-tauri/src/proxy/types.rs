@@ -197,34 +197,34 @@ pub struct AppProxyConfig {
 /// 整流器配置
 ///
 /// 存储在 settings 表中
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RectifierConfig {
-    /// 总开关：是否启用整流器（默认开启）
-    #[serde(default = "default_true")]
+    /// Master rectifier switch. Disabled until the user explicitly enables it.
+    #[serde(default)]
     pub enabled: bool,
-    /// 请求整流：启用 thinking 签名整流器（默认开启）
+    /// Enables thinking-signature request repair. Disabled by default.
     ///
     /// 处理错误：Invalid 'signature' in 'thinking' block
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub request_thinking_signature: bool,
-    /// 请求整流：启用 thinking budget 整流器（默认开启）
+    /// Enables thinking-budget request repair. Disabled by default.
     ///
     /// 处理错误：budget_tokens + thinking 相关约束
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub request_thinking_budget: bool,
-    /// 请求整流：不支持的图片降级（默认开启）
+    /// Enables unsupported-image fallback. Disabled by default.
     ///
     /// 上游拒绝图片输入时，把图片块替换为 [Unsupported Image] 标记，
     /// 让对话不中断。总开关，管辖「显式声明 text-only」与「上游报错后兜底」两条事实驱动路径。
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub request_media_fallback: bool,
-    /// 请求整流：启发式 text-only 模型名匹配（默认开启）
+    /// Enables heuristic text-only model matching. Disabled by default.
     ///
     /// 在模型未声明能力时，按内置模型名列表预测性地剥离图片（发送前）。
     /// 受 request_media_fallback 管辖；单独关闭后仅保留「显式声明」与「上游兜底」，
     /// 避免内置列表把多模态模型误判成 text-only 而静默剥图。
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub request_media_heuristic: bool,
 }
 
@@ -234,18 +234,6 @@ fn default_true() -> bool {
 
 fn default_log_level() -> String {
     "info".to_string()
-}
-
-impl Default for RectifierConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            request_thinking_signature: true,
-            request_thinking_budget: true,
-            request_media_fallback: true,
-            request_media_heuristic: true,
-        }
-    }
 }
 
 /// 请求优化器配置
@@ -291,14 +279,14 @@ impl Default for OptimizerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CopilotOptimizerConfig {
-    /// 总开关（默认开启 — 对 Copilot 用户至关重要）
-    #[serde(default = "default_true")]
+    /// Master switch. Disabled until the user explicitly enables request rewriting.
+    #[serde(default)]
     pub enabled: bool,
     /// x-initiator 请求分类（默认开启，P0 优先级）
     #[serde(default = "default_true")]
     pub request_classification: bool,
-    /// Tool result 消息合并（默认开启，P1 优先级）
-    #[serde(default = "default_true")]
+    /// Merges tool-result messages. Disabled by default because it changes content.
+    #[serde(default)]
     pub tool_result_merging: bool,
     /// Compact 请求识别（默认开启，P2 优先级）
     #[serde(default = "default_true")]
@@ -310,8 +298,8 @@ pub struct CopilotOptimizerConfig {
     /// 设置 x-initiator=agent + x-interaction-type=conversation-subagent，避免子代理计费
     #[serde(default = "default_true")]
     pub subagent_detection: bool,
-    /// Warmup 小模型降级（默认开启 — 与参考实现对齐，避免探针请求消耗 premium quota）
-    #[serde(default = "default_true")]
+    /// Downgrades warmup requests. Disabled by default because it changes model selection.
+    #[serde(default)]
     pub warmup_downgrade: bool,
     /// Warmup 降级使用的模型（默认 "gpt-5-mini"）
     #[serde(default = "default_warmup_model")]
@@ -320,7 +308,7 @@ pub struct CopilotOptimizerConfig {
     ///
     /// Copilot 走 OpenAI 兼容端点，thinking block 会被上游拒绝并触发 rectifier 反应式
     /// 重试，那时第一次请求已经消耗了一次 premium quota。主动剥离避免这次浪费。
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub strip_thinking: bool,
 }
 
@@ -331,15 +319,15 @@ fn default_warmup_model() -> String {
 impl Default for CopilotOptimizerConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             request_classification: true,
-            tool_result_merging: true,
+            tool_result_merging: false,
             compact_detection: true,
             deterministic_request_id: true,
             subagent_detection: true,
-            warmup_downgrade: true,
+            warmup_downgrade: false,
             warmup_model: "gpt-5-mini".to_string(),
-            strip_thinking: true,
+            strip_thinking: false,
         }
     }
 }
@@ -389,44 +377,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_rectifier_config_default_enabled() {
-        // 验证 RectifierConfig::default() 返回全开启状态
+    fn test_rectifier_config_defaults_to_explicit_opt_in() {
         let config = RectifierConfig::default();
-        assert!(config.enabled, "整流器总开关默认应为 true");
-        assert!(
-            config.request_thinking_signature,
-            "thinking 签名整流器默认应为 true"
-        );
-        assert!(
-            config.request_thinking_budget,
-            "thinking budget 整流器默认应为 true"
-        );
-        assert!(
-            config.request_media_fallback,
-            "media 降级总开关默认应为 true"
-        );
-        assert!(
-            config.request_media_heuristic,
-            "启发式 text-only 模型识别默认应为 true"
-        );
+        assert!(!config.enabled);
+        assert!(!config.request_thinking_signature);
+        assert!(!config.request_thinking_budget);
+        assert!(!config.request_media_fallback);
+        assert!(!config.request_media_heuristic);
     }
 
     #[test]
     fn test_rectifier_config_serde_default() {
-        // 验证反序列化缺字段时使用默认值 true
         let json = "{}";
         let config: RectifierConfig = serde_json::from_str(json).unwrap();
-        assert!(config.enabled);
-        assert!(config.request_thinking_signature);
-        assert!(config.request_thinking_budget);
-        assert!(
-            config.request_media_fallback,
-            "缺 requestMediaFallback 时应回退默认值 true"
-        );
-        assert!(
-            config.request_media_heuristic,
-            "缺 requestMediaHeuristic 时应回退默认值 true"
-        );
+        assert!(!config.enabled);
+        assert!(!config.request_thinking_signature);
+        assert!(!config.request_thinking_budget);
+        assert!(!config.request_media_fallback);
+        assert!(!config.request_media_heuristic);
     }
 
     #[test]
@@ -442,12 +410,11 @@ mod tests {
 
     #[test]
     fn test_rectifier_config_serde_partial_fields() {
-        // 验证只设置部分字段时，缺失字段使用默认值 true
         let json = r#"{"enabled": true, "requestThinkingSignature": false}"#;
         let config: RectifierConfig = serde_json::from_str(json).unwrap();
         assert!(config.enabled);
         assert!(!config.request_thinking_signature);
-        assert!(config.request_thinking_budget);
+        assert!(!config.request_thinking_budget);
     }
 
     #[test]
@@ -457,10 +424,22 @@ mod tests {
         let config: RectifierConfig = serde_json::from_str(json).unwrap();
         assert!(!config.request_media_fallback);
         assert!(!config.request_media_heuristic);
-        // 其余字段仍走默认 true
-        assert!(config.enabled);
-        assert!(config.request_thinking_signature);
-        assert!(config.request_thinking_budget);
+        assert!(!config.enabled);
+        assert!(!config.request_thinking_signature);
+        assert!(!config.request_thinking_budget);
+    }
+
+    #[test]
+    fn test_copilot_optimizer_defaults_do_not_rewrite_requests() {
+        let config = CopilotOptimizerConfig::default();
+        assert!(!config.enabled);
+        assert!(config.request_classification);
+        assert!(!config.tool_result_merging);
+        assert!(config.compact_detection);
+        assert!(config.deterministic_request_id);
+        assert!(config.subagent_detection);
+        assert!(!config.warmup_downgrade);
+        assert!(!config.strip_thinking);
     }
 
     #[test]

@@ -1117,6 +1117,35 @@ impl RequestForwarder {
     ///
     /// 成功时返回 `(response, claude_api_format, outbound_model)`，其中
     /// `outbound_model` 是最终发往上游的模型名（所有映射/改写之后）。
+    pub(crate) async fn forward_codex_chat_continuation(
+        &self,
+        method: &http::Method,
+        provider: &Provider,
+        endpoint: &str,
+        body: &Value,
+        headers: &axum::http::HeaderMap,
+        extensions: &Extensions,
+    ) -> Result<ProxyResponse, ProxyError> {
+        if !super::providers::should_convert_codex_responses_to_chat(provider, endpoint) {
+            return Err(ProxyError::InvalidRequest(
+                "Agent-loop continuation requires a Codex Responses-to-Chat provider".to_string(),
+            ));
+        }
+        let adapter = get_adapter(&AppType::Codex);
+        self.forward(
+            &AppType::Codex,
+            method,
+            provider,
+            endpoint,
+            body,
+            headers,
+            extensions,
+            adapter.as_ref(),
+        )
+        .await
+        .map(|(response, _, _)| response)
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn forward(
         &self,
@@ -2139,7 +2168,8 @@ impl RequestForwarder {
         "openai_chat".to_string()
     }
 
-    /// 用 Copilot live `/models` 列表确认 model ID 真实可用，找不到时按 family 降级。
+    /// Confirms a syntax-normalized model ID against Copilot's live `/models` list.
+    /// If the exact model is unavailable, preserves the request instead of substituting.
     /// 命中缓存后是同步的；首次请求或 5 min 缓存过期后会触发一次 HTTP。
     async fn apply_copilot_live_model_resolution(
         &self,
@@ -4048,6 +4078,15 @@ mod tests {
         fwd
     }
 
+    fn enabled_media_rectifier() -> RectifierConfig {
+        RectifierConfig {
+            enabled: true,
+            request_media_fallback: true,
+            request_media_heuristic: true,
+            ..RectifierConfig::default()
+        }
+    }
+
     fn provider_with_settings(settings_config: Value) -> Provider {
         let mut p = test_provider_with_type(Some("anthropic"));
         p.settings_config = settings_config;
@@ -4088,13 +4127,16 @@ mod tests {
     }
     #[test]
     fn prevention_replaces_when_all_switches_on_and_model_in_heuristic_list() {
-        let fwd = forwarder_with_rectifier(RectifierConfig::default());
+        let fwd = forwarder_with_rectifier(enabled_media_rectifier());
         let provider = provider_with_settings(json!({}));
         let mut body = body_with_image("deepseek-v4-pro");
 
         let replaced = fwd.apply_media_prevention(&mut body, &provider);
 
-        assert_eq!(replaced, 1, "默认全开 + 名单内模型应预替换");
+        assert_eq!(
+            replaced, 1,
+            "explicitly enabling all media rectifiers should replace a listed model's image"
+        );
         assert_eq!(body["messages"][0]["content"][0]["type"], "text");
     }
 
@@ -4103,7 +4145,7 @@ mod tests {
         // 关闭 request_media_fallback：即使名单命中也不预替换。
         let fwd = forwarder_with_rectifier(RectifierConfig {
             request_media_fallback: false,
-            ..RectifierConfig::default()
+            ..enabled_media_rectifier()
         });
         let provider = provider_with_settings(json!({}));
         let mut body = body_with_image("deepseek-v4-pro");
@@ -4132,7 +4174,7 @@ mod tests {
         // 关闭 request_media_heuristic：名单预测失效，但显式声明 text-only 仍预替换。
         let fwd = forwarder_with_rectifier(RectifierConfig {
             request_media_heuristic: false,
-            ..RectifierConfig::default()
+            ..enabled_media_rectifier()
         });
 
         // (a) 名单内模型、无显式声明 → 不再预替换
@@ -4160,14 +4202,14 @@ mod tests {
 
     #[test]
     fn reactive_triggers_when_all_switches_on() {
-        let fwd = forwarder_with_rectifier(RectifierConfig::default());
+        let fwd = forwarder_with_rectifier(enabled_media_rectifier());
         let body = body_with_image("any-model");
         assert!(fwd.media_retry_should_trigger("Claude", false, &body, &image_unsupported_error()));
     }
 
     #[test]
     fn reactive_triggers_for_codex_image_url_deserialize_errors() {
-        let fwd = forwarder_with_rectifier(RectifierConfig::default());
+        let fwd = forwarder_with_rectifier(enabled_media_rectifier());
         let body = body_with_codex_input_image("deepseek-v4-flash");
         let error = ProxyError::UpstreamError {
             status: 400,
@@ -4185,7 +4227,7 @@ mod tests {
         // 关闭 request_media_fallback：上游报图片错误也不触发兜底重试。
         let fwd = forwarder_with_rectifier(RectifierConfig {
             request_media_fallback: false,
-            ..RectifierConfig::default()
+            ..enabled_media_rectifier()
         });
         let body = body_with_image("any-model");
         assert!(!fwd.media_retry_should_trigger(
@@ -4216,7 +4258,7 @@ mod tests {
         // 关闭 request_media_heuristic 不影响反应式兜底——它是上游实测错误后的恢复，不是预测。
         let fwd = forwarder_with_rectifier(RectifierConfig {
             request_media_heuristic: false,
-            ..RectifierConfig::default()
+            ..enabled_media_rectifier()
         });
         let body = body_with_image("any-model");
         assert!(fwd.media_retry_should_trigger("Claude", false, &body, &image_unsupported_error()));

@@ -6,14 +6,8 @@
 use super::types::RectifierConfig;
 use serde_json::Value;
 
-/// 最大 thinking budget tokens
-const MAX_THINKING_BUDGET: u64 = 32000;
-
-/// 最大 max_tokens 值
-const MAX_TOKENS_VALUE: u64 = 64000;
-
-/// max_tokens 必须大于 budget_tokens
-const MIN_MAX_TOKENS_FOR_BUDGET: u64 = MAX_THINKING_BUDGET + 1;
+/// Minimum budget required by the upstream error this rectifier handles.
+const MIN_THINKING_BUDGET: u64 = 1024;
 
 /// Budget 整流结果
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -75,24 +69,18 @@ pub fn should_rectify_thinking_budget(
 /// 对请求体执行 budget 整流
 ///
 /// 整流动作：
-/// - `thinking.type = "enabled"`
-/// - `thinking.budget_tokens = 32000`
-/// - 如果 `max_tokens < 32001`，设为 `64000`
+/// - Raises an undersized budget to 1024 only when the request already enabled thinking.
+/// - Raises max_tokens only enough to exceed the effective budget.
 pub fn rectify_thinking_budget(body: &mut Value) -> BudgetRectifyResult {
     let before = snapshot_budget(body);
 
-    // 与 CCH 对齐：adaptive 请求不改写
-    if before.thinking_type.as_deref() == Some("adaptive") {
+    if before.thinking_type.as_deref() != Some("enabled") || before.thinking_budget_tokens.is_none()
+    {
         return BudgetRectifyResult {
             applied: false,
             before: before.clone(),
             after: before,
         };
-    }
-
-    // 与 CCH 对齐：缺少/非法 thinking 时自动创建后再整流
-    if !body.get("thinking").is_some_and(Value::is_object) {
-        body["thinking"] = Value::Object(serde_json::Map::new());
     }
 
     let Some(thinking) = body.get_mut("thinking").and_then(|t| t.as_object_mut()) else {
@@ -103,14 +91,22 @@ pub fn rectify_thinking_budget(body: &mut Value) -> BudgetRectifyResult {
         };
     };
 
-    thinking.insert("type".to_string(), Value::String("enabled".to_string()));
-    thinking.insert(
-        "budget_tokens".to_string(),
-        Value::Number(MAX_THINKING_BUDGET.into()),
-    );
+    let effective_budget = before
+        .thinking_budget_tokens
+        .unwrap_or(MIN_THINKING_BUDGET)
+        .max(MIN_THINKING_BUDGET);
 
-    if before.max_tokens.is_none() || before.max_tokens < Some(MIN_MAX_TOKENS_FOR_BUDGET) {
-        body["max_tokens"] = Value::Number(MAX_TOKENS_VALUE.into());
+    if before.thinking_budget_tokens < Some(effective_budget) {
+        thinking.insert(
+            "budget_tokens".to_string(),
+            Value::Number(effective_budget.into()),
+        );
+    }
+
+    if let Some(minimum_max_tokens) = effective_budget.checked_add(1) {
+        if before.max_tokens < Some(minimum_max_tokens) {
+            body["max_tokens"] = Value::Number(minimum_max_tokens.into());
+        }
     }
 
     let after = snapshot_budget(body);
@@ -248,15 +244,12 @@ mod tests {
         assert_eq!(result.before.thinking_type.as_deref(), Some("enabled"));
         assert_eq!(result.after.thinking_type.as_deref(), Some("enabled"));
         assert_eq!(result.before.thinking_budget_tokens, Some(512));
-        assert_eq!(
-            result.after.thinking_budget_tokens,
-            Some(MAX_THINKING_BUDGET)
-        );
+        assert_eq!(result.after.thinking_budget_tokens, Some(1024));
         assert_eq!(result.before.max_tokens, Some(1024));
-        assert_eq!(result.after.max_tokens, Some(MAX_TOKENS_VALUE));
+        assert_eq!(result.after.max_tokens, Some(1025));
         assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], MAX_THINKING_BUDGET);
-        assert_eq!(body["max_tokens"], MAX_TOKENS_VALUE);
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        assert_eq!(body["max_tokens"], 1025);
     }
 
     #[test]
@@ -293,7 +286,24 @@ mod tests {
     }
 
     #[test]
-    fn test_rectify_budget_creates_thinking_object_when_missing() {
+    fn test_rectify_budget_respects_existing_large_budget() {
+        let mut body = json!({
+            "model": "claude-test",
+            "thinking": { "type": "enabled", "budget_tokens": 32000 },
+            "max_tokens": 1024
+        });
+
+        let result = rectify_thinking_budget(&mut body);
+
+        assert!(result.applied);
+        assert_eq!(result.after.thinking_budget_tokens, Some(32000));
+        assert_eq!(result.after.max_tokens, Some(32001));
+        assert_eq!(body["thinking"]["budget_tokens"], 32000);
+        assert_eq!(body["max_tokens"], 32001);
+    }
+
+    #[test]
+    fn test_rectify_budget_does_not_enable_thinking_when_missing() {
         let mut body = json!({
             "model": "claude-test",
             "max_tokens": 1024
@@ -301,17 +311,10 @@ mod tests {
 
         let result = rectify_thinking_budget(&mut body);
 
-        assert!(result.applied);
-        assert_eq!(result.before.thinking_type, None);
-        assert_eq!(result.after.thinking_type.as_deref(), Some("enabled"));
-        assert_eq!(
-            result.after.thinking_budget_tokens,
-            Some(MAX_THINKING_BUDGET)
-        );
-        assert_eq!(result.after.max_tokens, Some(MAX_TOKENS_VALUE));
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], MAX_THINKING_BUDGET);
-        assert_eq!(body["max_tokens"], MAX_TOKENS_VALUE);
+        assert!(!result.applied);
+        assert_eq!(result.before, result.after);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 1024);
     }
 
     #[test]
@@ -325,12 +328,13 @@ mod tests {
 
         assert!(result.applied);
         assert_eq!(result.before.max_tokens, None);
-        assert_eq!(result.after.max_tokens, Some(MAX_TOKENS_VALUE));
-        assert_eq!(body["max_tokens"], MAX_TOKENS_VALUE);
+        assert_eq!(result.after.max_tokens, Some(1025));
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        assert_eq!(body["max_tokens"], 1025);
     }
 
     #[test]
-    fn test_rectify_budget_normalizes_non_enabled_type() {
+    fn test_rectify_budget_does_not_enable_disabled_thinking() {
         let mut body = json!({
             "model": "claude-test",
             "thinking": { "type": "disabled", "budget_tokens": 512 },
@@ -339,12 +343,11 @@ mod tests {
 
         let result = rectify_thinking_budget(&mut body);
 
-        assert!(result.applied);
-        assert_eq!(result.before.thinking_type.as_deref(), Some("disabled"));
-        assert_eq!(result.after.thinking_type.as_deref(), Some("enabled"));
-        assert_eq!(body["thinking"]["type"], "enabled");
-        assert_eq!(body["thinking"]["budget_tokens"], MAX_THINKING_BUDGET);
-        assert_eq!(body["max_tokens"], MAX_TOKENS_VALUE);
+        assert!(!result.applied);
+        assert_eq!(result.before, result.after);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 512);
+        assert_eq!(body["max_tokens"], 1024);
     }
 
     #[test]

@@ -12,11 +12,11 @@ import {
 export function RectifierConfigPanel() {
   const { t } = useTranslation();
   const [config, setConfig] = useState<RectifierConfig>({
-    enabled: true,
-    requestThinkingSignature: true,
-    requestThinkingBudget: true,
-    requestMediaFallback: true,
-    requestMediaHeuristic: true,
+    enabled: false,
+    requestThinkingSignature: false,
+    requestThinkingBudget: false,
+    requestMediaFallback: false,
+    requestMediaHeuristic: false,
   });
   const [optimizerConfig, setOptimizerConfig] = useState<OptimizerConfig>({
     enabled: false,

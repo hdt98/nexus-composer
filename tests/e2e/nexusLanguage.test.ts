@@ -185,6 +185,21 @@ describe("Nexus Composer language system", () => {
     });
   });
 
+  it("describes rectifier repairs without promising silent behavior changes", () => {
+    const en = JSON.parse(readFileSync("src/i18n/locales/en.json", "utf-8"));
+    const vi = JSON.parse(readFileSync("src/i18n/locales/vi.json", "utf-8"));
+
+    for (const catalog of [en, vi]) {
+      const rectifier = catalog.settings.advanced.rectifier;
+      expect(rectifier.thinkingBudgetDescription).toContain("1024");
+      expect(rectifier.thinkingBudgetDescription).not.toContain("32000");
+      expect(rectifier.thinkingBudgetDescription).not.toContain("64000");
+      expect(rectifier.thinkingSignatureDescription).not.toContain(
+        "illegal request errors",
+      );
+    }
+  });
+
   it("en.json does not have Chinese or Japanese options", () => {
     const en = JSON.parse(readFileSync("src/i18n/locales/en.json", "utf-8"));
     expect(en.settings.languageOptionChinese).toBeUndefined();

@@ -51,6 +51,12 @@ pub fn should_rectify_thinking_signature(
     {
         return true;
     }
+    if lower.contains("thinking")
+        && lower.contains("signature")
+        && (lower.contains("不合法") || lower.contains("无效"))
+    {
+        return true;
+    }
 
     // 场景1b: Gemini/第三方渠道返回 "Thought signature is not valid"
     // 错误示例: "Unable to submit request because Thought signature is not valid"
@@ -97,14 +103,6 @@ pub fn should_rectify_thinking_signature(
         return true;
     }
 
-    // 场景7: 非法请求（与 CCH 对齐，按 invalid request 统一兜底）
-    if lower.contains("非法请求")
-        || lower.contains("illegal request")
-        || lower.contains("invalid request")
-    {
-        return true;
-    }
-
     false
 }
 
@@ -112,7 +110,6 @@ pub fn should_rectify_thinking_signature(
 ///
 /// - 移除 messages[*].content 中的 thinking/redacted_thinking block
 /// - 移除非 thinking block 上遗留的 signature 字段
-/// - 特定条件下删除顶层 thinking 字段
 ///
 /// 注意：该函数会原地修改 body 对象
 pub fn rectify_anthropic_request(body: &mut Value) -> RectifyResult {
@@ -171,69 +168,7 @@ pub fn rectify_anthropic_request(body: &mut Value) -> RectifyResult {
         }
     }
 
-    // 兜底处理：thinking 启用 + 工具调用链路中最后一条 assistant 消息未以 thinking 开头
-    let messages_snapshot: Vec<Value> = body
-        .get("messages")
-        .and_then(|m| m.as_array())
-        .map(|a| a.to_vec())
-        .unwrap_or_default();
-
-    if should_remove_top_level_thinking(body, &messages_snapshot) {
-        if let Some(obj) = body.as_object_mut() {
-            obj.remove("thinking");
-            result.applied = true;
-        }
-    }
-
     result
-}
-
-/// 判断是否需要删除顶层 thinking 字段
-fn should_remove_top_level_thinking(body: &Value, messages: &[Value]) -> bool {
-    // 检查 thinking 是否启用
-    let thinking_type = body
-        .get("thinking")
-        .and_then(|t| t.get("type"))
-        .and_then(|t| t.as_str());
-
-    // 与 CCH 对齐：仅 type=enabled 视为开启
-    let thinking_enabled = thinking_type == Some("enabled");
-
-    if !thinking_enabled {
-        return false;
-    }
-
-    // 找到最后一条 assistant 消息
-    let last_assistant = messages
-        .iter()
-        .rev()
-        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("assistant"));
-
-    let last_assistant_content = match last_assistant
-        .and_then(|m| m.get("content"))
-        .and_then(|c| c.as_array())
-    {
-        Some(c) if !c.is_empty() => c,
-        _ => return false,
-    };
-
-    // 检查首块是否为 thinking/redacted_thinking
-    let first_block_type = last_assistant_content
-        .first()
-        .and_then(|b| b.get("type"))
-        .and_then(|t| t.as_str());
-
-    let missing_thinking_prefix =
-        first_block_type != Some("thinking") && first_block_type != Some("redacted_thinking");
-
-    if !missing_thinking_prefix {
-        return false;
-    }
-
-    // 检查是否存在 tool_use
-    last_assistant_content
-        .iter()
-        .any(|b| b.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
 }
 
 /// 与 CCH 对齐：请求前不做 thinking type 主动改写。
@@ -426,7 +361,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rectify_removes_top_level_thinking() {
+    fn test_rectify_preserves_top_level_thinking_for_tool_history() {
         let mut body = json!({
             "model": "claude-test",
             "thinking": { "type": "enabled", "budget_tokens": 1024 },
@@ -443,8 +378,9 @@ mod tests {
 
         let result = rectify_anthropic_request(&mut body);
 
-        assert!(result.applied);
-        assert!(body.get("thinking").is_none());
+        assert!(!result.applied);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }
 
     #[test]
@@ -489,9 +425,7 @@ mod tests {
         // thinking block 被移除，但顶层 thinking 不应被移除（因为原本有 thinking 前缀）
         assert!(result.applied);
         assert_eq!(result.removed_thinking_blocks, 1);
-        // 注意：由于 thinking block 被移除后，首块变成了 tool_use，
-        // 此时会触发删除顶层 thinking 的逻辑
-        // 这是预期行为：整流后如果仍然不符合要求，就删除顶层 thinking
+        assert_eq!(body["thinking"]["type"], "enabled");
     }
 
     // ==================== 新增错误场景检测测试 ====================
@@ -516,16 +450,17 @@ mod tests {
 
     #[test]
     fn test_detect_invalid_request() {
-        // 场景7: 非法请求（与 CCH 对齐，统一触发）
+        // A generic invalid-request label is not evidence that thinking history
+        // caused the failure and must not trigger a destructive retry.
         assert!(should_rectify_thinking_signature(
             Some("非法请求：thinking signature 不合法"),
             &enabled_config()
         ));
-        assert!(should_rectify_thinking_signature(
+        assert!(!should_rectify_thinking_signature(
             Some("illegal request: tool_use block mismatch"),
             &enabled_config()
         ));
-        assert!(should_rectify_thinking_signature(
+        assert!(!should_rectify_thinking_signature(
             Some("invalid request: malformed JSON"),
             &enabled_config()
         ));
@@ -596,8 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rectify_removes_top_level_thinking_adaptive() {
-        // 顶层 thinking 仅在 type=enabled 且 tool_use 场景才会删除，adaptive 不删除
+    fn test_rectify_preserves_top_level_adaptive_thinking() {
         let mut body = json!({
             "model": "claude-test",
             "thinking": { "type": "adaptive" },

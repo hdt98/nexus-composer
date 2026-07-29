@@ -240,7 +240,7 @@ impl Database {
 
     /// 获取整流器配置
     ///
-    /// 返回整流器配置，如果不存在则返回默认值（全部开启）
+    /// Returns the saved rectifier config, or safe disabled defaults when absent.
     pub fn get_rectifier_config(&self) -> Result<crate::proxy::types::RectifierConfig, AppError> {
         match self.get_setting("rectifier_config")? {
             Some(json) => serde_json::from_str(&json)
@@ -286,7 +286,7 @@ impl Database {
 
     /// 获取 Copilot 优化器配置
     ///
-    /// 返回配置，如果不存在则返回默认值（默认开启）
+    /// Returns the saved config, or safe defaults that do not rewrite requests.
     pub fn get_copilot_optimizer_config(
         &self,
     ) -> Result<crate::proxy::types::CopilotOptimizerConfig, AppError> {

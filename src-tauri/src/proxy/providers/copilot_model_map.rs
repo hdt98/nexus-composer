@@ -4,9 +4,8 @@
 //! 而 Claude Code 客户端发出 dash 形式（如 `claude-sonnet-4-6`、`claude-sonnet-4-6[1m]`）。
 //! 不归一化会触发上游 400 `model_not_supported`。
 //!
-//! 仅做语法归一化不够：账号订阅级别可能不开放某个具体模型。
-//! `resolve_against_models` 用 `/models` live 列表做精确匹配，找不到时
-//! 按 family（haiku/sonnet/opus）+ 最高版本号 fallback。
+//! `resolve_against_models` uses the live `/models` list only to confirm that a
+//! syntax-normalized ID names the same model. It never substitutes another model.
 
 use super::copilot_auth::CopilotModel;
 use serde_json::Value;
@@ -105,74 +104,17 @@ fn dashes_to_dot_in_last_version(id: &str) -> Option<String> {
 /// 流程：
 /// 1. 先做语法归一化（dash→dot、`[1m]`→`-1m`）
 /// 2. 在 `models` 中精确匹配；找到则使用归一化后的 ID
-/// 3. 找不到时按 family（haiku/sonnet/opus）取最高版本号 fallback
-///    （优先保留 `-1m` 标志；都没有则取 base 版）
 ///
-/// 返回 `None` 表示无需变换或无可降级的 family 候选（保留原 ID 让上游决定，
-/// 让用户拿到明确的 `model_not_supported` 而非被静默替换）。
+/// Returns `None` when no syntax change is needed or the exact model is unavailable.
+/// The unavailable case remains unchanged so upstream can return `model_not_supported`.
 pub fn resolve_against_models(client_id: &str, models: &[CopilotModel]) -> Option<String> {
     let normalized = normalize_to_copilot_id(client_id);
     let target = normalized.as_deref().unwrap_or(client_id);
 
     if models.iter().any(|m| m.id.eq_ignore_ascii_case(target)) {
-        return normalized.filter(|s| s != client_id);
-    }
-
-    let fallback = family_fallback(target, models)?;
-    if fallback.eq_ignore_ascii_case(client_id) {
-        None
-    } else {
-        Some(fallback)
-    }
-}
-
-fn detect_family(id: &str) -> Option<&'static str> {
-    let lower = id.to_ascii_lowercase();
-    if lower.contains("haiku") {
-        Some("haiku")
-    } else if lower.contains("sonnet") {
-        Some("sonnet")
-    } else if lower.contains("opus") {
-        Some("opus")
+        normalized.filter(|s| s != client_id)
     } else {
         None
-    }
-}
-
-/// 提取 family 后第一段 `MAJOR.MINOR` 版本号。
-/// 例：`claude-sonnet-4.6` → (4, 6)；`claude-sonnet-4.6-1m` → (4, 6)。
-fn extract_major_minor(id: &str) -> Option<(u32, u32)> {
-    let lower = id.to_ascii_lowercase();
-    let family = detect_family(&lower)?;
-    let after = &lower[lower.find(family)? + family.len()..];
-    let after = after.strip_prefix('-')?;
-    let segment = after.split(['-', '[', ' ']).next()?;
-    let mut parts = segment.split('.');
-    let major: u32 = parts.next()?.parse().ok()?;
-    let minor: u32 = parts.next().unwrap_or("0").parse().ok()?;
-    Some((major, minor))
-}
-
-fn family_fallback(target: &str, models: &[CopilotModel]) -> Option<String> {
-    let family = detect_family(target)?;
-    let want_1m = target.ends_with("-1m");
-
-    let pick_best = |require_1m: bool| -> Option<String> {
-        models
-            .iter()
-            .filter(|m| {
-                let lower = m.id.to_ascii_lowercase();
-                lower.contains(family) && lower.ends_with("-1m") == require_1m
-            })
-            .filter_map(|m| extract_major_minor(&m.id).map(|v| (m, v)))
-            .max_by_key(|(_, v)| *v)
-            .map(|(m, _)| m.id.clone())
-    };
-
-    if want_1m {
-        pick_best(true).or_else(|| pick_best(false))
-    } else {
-        pick_best(false)
     }
 }
 
@@ -323,17 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_falls_back_to_highest_family_version() {
-        // 用户请求 opus 4.8 但 Copilot 账号只有 opus 4.6
+    fn resolve_does_not_substitute_another_family_version() {
         let models = vec![
             model("claude-opus-4.5"),
             model("claude-opus-4.6"),
             model("claude-sonnet-4.6"),
         ];
-        assert_eq!(
-            resolve_against_models("claude-opus-4.8", &models),
-            Some("claude-opus-4.6".to_string())
-        );
+        assert_eq!(resolve_against_models("claude-opus-4.8", &models), None);
     }
 
     #[test]
@@ -350,12 +288,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_falls_back_to_base_when_1m_unavailable() {
-        // 账号没开 -1m 变体时降级到 base
+    fn resolve_does_not_drop_requested_1m_capability() {
         let models = vec![model("claude-sonnet-4.6")];
         assert_eq!(
             resolve_against_models("claude-sonnet-4-6[1m]", &models),
-            Some("claude-sonnet-4.6".to_string())
+            None
         );
     }
 

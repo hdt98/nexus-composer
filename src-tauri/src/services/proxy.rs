@@ -3076,7 +3076,13 @@ mod tests {
     use super::*;
     use crate::provider::{ClaudeDesktopModelRoute, LocalProxyRequestOverrides, ProviderMeta};
     use serial_test::serial;
-    use std::{env, sync::Mutex};
+    use std::{
+        env,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Mutex,
+        },
+    };
     use tempfile::TempDir;
 
     struct TempHome {
@@ -3136,6 +3142,152 @@ mod tests {
         db.update_proxy_config(proxy_config)
             .await
             .expect("set test proxy config to an ephemeral port");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_chat_bridge_recovers_progress_stop_without_rewriting_harness() {
+        let _home = TempHome::new();
+        crate::settings::reload_settings().expect("reload settings");
+
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let upstream_app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post({
+                let requests = Arc::clone(&requests);
+                let request_count = Arc::clone(&request_count);
+                move |axum::Json(body): axum::Json<Value>| {
+                    let requests = Arc::clone(&requests);
+                    let request_count = Arc::clone(&request_count);
+                    async move {
+                        requests.lock().expect("capture Chat request").push(body);
+                        let attempt = request_count.fetch_add(1, Ordering::SeqCst);
+                        let stream = if attempt == 0 {
+                            concat!(
+                                "data: {\"id\":\"chatcmpl_progress\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Checking the provider now.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                                "data: [DONE]\n\n"
+                            )
+                        } else {
+                            concat!(
+                                "data: {\"id\":\"chatcmpl_tool\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+                                "data: [DONE]\n\n"
+                            )
+                        };
+                        (
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/event-stream",
+                            )],
+                            stream,
+                        )
+                    }
+                }
+            }),
+        );
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Chat upstream");
+        let upstream_address = upstream_listener
+            .local_addr()
+            .expect("read mock Chat upstream address");
+        let upstream_task = tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream_app)
+                .await
+                .expect("serve mock Chat upstream");
+        });
+
+        let db = Arc::new(Database::memory().expect("init db"));
+        let state = crate::store::AppState::new(db.clone());
+        use_ephemeral_proxy_port(&db).await;
+        let mut provider = Provider::with_id(
+            "kimi-chat-loop".to_string(),
+            "Nexus Kimi-K3".to_string(),
+            json!({
+                "base_url": format!("http://{upstream_address}/v1"),
+                "apiKey": "test-upstream-token",
+                "model": "kimi-k3",
+                "modelCatalog": {
+                    "models": [{
+                        "model": "kimi-k3",
+                        "inputModalities": ["text"]
+                    }]
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            api_format: Some("openai_chat".to_string()),
+            provider_type: Some("nexus".to_string()),
+            ..Default::default()
+        });
+        db.save_provider(AppType::Codex.as_str(), &provider)
+            .expect("save Kimi Chat provider");
+        db.set_current_provider(AppType::Codex.as_str(), &provider.id)
+            .expect("select Kimi Chat provider");
+        crate::settings::set_current_provider(&AppType::Codex, Some(&provider.id))
+            .expect("select local Kimi Chat provider");
+
+        let proxy = state.proxy_service.start().await.expect("start proxy");
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build test client");
+        let response = client
+            .post(format!("http://127.0.0.1:{}/v1/responses", proxy.port))
+            .bearer_auth(PROXY_TOKEN_PLACEHOLDER)
+            .json(&json!({
+                "model": "kimi-k3",
+                "instructions": "Keep normal commentary while completing the task.",
+                "input": [{
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Inspect the provider."}]
+                }],
+                "tools": [{
+                    "type": "function",
+                    "name": "exec",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}}
+                }],
+                "stream": true
+            }))
+            .send()
+            .await
+            .expect("send Codex Responses request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let downstream = response.text().await.expect("read Responses stream");
+
+        state.proxy_service.stop().await.expect("stop proxy");
+        upstream_task.abort();
+
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+        assert!(downstream.contains("Checking the provider now."));
+        assert!(downstream.contains("\"name\":\"exec\""));
+        assert_eq!(downstream.matches("event: response.created").count(), 1);
+        assert_eq!(downstream.matches("event: response.completed").count(), 1);
+
+        let requests = requests.lock().expect("read captured Chat requests");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[0]["messages"][0]["content"],
+            "Keep normal commentary while completing the task."
+        );
+        assert_eq!(
+            requests[0]["messages"][1]["content"],
+            "Inspect the provider."
+        );
+        assert_eq!(requests[1]["messages"][2]["role"], "assistant");
+        assert_eq!(
+            requests[1]["messages"][2]["content"],
+            "Checking the provider now."
+        );
+        assert_eq!(requests[1]["messages"][3]["role"], "user");
+        assert_eq!(requests[1]["messages"][3]["content"], "Continue.");
+        let serialized_requests =
+            serde_json::to_string(&*requests).expect("serialize captured requests");
+        assert!(!serialized_requests.contains("MUST NOT send narration"));
+        assert!(!serialized_requests.contains("Agent-loop control"));
     }
 
     async fn running_codex_base_url(service: &ProxyService) -> String {
@@ -3343,7 +3495,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn claude_desktop_nexus_route_streams_text_only_glm_end_to_end() {
+    async fn claude_desktop_nexus_route_preserves_user_input_by_default() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -3532,8 +3684,11 @@ mod tests {
         );
         let serialized_count =
             serde_json::to_string(&count_upstream).expect("serialize count request");
-        assert!(serialized_count.contains(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER));
-        assert!(!serialized_count.contains("COUNT_IMAGE_MUST_NOT_REACH_UPSTREAM"));
+        assert!(!serialized_count.contains(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER));
+        assert!(
+            serialized_count.contains("COUNT_IMAGE_MUST_NOT_REACH_UPSTREAM"),
+            "media fallback is behavior-changing and must remain opt-in"
+        );
         assert!(count_upstream.get("max_tokens").is_none());
         assert!(count_upstream.get("stream").is_none());
         assert_eq!(
@@ -3615,25 +3770,17 @@ mod tests {
                 "/messages/0/content/0/text",
                 json!("Inspect the attached image."),
             ),
-            (
-                "/messages/0/content/1/text",
-                json!(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER),
-            ),
+            ("/messages/0/content/1/type", json!("image_url")),
         ] {
             assert_eq!(upstream.pointer(pointer), Some(&expected), "{pointer}");
         }
         let serialized_upstream = serde_json::to_string(&upstream).expect("serialize upstream");
-        for forbidden in [
-            "MUST_NOT_REACH_UPSTREAM",
-            "data:image",
-            "\"type\":\"image\"",
-            "\"image_url\"",
-        ] {
-            assert!(
-                !serialized_upstream.contains(forbidden),
-                "upstream request leaked forbidden image data: {forbidden}"
-            );
-        }
+        assert!(serialized_upstream.contains("MUST_NOT_REACH_UPSTREAM"));
+        assert!(serialized_upstream.contains("data:image/png;base64"));
+        assert!(serialized_upstream.contains("\"image_url\""));
+        assert!(
+            !serialized_upstream.contains(crate::proxy::media_sanitizer::UNSUPPORTED_IMAGE_MARKER)
+        );
 
         let events: Vec<Value> = downstream
             .split("\n\n")
