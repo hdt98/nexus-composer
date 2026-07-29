@@ -9,7 +9,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-const VERSION = "0.1.8";
+const VERSION = "0.1.9";
 const HOME = os.homedir();
 const ROOT = path.join(HOME, ".nexus-composer", "remote-agent");
 const CONFIG_PATH = path.join(ROOT, "agent-config.json");
@@ -51,8 +51,23 @@ function readJson(file, fallback) {
 }
 
 function writeJson(file, value) {
-  ensureDir(path.dirname(file));
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
+  writeFileAtomic(file, JSON.stringify(value, null, 2), 0o600);
+}
+
+function writeFileAtomic(file, content, mode) {
+  const directory = path.dirname(file);
+  ensureDir(directory);
+  const temporary = path.join(
+    directory,
+    `.${path.basename(file)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`,
+  );
+  try {
+    fs.writeFileSync(temporary, content, { mode, flag: "wx" });
+    fs.renameSync(temporary, file);
+    fs.chmodSync(file, mode);
+  } finally {
+    removeFileIfPresent(temporary);
+  }
 }
 
 function readConfig() {
@@ -137,18 +152,21 @@ function restoreCodexProfile() {
   const backup = readActiveCodexBackup();
   if (!backup) return false;
   ensureDir(CODEX_DIR);
-  for (const [key, target] of [
-    ["config", CODEX_CONFIG_PATH],
-    ["auth", CODEX_AUTH_PATH],
-  ]) {
+  const restoreFile = (key, target) => {
     const file = backup.files[key];
     if (file && file.existed && fs.existsSync(file.path)) {
-      fs.copyFileSync(file.path, target);
+      writeFileAtomic(target, fs.readFileSync(file.path), 0o600);
     } else {
       removeFileIfPresent(target);
     }
-  }
+  };
+
+  // Restore auth and remove the managed catalog before config.toml. The
+  // routing config is the commit point: if the process exits earlier, it still
+  // looks agent-managed and the active backup marker remains retryable.
+  restoreFile("auth", CODEX_AUTH_PATH);
   removeFileIfPresent(CODEX_MODEL_CATALOG_PATH);
+  restoreFile("config", CODEX_CONFIG_PATH);
   removeFileIfPresent(ACTIVE_CODEX_BACKUP_PATH);
   return true;
 }
@@ -282,7 +300,7 @@ function writeCodexConfig(config) {
     .filter(Boolean)
     .join("\n\n")
     .concat("\n");
-  fs.writeFileSync(CODEX_CONFIG_PATH, text, { mode: 0o600 });
+  writeFileAtomic(CODEX_CONFIG_PATH, text, 0o600);
   // The loopback provider declares requires_openai_auth=false, so an existing
   // OAuth/API login can remain untouched. Only create a dummy shape when the
   // remote did not have auth.json at all; restore removes it later.
@@ -1470,7 +1488,7 @@ async function controlHandler(req, res) {
 
 function start() {
   ensureDir(ROOT);
-  fs.writeFileSync(PID_PATH, String(process.pid), { mode: 0o600 });
+  writeFileAtomic(PID_PATH, String(process.pid), 0o600);
   preserveCodexProfile();
   writeCodexConfig(currentConfig);
   proxyServer = http.createServer((req, res) => {

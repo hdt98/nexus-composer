@@ -44,7 +44,9 @@ impl ProviderRouter {
             match self.db.get_proxy_config_for_app(app_type).await {
                 Ok(config) => (config.auto_failover_enabled, config.enabled),
                 Err(e) => {
-                    log::error!("[{app_type}] 读取 proxy_config 失败: {e}，默认禁用故障转移");
+                    log::error!(
+                    "[{app_type}] Failed to read proxy_config: {e}; failover defaults to disabled"
+                );
                     (false, false)
                 }
             };

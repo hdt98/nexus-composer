@@ -1809,15 +1809,15 @@ fn table_matches_codex_unified_official_provider(table: &toml_edit::Table) -> bo
         && table.get("wire_api").and_then(|item| item.as_str()) == Some("responses")
 }
 
-/// 统一 Codex 会话历史：把官方供应商的 live 配置改写为以共享的
-/// `custom` model_provider 标识运行（认证仍走 `auth.json` 的 ChatGPT 登录），
-/// 使开关开启后创建的官方会话与第三方会话共用同一个 resume 历史桶。
+/// Unify Codex session history by routing the Official live profile through the
+/// shared `custom` model provider. Authentication still uses the ChatGPT login in
+/// `auth.json`, while Official and third-party sessions share one resume bucket.
 ///
-/// 两种情况拒绝注入、原样返回：
-/// - 配置已有非内建 `openai` 的显式 `model_provider`：用户手工指定的路由不被覆盖；
-/// - 配置已有形态不同的 `[model_providers.custom]` 表：设置 `model_provider`
-///   会激活这张我们不认识的表（可能带第三方 base_url/token，会把 ChatGPT
-///   OAuth 流量路由到错误后端），宁可让开关对该配置不生效。
+/// Leave the configuration unchanged in either of these cases:
+/// - An explicit non-built-in `openai` model provider remains user-owned and is not overwritten.
+/// - An unfamiliar `[model_providers.custom]` table already exists. Activating
+///   that table could route ChatGPT OAuth traffic to its third-party base URL or
+///   token, so the unification toggle deliberately does not take ownership.
 pub fn inject_codex_unified_session_bucket(config_text: &str) -> Result<String, AppError> {
     let mut doc = config_text
         .parse::<DocumentMut>()

@@ -402,7 +402,7 @@ fn migration_v12_to_v13_adds_remote_source_without_losing_rollup_dimensions() {
             total_cost_usd, avg_latency_ms
         ) VALUES
             ('2026-07-23', 'codex', 'nexus', 'glm-5.2', 'alias-a', 'glm-5.2',
-             2, 2, 100, 20, '0.10', 100),
+             2, 2, 100, 20, '0.123456789123456789', 100),
             ('2026-07-23', 'codex', 'nexus', 'glm-5.2', 'alias-b', 'glm-5.2',
              3, 2, 200, 30, '0.20', 200);
         PRAGMA user_version = 12;
@@ -425,20 +425,32 @@ fn migration_v12_to_v13_adds_remote_source_without_losing_rollup_dimensions() {
             .expect("check remote source")
     );
 
-    let migrated: (i64, i64, i64, f64) = conn
+    let migrated: (i64, i64, i64) = conn
         .query_row(
-            "SELECT COUNT(*), SUM(request_count), SUM(input_tokens),
-                    SUM(CAST(total_cost_usd AS REAL))
+            "SELECT COUNT(*), SUM(request_count), SUM(input_tokens)
              FROM usage_daily_rollups
              WHERE data_source = 'proxy'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("read migrated rollups");
     assert_eq!(migrated.0, 2);
     assert_eq!(migrated.1, 5);
     assert_eq!(migrated.2, 300);
-    assert!((migrated.3 - 0.3).abs() < f64::EPSILON);
+
+    let costs = conn
+        .prepare(
+            "SELECT total_cost_usd
+             FROM usage_daily_rollups
+             WHERE data_source = 'proxy'
+             ORDER BY request_model",
+        )
+        .expect("prepare exact migrated cost query")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query exact migrated costs")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("read exact migrated costs");
+    assert_eq!(costs, ["0.123456789123456789", "0.20"]);
 }
 
 #[test]

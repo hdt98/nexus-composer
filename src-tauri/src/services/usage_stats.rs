@@ -2710,7 +2710,7 @@ mod tests {
             "detail panel needs to see real entry, row projection must not be folded"
         );
 
-        // ④ Folding does not overflow: codex filter is empty。
+        // 4. Folding does not overflow when the Codex filter is empty.
         let codex_summary = db.get_usage_summary(None, None, Some("codex"), None, None)?;
         assert_eq!(codex_summary.total_requests, 0);
 

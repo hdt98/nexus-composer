@@ -439,7 +439,7 @@ impl ProxyService {
             Some(database_id)
         } else {
             crate::settings::get_effective_current_provider(&self.db, app_type)
-                .map_err(|e| format!("获取 {app_type:?} 当前供应商失败: {e}"))?
+                .map_err(|e| format!("Failed to get the current {app_type:?} provider: {e}"))?
         };
 
         let Some(current_id) = current_id else {
@@ -2347,9 +2347,12 @@ impl ProxyService {
                 previous_local_provider.as_deref(),
             );
             return Err(match rollback {
-                Ok(()) => format!("更新当前供应商失败: {error}"),
+                Ok(()) => format!("Failed to update the current provider: {error}"),
                 Err(rollback_error) => {
-                    format!("更新当前供应商失败: {error}; 恢复本地当前供应商失败: {rollback_error}")
+                    format!(
+                        "Failed to update the current provider: {error}; \
+                         failed to restore the local current provider: {rollback_error}"
+                    )
                 }
             });
         }

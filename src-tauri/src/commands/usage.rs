@@ -331,7 +331,7 @@ fn delete_remote_usage_data_for_source(
         .ok_or_else(|| {
             AppError::localized(
                 "usage.sourceFilter.deleteInvalidSource",
-                "只能删除远端用量数据",
+                "Only remote usage data can be deleted",
                 "Only remote usage data can be deleted",
             )
         })?;
@@ -345,21 +345,21 @@ fn delete_remote_usage_data_for_source(
             "DELETE FROM proxy_request_logs WHERE COALESCE(data_source, 'proxy') = ?1",
             rusqlite::params![data_source],
         )
-        .map_err(|e| AppError::Database(format!("删除远端用量明细失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to delete remote usage details: {e}")))?;
 
     let deleted_rollups = conn
         .execute(
             "DELETE FROM usage_daily_rollups WHERE data_source = ?1",
             rusqlite::params![data_source],
         )
-        .map_err(|e| AppError::Database(format!("删除远端用量聚合失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to delete remote usage rollups: {e}")))?;
 
     let deleted_sync_states = conn
         .execute(
             "DELETE FROM session_log_sync WHERE substr(file_path, 1, ?1) = ?2",
             rusqlite::params![sync_prefix_len, sync_prefix],
         )
-        .map_err(|e| AppError::Database(format!("删除远端同步状态失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to delete remote sync state: {e}")))?;
 
     Ok(DeleteRemoteUsageDataResult {
         data_source,

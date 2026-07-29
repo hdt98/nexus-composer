@@ -44,6 +44,7 @@ const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original c
 const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
 const AGENT_LOOP_COMPATIBILITY_INSTRUCTION: &str = "Chat Completions compatibility: a reply that contains only text and no tool call ends the turn and nothing executes. You MUST NOT send narration or progress updates as a standalone reply. Every reply MUST either call a tool, or be text-only only when the whole task is complete or you need user input.";
 const AGENT_LOOP_CONTINUATION_INSTRUCTION: &str = "Your previous reply contained only text and no tool call, so it executed nothing and ended the turn while tool results above show the task is unfinished. You MUST now reply with a tool call. Do not send a text-only reply unless the task is complete.";
+const AGENT_LOOP_TAIL_INSTRUCTION: &str = "Agent-loop control (not a new task): Continue the pending user task now. If the next step requires an available tool, call it in this same response. Do not reply with a promise, plan, or progress update such as \"let me check\" or \"I'll now\" without also making that tool call. Return text only when the pending task is complete or you need user input.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodexToolKind {
@@ -298,6 +299,7 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
         )?;
     }
     append_agent_loop_continuation_hint(&mut messages, &tool_context);
+    append_agent_loop_tail_instruction(&mut messages, &tool_context);
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
 
@@ -571,6 +573,54 @@ fn append_agent_loop_continuation_hint(messages: &mut Vec<Value>, tool_context: 
             "content": AGENT_LOOP_CONTINUATION_INSTRUCTION
         }));
     }
+}
+
+/// Keep the agent-loop rule next to the latest task state. Long Chat histories can
+/// underweight the equivalent system instruction at the head, and a fresh user turn
+/// means the trailing-assistant continuation detector above cannot fire. This
+/// temporary reminder is added only to the upstream request and never recorded in
+/// Codex history.
+fn append_agent_loop_tail_instruction(messages: &mut Vec<Value>, tool_context: &CodexToolContext) {
+    if tool_context.chat_tools().is_empty() {
+        return;
+    }
+
+    let awaits_tool_result = messages.last().is_some_and(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+    });
+    if awaits_tool_result {
+        return;
+    }
+
+    if let Some(last) = messages
+        .last_mut()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+    {
+        match last.get_mut("content") {
+            Some(Value::String(content)) => {
+                content.push_str("\n\n");
+                content.push_str(AGENT_LOOP_TAIL_INSTRUCTION);
+                return;
+            }
+            Some(Value::Array(content)) => {
+                content.push(json!({
+                    "type": "text",
+                    "text": AGENT_LOOP_TAIL_INSTRUCTION
+                }));
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    messages.push(json!({
+        "role": "user",
+        "content": AGENT_LOOP_TAIL_INSTRUCTION
+    }));
 }
 
 fn instruction_text(value: &Value) -> String {
@@ -1897,6 +1947,82 @@ mod tests {
                 .contains("MUST NOT send narration or progress updates as a standalone reply"),
             "{instructions}"
         );
+    }
+
+    #[test]
+    fn tool_enabled_current_user_turn_gets_tail_loop_control() {
+        let input = || {
+            json!({
+                "model": "kimi-k3",
+                "instructions": "Keep working until the task is complete.",
+                "input": [{
+                    "type": "function_call", "call_id": "call_1",
+                    "name": "exec", "arguments": "{}"
+                }, {
+                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
+                }, {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "The earlier check found a gap."}]
+                }, {
+                    "type": "message", "role": "user",
+                    "content": [{"type": "input_text", "text": "Will the other sessions hit it too?"}]
+                }],
+                "tools": [{
+                    "type": "function", "name": "exec",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}}
+                }]
+            })
+        };
+
+        for preserve in [true, false] {
+            let result =
+                responses_to_chat_completions_with_reasoning_history(input(), None, preserve)
+                    .unwrap();
+            let last = result["messages"].as_array().unwrap().last().unwrap();
+            let content = last["content"].as_str().unwrap();
+
+            assert_eq!(last["role"], "user");
+            assert!(content.starts_with("Will the other sessions hit it too?"));
+            assert!(
+                content.contains("Continue the pending user task now"),
+                "tool-enabled turns need a tail instruction in both history modes: {result}"
+            );
+        }
+    }
+
+    #[test]
+    fn tail_loop_control_requires_tools_and_a_model_action() {
+        let no_tools = responses_to_chat_completions(json!({
+            "model": "kimi-k3",
+            "input": [{
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "Answer directly."}]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(no_tools["messages"][0]["content"], "Answer directly.");
+
+        let awaiting_result = responses_to_chat_completions(json!({
+            "model": "kimi-k3",
+            "input": [{
+                "type": "function_call", "call_id": "call_1",
+                "name": "exec", "arguments": "{}"
+            }],
+            "tools": [{
+                "type": "function", "name": "exec",
+                "description": "Run a command",
+                "parameters": {"type": "object", "properties": {}}
+            }]
+        }))
+        .unwrap();
+        let last = awaiting_result["messages"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap();
+        assert_eq!(last["role"], "assistant");
+        assert_eq!(last["tool_calls"][0]["function"]["name"], "exec");
     }
 
     #[test]

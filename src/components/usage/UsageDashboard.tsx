@@ -171,12 +171,12 @@ export function UsageDashboard() {
       void queryClient.invalidateQueries({ queryKey: usageKeys.all });
       toast.success(
         t("usage.sourceFilter.deleteSuccess", {
-          defaultValue: "已删除远端用量数据",
+          defaultValue: "Remote usage data deleted",
         }),
         {
           description: t("usage.sourceFilter.deleteSuccessDescription", {
             defaultValue:
-              "删除 {{logs}} 条明细、{{rollups}} 条聚合、{{states}} 条同步状态",
+              "Deleted {{logs}} detail rows, {{rollups}} rollups, and {{states}} sync states",
             logs: result.deletedRequestLogs,
             rollups: result.deletedRollups,
             states: result.deletedSyncStates,
@@ -187,7 +187,7 @@ export function UsageDashboard() {
     onError: (error) => {
       toast.error(
         t("usage.sourceFilter.deleteFailed", {
-          defaultValue: "删除远端用量数据失败",
+          defaultValue: "Failed to delete remote usage data",
         }),
         { description: extractErrorMessage(error) },
       );
@@ -196,11 +196,11 @@ export function UsageDashboard() {
 
   const remoteModeLabel = useMemo(() => {
     if (selectedRemoteSources.length === 0) {
-      return t("usage.sourceFilter.remote", { defaultValue: "仅远程" });
+      return t("usage.sourceFilter.remote", { defaultValue: "Remote only" });
     }
     if (selectedRemoteSources.length > 1) {
       return t("usage.sourceFilter.remoteHostCount", {
-        defaultValue: "{{count}} 台远端",
+        defaultValue: "{{count}} remote hosts",
         count: selectedRemoteSources.length,
       });
     }
@@ -256,7 +256,7 @@ export function UsageDashboard() {
               )}
             >
               <Database className="h-3.5 w-3.5" />
-              {t("usage.sourceFilter.all", { defaultValue: "全部" })}
+              {t("usage.sourceFilter.all", { defaultValue: "All" })}
             </button>
             <button
               type="button"
@@ -269,7 +269,7 @@ export function UsageDashboard() {
               )}
             >
               <HardDrive className="h-3.5 w-3.5" />
-              {t("usage.sourceFilter.local", { defaultValue: "仅本地" })}
+              {t("usage.sourceFilter.local", { defaultValue: "Local only" })}
             </button>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -288,7 +288,7 @@ export function UsageDashboard() {
                     {sourceMode === "remote"
                       ? remoteModeLabel
                       : t("usage.sourceFilter.remote", {
-                          defaultValue: "仅远程",
+                          defaultValue: "Remote only",
                         })}
                   </span>
                   <ChevronDown className="h-3.5 w-3.5 shrink-0 opacity-70" />
@@ -297,7 +297,7 @@ export function UsageDashboard() {
               <DropdownMenuContent align="start" className="w-64">
                 <DropdownMenuLabel>
                   {t("usage.sourceFilter.label", {
-                    defaultValue: "数据来源",
+                    defaultValue: "Data source",
                   })}
                 </DropdownMenuLabel>
                 <DropdownMenuSeparator />
@@ -312,7 +312,7 @@ export function UsageDashboard() {
                   <Server className="h-3.5 w-3.5" />
                   <span className="truncate">
                     {t("usage.sourceFilter.remoteAggregateTitle", {
-                      defaultValue: "仅统计所有远端服务器",
+                      defaultValue: "Only show all remote servers",
                     })}
                   </span>
                 </DropdownMenuItem>
@@ -335,10 +335,10 @@ export function UsageDashboard() {
                           type="button"
                           className="ml-2 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
                           title={t("usage.sourceFilter.deleteRemote", {
-                            defaultValue: "删除该远端数据",
+                            defaultValue: "Delete this remote data",
                           })}
                           aria-label={t("usage.sourceFilter.deleteRemote", {
-                            defaultValue: "删除该远端数据",
+                            defaultValue: "Delete this remote data",
                           })}
                           disabled={deleteRemoteUsageMutation.isPending}
                           onPointerDown={(event) => event.stopPropagation()}
@@ -356,7 +356,7 @@ export function UsageDashboard() {
                 ) : (
                   <div className="px-2 py-2 text-xs text-muted-foreground">
                     {t("usage.sourceFilter.remoteEmpty", {
-                      defaultValue: "暂无远端数据",
+                      defaultValue: "No remote data yet",
                     })}
                   </div>
                 )}
@@ -370,7 +370,7 @@ export function UsageDashboard() {
               variant="ghost"
               size="sm"
               className="h-8 px-2 text-xs text-muted-foreground"
-              title={t("common.refresh", "刷新")}
+              title={t("common.refresh", "Refresh")}
               onClick={changeRefreshInterval}
             >
               <RefreshCw className="mr-1 h-3.5 w-3.5" />
@@ -484,19 +484,19 @@ export function UsageDashboard() {
       <ConfirmDialog
         isOpen={Boolean(deleteRemoteSource)}
         title={t("usage.sourceFilter.deleteConfirmTitle", {
-          defaultValue: "删除远端用量数据？",
+          defaultValue: "Delete remote usage data?",
         })}
         message={t("usage.sourceFilter.deleteConfirmMessage", {
           defaultValue:
-            "这只会删除本地数据库中 {{host}} 的远端用量记录和同步状态，不会删除远端服务器上的日志文件。之后重新同步会重新导入该服务器的用量。",
+            "This only deletes remote usage records and sync state for {{host}} from the local database. It does not delete log files on the remote server. Syncing again will re-import this server's usage.",
           host: deleteRemoteSource
             ? remoteHostFromSource(deleteRemoteSource)
             : "",
         })}
         confirmText={
           deleteRemoteUsageMutation.isPending
-            ? t("common.deleting", { defaultValue: "删除中..." })
-            : t("common.delete", { defaultValue: "删除" })
+            ? t("common.deleting", { defaultValue: "Deleting..." })
+            : t("common.delete", { defaultValue: "Delete" })
         }
         cancelText={t("common.cancel")}
         onConfirm={() => {

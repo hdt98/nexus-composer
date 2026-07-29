@@ -616,7 +616,8 @@ export function RemoteProviderPage({
   const overwriteWarning =
     remoteQuery.data?.overwriteWarning ??
     t("remote.overwriteWarning", {
-      defaultValue: "远端已有配置。切换会覆盖这些文件，建议先同步到本地。",
+      defaultValue:
+        "The remote server already has config files. Switching will overwrite them, so sync them locally first if you want to keep them.",
     });
   const usageSyncStage = usageSyncProgress?.stage ?? "starting";
   const usageSyncStageLabel = usageSyncProgress
@@ -657,7 +658,7 @@ export function RemoteProviderPage({
       setConfirmApplyProvider(null);
       toast.success(
         t("remote.applySuccess", {
-          defaultValue: "远端已切换到选中的供应商",
+          defaultValue: "Remote server switched to the selected provider",
         }),
         {
           description: `${result.hostAlias} - ${
@@ -686,7 +687,7 @@ export function RemoteProviderPage({
       }
       toast.error(
         t("remote.applyFailed", {
-          defaultValue: "远端切换失败: {{error}}",
+          defaultValue: "Remote switch failed: {{error}}",
           error: extractErrorMessage(error),
         }),
         { duration: 7000 },
@@ -872,7 +873,7 @@ export function RemoteProviderPage({
     onSuccess: async (result) => {
       toast.success(
         t("remote.importSuccess", {
-          defaultValue: "已同步远端配置到本地",
+          defaultValue: "Remote config synced locally",
         }),
         { description: result.provider.name },
       );
@@ -887,7 +888,7 @@ export function RemoteProviderPage({
     onError: (error: unknown) => {
       toast.error(
         t("remote.importFailed", {
-          defaultValue: "同步远端配置失败: {{error}}",
+          defaultValue: "Failed to sync remote config: {{error}}",
           error: extractErrorMessage(error),
         }),
         { duration: 7000 },
@@ -918,12 +919,12 @@ export function RemoteProviderPage({
       );
       toast.success(
         t("remote.usageSyncSuccess", {
-          defaultValue: "已同步远端用量",
+          defaultValue: "Remote usage synced",
         }),
         {
           description: t("remote.usageSyncDescription", {
             defaultValue:
-              "导入 {{imported}} 条，跳过 {{skipped}} 条，未变化文件 {{unchangedFiles}} 个",
+              "Imported {{imported}}, skipped {{skipped}}, unchanged files {{unchangedFiles}}",
             imported: result.imported,
             skipped: result.skipped,
             unchangedFiles: result.unchangedFiles,
@@ -933,7 +934,7 @@ export function RemoteProviderPage({
       if (result.errors?.length) {
         toast.warning(
           t("remote.usageSyncPartial", {
-            defaultValue: "部分远端日志解析失败",
+            defaultValue: "Some remote logs could not be parsed",
           }),
           {
             description: result.errors.slice(0, 2).join("\n"),
@@ -965,7 +966,7 @@ export function RemoteProviderPage({
       });
       toast.error(
         t("remote.usageSyncFailed", {
-          defaultValue: "同步远端用量失败: {{error}}",
+          defaultValue: "Failed to sync remote usage: {{error}}",
           error: errorMessage,
         }),
         { duration: 7000 },
@@ -1021,7 +1022,8 @@ export function RemoteProviderPage({
       <div className="px-6 pt-4">
         <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
           {t("remote.unsupported", {
-            defaultValue: "远端配置暂时只支持 Claude、Codex 和 Gemini。",
+            defaultValue:
+              "Remote config currently supports Claude, Codex, and Gemini only.",
           })}
         </div>
       </div>
@@ -1310,7 +1312,7 @@ export function RemoteProviderPage({
           <div className="rounded-lg border border-dashed border-border px-4 py-12 text-center text-sm text-muted-foreground">
             <Loader2 className="mx-auto mb-3 h-5 w-5 animate-spin" />
             {t("remote.inspecting", {
-              defaultValue: "正在读取远端配置...",
+              defaultValue: "Reading remote config...",
             })}
           </div>
         )}
@@ -1432,7 +1434,7 @@ export function RemoteProviderPage({
                 <div>
                   <h2 className="text-base font-semibold">
                     {t("remote.currentConfig", {
-                      defaultValue: "远端当前配置",
+                      defaultValue: "Current remote config",
                     })}
                   </h2>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -1459,7 +1461,7 @@ export function RemoteProviderPage({
                       <Download className="h-4 w-4" />
                     )}
                     {t("remote.downloadLocal", {
-                      defaultValue: "同步到本地",
+                      defaultValue: "Sync locally",
                     })}
                   </Button>
                 ) : null}
@@ -1470,7 +1472,7 @@ export function RemoteProviderPage({
                   <div className="flex items-center gap-2 font-medium">
                     <AlertTriangle className="h-4 w-4" />
                     {t("remote.overwriteRiskTitle", {
-                      defaultValue: "远端已有未同步配置",
+                      defaultValue: "Remote config has not been synced",
                     })}
                   </div>
                   <p className="mt-1 text-xs">{overwriteWarning}</p>
@@ -1488,7 +1490,7 @@ export function RemoteProviderPage({
                         <Download className="h-4 w-4" />
                       )}
                       {t("remote.syncToLocalFirst", {
-                        defaultValue: "先同步到本地",
+                        defaultValue: "Sync locally first",
                       })}
                     </Button>
                   )}
@@ -1500,7 +1502,7 @@ export function RemoteProviderPage({
                   <div className="flex items-center gap-2 font-medium">
                     <AlertTriangle className="h-4 w-4" />
                     {t("remote.warningTitle", {
-                      defaultValue: "远端配置不完整",
+                      defaultValue: "Remote config is incomplete",
                     })}
                   </div>
                   <div className="mt-1 space-y-1 text-xs">
@@ -1541,7 +1543,8 @@ export function RemoteProviderPage({
               ) : (
                 <div className="mt-4 rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-muted-foreground">
                   {t("remote.noConfig", {
-                    defaultValue: "这台服务器上还没有可识别的当前配置。",
+                    defaultValue:
+                      "No recognizable current config was found on this server.",
                   })}
                 </div>
               )}
@@ -1552,12 +1555,13 @@ export function RemoteProviderPage({
                 <div>
                   <h2 className="text-base font-semibold">
                     {t("remote.localProviders", {
-                      defaultValue: "切换远端供应商",
+                      defaultValue: "Switch remote provider",
                     })}
                   </h2>
                   <p className="mt-1 text-xs text-muted-foreground">
                     {t("remote.localProvidersHint", {
-                      defaultValue: "选择一个本地供应商写入当前 SSH 服务器。",
+                      defaultValue:
+                        "Write a local provider to the current SSH server.",
                     })}
                   </p>
                 </div>
@@ -1619,7 +1623,7 @@ export function RemoteProviderPage({
                               {provider.id === currentProviderId && (
                                 <Badge variant="outline" className="rounded-md">
                                   {t("remote.localCurrent", {
-                                    defaultValue: "本地使用中",
+                                    defaultValue: "Local current",
                                   })}
                                 </Badge>
                               )}
@@ -1629,7 +1633,7 @@ export function RemoteProviderPage({
                                   className="rounded-md bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
                                 >
                                   {t("remote.remoteCurrent", {
-                                    defaultValue: "远端当前",
+                                    defaultValue: "Remote current",
                                   })}
                                 </Badge>
                               )}
@@ -1677,7 +1681,9 @@ export function RemoteProviderPage({
                                   : t("remote.enable", {
                                       defaultValue: "Enable",
                                     })
-                                : t("remote.apply", { defaultValue: "切换" })}
+                                : t("remote.apply", {
+                                    defaultValue: "Switch",
+                                  })}
                           </Button>
                         </div>
                       </div>
@@ -1868,7 +1874,7 @@ export function RemoteProviderPage({
             <DialogHeader>
               <DialogTitle>
                 {t("remote.usageSyncProgress.title", {
-                  defaultValue: "同步远端用量",
+                  defaultValue: "Sync remote usage",
                 })}
               </DialogTitle>
               <DialogDescription>
@@ -1894,7 +1900,7 @@ export function RemoteProviderPage({
                   </div>
                   <div className="mt-1 text-xs text-muted-foreground">
                     {t("remote.usageSyncProgress.step", {
-                      defaultValue: "阶段 {{current}} / {{total}}",
+                      defaultValue: "Stage {{current}} / {{total}}",
                       current: usageSyncProgress.currentStep,
                       total: usageSyncProgress.totalSteps,
                     })}
@@ -1941,7 +1947,7 @@ export function RemoteProviderPage({
                     </div>
                     <div>
                       {t("remote.usageSyncProgress.files", {
-                        defaultValue: "日志文件",
+                        defaultValue: "Log files",
                       })}
                     </div>
                   </div>
@@ -1953,7 +1959,7 @@ export function RemoteProviderPage({
                     </div>
                     <div>
                       {t("remote.usageSyncProgress.payload", {
-                        defaultValue: "远端摘要",
+                        defaultValue: "Remote summary",
                       })}
                     </div>
                   </div>
@@ -1965,7 +1971,7 @@ export function RemoteProviderPage({
                     </div>
                     <div>
                       {t("remote.usageSyncProgress.imported", {
-                        defaultValue: "导入记录",
+                        defaultValue: "Imported records",
                       })}
                     </div>
                   </div>
@@ -1977,7 +1983,7 @@ export function RemoteProviderPage({
                     </div>
                     <div>
                       {t("remote.usageSyncProgress.skipped", {
-                        defaultValue: "跳过记录",
+                        defaultValue: "Skipped records",
                       })}
                     </div>
                   </div>
@@ -1989,7 +1995,7 @@ export function RemoteProviderPage({
                     </div>
                     <div>
                       {t("remote.usageSyncProgress.unchangedFiles", {
-                        defaultValue: "未变化文件",
+                        defaultValue: "Unchanged files",
                       })}
                     </div>
                   </div>
@@ -2012,7 +2018,7 @@ export function RemoteProviderPage({
                   }}
                 >
                   {t("remote.usageSyncProgress.close", {
-                    defaultValue: "关闭",
+                    defaultValue: "Close",
                   })}
                 </Button>
               </DialogFooter>
@@ -2025,7 +2031,7 @@ export function RemoteProviderPage({
         <ConfirmDialog
           isOpen={Boolean(confirmApplyProvider)}
           title={t("remote.confirmOverwriteTitle", {
-            defaultValue: "确认覆盖远端配置？",
+            defaultValue: "Overwrite remote config?",
           })}
           message={
             confirmStopsRemoteAgent
@@ -2035,11 +2041,11 @@ export function RemoteProviderPage({
                 })
               : `${overwriteWarning}\n\n${t("remote.confirmOverwriteMessage", {
                   defaultValue:
-                    "继续后会把选中的本地供应商写入远端。当前远端文件会先自动备份，但远端正在使用的配置会被替换。",
+                    "Continuing will write the selected local provider to the remote server. Existing remote files will be backed up first, but the active remote config will be replaced.",
                 })}`
           }
           confirmText={t("remote.confirmOverwrite", {
-            defaultValue: "确认切换",
+            defaultValue: "Confirm switch",
           })}
           isLoading={applyMutation.isPending}
           loadingText={t("remote.switching", {

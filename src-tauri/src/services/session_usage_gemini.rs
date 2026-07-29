@@ -141,7 +141,7 @@ fn collect_gemini_session_files(gemini_dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-/// 同步单个 Gemini 会话 JSON 文件，返回 (imported, skipped)
+/// Synchronize one Gemini session JSON file and return `(imported, skipped)`.
 fn sync_single_gemini_file(
     db: &Database,
     file_path: &Path,
@@ -228,13 +228,13 @@ fn sync_single_gemini_file(
             Ok(true) => imported += 1,
             Ok(false) => skipped += 1,
             Err(e) => {
-                log::warn!("[GEMINI-SYNC] 插入失败 ({}): {e}", request_id);
+                log::warn!("[GEMINI-SYNC] Failed to insert request {request_id}: {e}");
                 skipped += 1;
             }
         }
     }
 
-    // 更新同步状态
+    // Update synchronization state.
     update_sync_state(db, &sync_key, file_modified, gemini_msg_count)?;
 
     Ok((imported, skipped))

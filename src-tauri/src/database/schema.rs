@@ -471,7 +471,7 @@ impl Database {
                         Self::set_user_version(conn, 12)?;
                     }
                     12 => {
-                        log::info!("迁移数据库从 v12 到 v13（SSH 远程使用量来源）");
+                        log::info!("Migrating database from v12 to v13 (remote SSH usage sources)");
                         Self::migrate_v12_to_v13(conn)?;
                         Self::set_user_version(conn, 13)?;
                     }
@@ -1334,7 +1334,11 @@ impl Database {
         }
 
         conn.execute("DROP TABLE IF EXISTS usage_daily_rollups_v13", [])
-            .map_err(|e| AppError::Database(format!("清理 v13 聚合迁移临时表失败: {e}")))?;
+            .map_err(|e| {
+                AppError::Database(format!(
+                    "Failed to clean up the v13 rollup migration table: {e}"
+                ))
+            })?;
         conn.execute(
             "CREATE TABLE usage_daily_rollups_v13 (
                 date TEXT NOT NULL,
@@ -1359,7 +1363,11 @@ impl Database {
             )",
             [],
         )
-        .map_err(|e| AppError::Database(format!("创建 v13 聚合迁移临时表失败: {e}")))?;
+        .map_err(|e| {
+            AppError::Database(format!(
+                "Failed to create the v13 rollup migration table: {e}"
+            ))
+        })?;
 
         let data_source = if has_data_source {
             "COALESCE(data_source, 'proxy')"
@@ -1386,26 +1394,20 @@ impl Database {
              SELECT
                 date, app_type, provider_id, {data_source}, model,
                 {request_model}, {pricing_model},
-                SUM(request_count), SUM(success_count), SUM(input_tokens), SUM(output_tokens),
-                SUM(cache_read_tokens), SUM(cache_creation_tokens),
-                CAST(SUM(CAST(total_cost_usd AS REAL)) AS TEXT),
-                CASE WHEN SUM(request_count) > 0
-                    THEN SUM(avg_latency_ms * request_count) / SUM(request_count)
-                    ELSE 0
-                END
-             FROM usage_daily_rollups
-             GROUP BY date, app_type, provider_id, {data_source}, model,
-                      {request_model}, {pricing_model}"
+                request_count, success_count, input_tokens, output_tokens,
+                cache_read_tokens, cache_creation_tokens,
+                total_cost_usd, avg_latency_ms
+             FROM usage_daily_rollups"
         );
         conn.execute(&copy_sql, [])
-            .map_err(|e| AppError::Database(format!("复制 v13 聚合数据失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to copy v13 rollup data: {e}")))?;
         conn.execute("DROP TABLE usage_daily_rollups", [])
-            .map_err(|e| AppError::Database(format!("删除旧聚合表失败: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to drop the old rollup table: {e}")))?;
         conn.execute(
             "ALTER TABLE usage_daily_rollups_v13 RENAME TO usage_daily_rollups",
             [],
         )
-        .map_err(|e| AppError::Database(format!("重命名 v13 聚合表失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to rename the v13 rollup table: {e}")))?;
         Ok(())
     }
 
