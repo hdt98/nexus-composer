@@ -42,7 +42,8 @@ const CUSTOM_TOOL_INPUT_FIELD: &str = "input";
 const CHAT_TOOL_NAME_MAX_LEN: usize = 64;
 const CUSTOM_TOOL_INPUT_DESCRIPTION: &str = "Raw string input for the original custom tool. Preserve formatting exactly and follow the original tool definition embedded in the description.";
 const CUSTOM_TOOL_PRESERVED_METADATA_HEADING: &str = "Original tool definition:";
-const AGENT_LOOP_COMPATIBILITY_INSTRUCTION: &str = "Chat Completions compatibility: A text-only progress update ends the agent turn. When work remains, include the next tool call in the same response as any progress update. Return a text-only response only when the task is complete or you need user input.";
+const AGENT_LOOP_COMPATIBILITY_INSTRUCTION: &str = "Chat Completions compatibility: a reply that contains only text and no tool call ends the turn and nothing executes. You MUST NOT send narration or progress updates as a standalone reply. Every reply MUST either call a tool, or be text-only only when the whole task is complete or you need user input.";
+const AGENT_LOOP_CONTINUATION_INSTRUCTION: &str = "Your previous reply contained only text and no tool call, so it executed nothing and ended the turn while tool results above show the task is unfinished. You MUST now reply with a tool call. Do not send a text-only reply unless the task is complete.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CodexToolKind {
@@ -296,6 +297,9 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
             preserve_exact_history,
         )?;
     }
+    if preserve_exact_history {
+        append_agent_loop_continuation_hint(&mut messages, &tool_context);
+    }
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
 
@@ -534,6 +538,41 @@ fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     }
     out.extend(rest);
     out
+}
+
+/// A text-only assistant reply ends the Codex turn with nothing executed. When the
+/// transcript already contains tool results and the model's last message was such a
+/// reply, append a temporary system hint so the next turn continues with a tool call
+/// instead of idling. Only the Nexus-owned exact-history path triggers this; the
+/// hint is recomputed per request and never persists into recorded history.
+fn append_agent_loop_continuation_hint(messages: &mut Vec<Value>, tool_context: &CodexToolContext) {
+    if tool_context.chat_tools().is_empty() {
+        return;
+    }
+    let has_tool_results = messages
+        .iter()
+        .any(|msg| msg.get("role").and_then(|v| v.as_str()) == Some("tool"));
+    let last_is_text_only_assistant = messages.last().is_some_and(|msg| {
+        msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
+            && msg
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .is_none_or(|calls| calls.is_empty())
+            && msg
+                .get("content")
+                .and_then(|v| v.as_str())
+                .is_some_and(|content| !content.trim().is_empty())
+    });
+    if has_tool_results && last_is_text_only_assistant {
+        log::warn!(
+            "[Codex] History-preserving transform saw a text-only trailing assistant reply mid-task; \
+             appending agent-loop continuation hint"
+        );
+        messages.push(json!({
+            "role": "system",
+            "content": AGENT_LOOP_CONTINUATION_INSTRUCTION
+        }));
+    }
 }
 
 fn instruction_text(value: &Value) -> String {
@@ -1852,13 +1891,116 @@ mod tests {
 
         let instructions = result["messages"][0]["content"].as_str().unwrap();
         assert!(
-            instructions.contains("A text-only progress update ends the agent turn"),
+            instructions.contains("a reply that contains only text and no tool call ends the turn"),
             "{instructions}"
         );
         assert!(
-            instructions.contains("include the next tool call in the same response"),
+            instructions
+                .contains("MUST NOT send narration or progress updates as a standalone reply"),
             "{instructions}"
         );
+    }
+
+    #[test]
+    fn text_only_trailing_reply_mid_task_triggers_continuation_hint() {
+        let input = || {
+            json!({
+                "model": "kimi-k3",
+                "instructions": "Keep working until the task is complete.",
+                "input": [{
+                    "type": "function_call", "call_id": "call_1",
+                    "name": "exec", "arguments": "{}"
+                }, {
+                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
+                }, {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Now the mandatory preflight."}]
+                }],
+                "tools": [{
+                    "type": "function", "name": "exec",
+                    "description": "Run a command",
+                    "parameters": {"type": "object", "properties": {}}
+                }]
+            })
+        };
+        let hint = "so it executed nothing and ended the turn";
+
+        let preserved =
+            responses_to_chat_completions_with_reasoning_history(input(), None, true).unwrap();
+        assert_eq!(
+            preserved["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .matches(hint)
+                .count(),
+            1
+        );
+        assert_eq!(
+            preserved["messages"][2]["role"], "tool",
+            "tool history must stay ordered after the collapsed head system message"
+        );
+
+        let baseline = responses_to_chat_completions(input()).unwrap();
+        assert!(
+            !baseline["messages"][0]["content"]
+                .as_str()
+                .unwrap()
+                .contains(hint),
+            "non-history-preserving path must not gain the hint"
+        );
+    }
+
+    #[test]
+    fn no_continuation_hint_when_meanwhile_work_is_settled() {
+        let cases = [
+            // Trailing tool call: the model is mid-work correctly.
+            json!({
+                "input": [{
+                    "type": "function_call", "call_id": "call_1",
+                    "name": "exec", "arguments": "{}"
+                }, {
+                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
+                }, {
+                    "type": "function_call", "call_id": "call_2",
+                    "name": "exec", "arguments": "{}"
+                }],
+                "tools": [{"type": "function", "name": "exec", "description": "Run",
+                    "parameters": {"type": "object", "properties": {}}}]
+            }),
+            // No tool results yet: a text-only opening reply is not a mid-task cutoff.
+            json!({
+                "input": [{
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will start now."}]
+                }],
+                "tools": [{"type": "function", "name": "exec", "description": "Run",
+                    "parameters": {"type": "object", "properties": {}}}]
+            }),
+            // Tool results exist but no tools are offered this request: nothing to call.
+            json!({
+                "input": [{
+                    "type": "function_call", "call_id": "call_1",
+                    "name": "exec", "arguments": "{}"
+                }, {
+                    "type": "function_call_output", "call_id": "call_1", "output": "ok"
+                }, {
+                    "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}]
+                }]
+            }),
+        ];
+        let hint = "so it executed nothing and ended the turn";
+
+        for input in cases {
+            let preserved =
+                responses_to_chat_completions_with_reasoning_history(input, None, true).unwrap();
+            let leaked = preserved["messages"].as_array().unwrap().iter().any(|msg| {
+                msg.get("content")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|content| content.contains(hint))
+            });
+            assert!(!leaked, "hint must not appear: {preserved}");
+        }
     }
 
     #[test]
