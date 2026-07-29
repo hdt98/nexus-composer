@@ -1,20 +1,21 @@
 import { z } from "zod";
 
 /**
- * 解析 JSON 语法错误，提取位置信息
+ * Parses JSON syntax errors and extracts location details.
  */
 function parseJsonError(error: unknown): string {
   if (!(error instanceof SyntaxError)) {
-    return "配置 JSON 格式错误";
+    return "Invalid configuration JSON";
   }
 
   const message = error.message;
 
-  // 提取位置信息：Chrome/V8: "Unexpected token ... in JSON at position 123"
+  // Extract a Chrome/V8 position from messages such as
+  // "Unexpected token ... in JSON at position 123".
   const positionMatch = message.match(/at position (\d+)/i);
   if (positionMatch) {
     const position = parseInt(positionMatch[1], 10);
-    return `JSON 格式错误：${message.split(" in JSON")[0]}（位置：${position}）`;
+    return `Invalid JSON: ${message.split(" in JSON")[0]} (position ${position})`;
   }
 
   // Firefox: "JSON.parse: unexpected character at line 1 column 23"
@@ -22,26 +23,26 @@ function parseJsonError(error: unknown): string {
   if (lineColumnMatch) {
     const line = lineColumnMatch[1];
     const column = lineColumnMatch[2];
-    return `JSON 格式错误：第 ${line} 行，第 ${column} 列`;
+    return `Invalid JSON: line ${line}, column ${column}`;
   }
 
-  // 通用情况：提取关键错误信息
+  // Extract the relevant details for other error formats.
   const cleanMessage = message
     .replace(/^JSON\.parse:\s*/i, "")
-    .replace(/^Unexpected\s+/i, "意外的 ")
-    .replace(/token/gi, "符号")
-    .replace(/Expected/gi, "预期");
+    .replace(/^Unexpected\s+/i, "Unexpected ")
+    .replace(/token/gi, "token")
+    .replace(/Expected/gi, "Expected");
 
-  return `JSON 格式错误：${cleanMessage}`;
+  return `Invalid JSON: ${cleanMessage}`;
 }
 
 export const providerSchema = z.object({
-  name: z.string(), // 必填校验移至 handleSubmit 中用 toast 提示
-  websiteUrl: z.string().url("请输入有效的网址").optional().or(z.literal("")),
+  name: z.string(), // Required-field validation is handled by a toast in handleSubmit.
+  websiteUrl: z.string().url("Enter a valid URL").optional().or(z.literal("")),
   notes: z.string().optional(),
   settingsConfig: z
     .string()
-    .min(1, "请填写配置内容")
+    .min(1, "Configuration is required")
     .superRefine((value, ctx) => {
       try {
         JSON.parse(value);
@@ -52,7 +53,7 @@ export const providerSchema = z.object({
         });
       }
     }),
-  // 图标配置
+  // Icon configuration.
   icon: z.string().optional(),
   iconColor: z.string().optional(),
 });

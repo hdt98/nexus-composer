@@ -29,7 +29,7 @@ vi.mock("react-i18next", () => ({
     t: (key: string, params?: Record<string, unknown>) =>
       params ? `${key}:${JSON.stringify(params)}` : key,
   }),
-  // 提供 initReactI18next 以兼容 i18n 初始化路径
+  // Provide initReactI18next for compatibility with the i18n initialization path.
   initReactI18next: { type: "3rdParty", init: () => {} },
 }));
 
@@ -168,7 +168,7 @@ describe("McpFormModal", () => {
     return { onSave, onClose };
   };
 
-  it("应用预设后填充 ID 与配置内容", async () => {
+  it("populates the ID and configuration after applying a preset", async () => {
     renderForm();
     await waitFor(() =>
       expect(
@@ -191,7 +191,7 @@ describe("McpFormModal", () => {
     );
   });
 
-  it("提交时清洗字段并调用 upsert 与 onSave", async () => {
+  it("normalizes fields and calls upsert and onSave on submit", async () => {
     const { onSave } = renderForm();
 
     fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
@@ -252,7 +252,7 @@ describe("McpFormModal", () => {
     expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
-  it("缺少配置命令时阻止提交并提示错误", async () => {
+  it("blocks submission and reports an error when command is missing", async () => {
     renderForm();
 
     fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
@@ -270,7 +270,7 @@ describe("McpFormModal", () => {
     expect(message).toBe("mcp.error.commandRequired");
   });
 
-  it("支持向导生成配置并自动填充 ID", async () => {
+  it("supports wizard-generated configuration and fills the ID", async () => {
     renderForm();
     fireEvent.click(screen.getByText("mcp.form.useWizard"));
 
@@ -292,7 +292,7 @@ describe("McpFormModal", () => {
     );
   });
 
-  it("TOML 模式下自动提取 ID 并成功保存", async () => {
+  it("extracts the ID and saves successfully in TOML mode", async () => {
     const { onSave } = renderForm({ defaultFormat: "toml" });
 
     const configTextarea = screen.getByPlaceholderText(
@@ -322,10 +322,10 @@ command = "run"
     expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
-  it("TOML 模式下缺少命令时展示错误提示并阻止提交", async () => {
+  it("reports an error and blocks TOML submission without a command", async () => {
     renderForm({ defaultFormat: "toml" });
 
-    // 填写 ID 字段
+    // Fill the ID field.
     fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
       target: { value: "test-toml" },
     });
@@ -349,7 +349,7 @@ type = "stdio"
     expect(upsertMock).not.toHaveBeenCalled();
   });
 
-  it("编辑模式下保持 ID 并更新配置", async () => {
+  it("keeps the ID and updates configuration in edit mode", async () => {
     const initialData: McpServer = {
       id: "existing",
       name: "Existing",
@@ -395,7 +395,7 @@ type = "stdio"
     expect(onSave).toHaveBeenCalledWith();
   });
 
-  it("允许未选择任何应用保存配置，并保持 apps 全 false", async () => {
+  it("saves with all apps false when no application is selected", async () => {
     const { onSave } = renderForm();
 
     fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
@@ -440,8 +440,8 @@ type = "stdio"
     expect(toastErrorMock).not.toHaveBeenCalled();
   });
 
-  it("保存失败时展示翻译后的错误并恢复按钮", async () => {
-    const failingSave = vi.fn().mockRejectedValue(new Error("保存失败"));
+  it("shows the translated error and restores the button after save failure", async () => {
+    const failingSave = vi.fn().mockRejectedValue(new Error("Save failed"));
     renderForm({ onSave: failingSave });
 
     fireEvent.change(screen.getByPlaceholderText("mcp.form.titlePlaceholder"), {
@@ -456,7 +456,7 @@ type = "stdio"
     await waitFor(() => expect(failingSave).toHaveBeenCalled());
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
     const [message] = toastErrorMock.mock.calls.at(-1) ?? [];
-    expect(message).toBe("保存失败");
+    expect(message).toBe("Save failed");
 
     const addButton = screen.getByText("common.add") as HTMLButtonElement;
     expect(addButton.disabled).toBe(false);

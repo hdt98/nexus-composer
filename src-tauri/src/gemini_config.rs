@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// 获取 Gemini 配置目录路径（支持设置覆盖）
+/// Return the Gemini config directory path, honoring settings overrides.
 pub fn get_gemini_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_gemini_override_dir() {
         return custom;
@@ -14,32 +14,32 @@ pub fn get_gemini_dir() -> PathBuf {
     get_home_dir().join(".gemini")
 }
 
-/// 获取 Gemini .env 文件路径
+/// Return the Gemini `.env` file path.
 pub fn get_gemini_env_path() -> PathBuf {
     get_gemini_dir().join(".env")
 }
 
-/// 解析 .env 文件内容为键值对
+/// Parse `.env` file content into key-value pairs.
 ///
-/// 此函数宽松地解析 .env 文件，跳过无效行。
-/// 对于需要严格验证的场景，请使用 `parse_env_file_strict`。
+/// This parser is permissive and skips invalid lines.
+/// Use `parse_env_file_strict` when strict validation is required.
 pub fn parse_env_file(content: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
 
     for line in content.lines() {
         let line = line.trim();
 
-        // 跳过空行和注释
+        // Skip empty lines and comments.
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        // 解析 KEY=VALUE
+        // Parse `KEY=VALUE`.
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim().to_string();
             let value = value.trim().to_string();
 
-            // 验证 key 是否有效（不为空，只包含字母、数字和下划线）
+            // Accept only non-empty keys with letters, digits, or underscores.
             if !key.is_empty() && key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 map.insert(key, value);
             }
@@ -49,68 +49,75 @@ pub fn parse_env_file(content: &str) -> HashMap<String, String> {
     map
 }
 
-/// 严格解析 .env 文件内容，返回详细的错误信息
+/// Parse `.env` file content strictly and return detailed errors.
 ///
-/// 与 `parse_env_file` 不同，此函数在遇到无效行时会返回错误，
-/// 包含行号和详细的错误信息。
+/// Unlike `parse_env_file`, this function returns an error for the first invalid
+/// line and includes the line number and a detailed message.
 ///
-/// # 错误
+/// # Errors
 ///
-/// 返回 `AppError` 如果遇到以下情况：
-/// - 行不包含 `=` 分隔符
-/// - Key 为空或包含无效字符
-/// - Key 不符合环境变量命名规范
+/// Returns `AppError` when:
+/// - a line does not contain an `=` separator
+/// - a key is empty or contains invalid characters
+/// - a key does not follow environment variable naming rules
 ///
-/// # 使用场景
+/// # Use cases
 ///
-/// 此函数为未来的严格验证场景预留，当前运行时使用宽松的 `parse_env_file`。
-/// 可用于：
-/// - 配置导入验证
-/// - CLI 工具的严格模式
-/// - 配置文件错误诊断
+/// This function is reserved for stricter validation flows in the future.
+/// The current runtime path uses the permissive `parse_env_file`.
+/// It is suitable for:
+/// - config import validation
+/// - strict CLI modes
+/// - config file error diagnosis
 ///
-/// 已有完整的测试覆盖，可直接使用。
+/// Test coverage is already in place, so this can be enabled directly.
 #[allow(dead_code)]
 pub fn parse_env_file_strict(content: &str) -> Result<HashMap<String, String>, AppError> {
     let mut map = HashMap::new();
 
     for (line_num, line) in content.lines().enumerate() {
         let line = line.trim();
-        let line_number = line_num + 1; // 行号从 1 开始
+        let line_number = line_num + 1; // Line numbers are 1-based.
 
-        // 跳过空行和注释
+        // Skip empty lines and comments.
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        // 检查是否包含 =
+        // Require an `=` separator.
         if !line.contains('=') {
             return Err(AppError::localized(
                 "gemini.env.parse_error.no_equals",
-                format!("Gemini .env 文件格式错误（第 {line_number} 行）：缺少 '=' 分隔符\n行内容: {line}"),
+                format!(
+                    "Invalid Gemini .env format (line {line_number}): missing '=' separator\nLine: {line}"
+                ),
                 format!("Invalid Gemini .env format (line {line_number}): missing '=' separator\nLine: {line}"),
             ));
         }
 
-        // 解析 KEY=VALUE
+        // Parse `KEY=VALUE`.
         if let Some((key, value)) = line.split_once('=') {
             let key = key.trim();
             let value = value.trim();
 
-            // 验证 key 不为空
+            // Require a non-empty key.
             if key.is_empty() {
                 return Err(AppError::localized(
                     "gemini.env.parse_error.empty_key",
-                    format!("Gemini .env 文件格式错误（第 {line_number} 行）：环境变量名不能为空\n行内容: {line}"),
+                    format!(
+                        "Invalid Gemini .env format (line {line_number}): variable name cannot be empty\nLine: {line}"
+                    ),
                     format!("Invalid Gemini .env format (line {line_number}): variable name cannot be empty\nLine: {line}"),
                 ));
             }
 
-            // 验证 key 只包含字母、数字和下划线
+            // Restrict keys to letters, digits, and underscores.
             if !key.chars().all(|c| c.is_alphanumeric() || c == '_') {
                 return Err(AppError::localized(
                     "gemini.env.parse_error.invalid_key",
-                    format!("Gemini .env 文件格式错误（第 {line_number} 行）：环境变量名只能包含字母、数字和下划线\n变量名: {key}"),
+                    format!(
+                        "Invalid Gemini .env format (line {line_number}): variable name can only contain letters, numbers, and underscores\nVariable: {key}"
+                    ),
                     format!("Invalid Gemini .env format (line {line_number}): variable name can only contain letters, numbers, and underscores\nVariable: {key}"),
                 ));
             }
@@ -122,11 +129,11 @@ pub fn parse_env_file_strict(content: &str) -> Result<HashMap<String, String>, A
     Ok(map)
 }
 
-/// 将键值对序列化为 .env 格式
+/// Serialize key-value pairs into `.env` format.
 pub fn serialize_env_file(map: &HashMap<String, String>) -> String {
     let mut lines = Vec::new();
 
-    // 按键排序以保证输出稳定
+    // Sort keys to keep output stable.
     let mut keys: Vec<_> = map.keys().collect();
     keys.sort();
 
@@ -139,7 +146,7 @@ pub fn serialize_env_file(map: &HashMap<String, String>) -> String {
     lines.join("\n")
 }
 
-/// 读取 Gemini .env 文件
+/// Read the Gemini `.env` file.
 pub fn read_gemini_env() -> Result<HashMap<String, String>, AppError> {
     let path = get_gemini_env_path();
 
@@ -152,15 +159,15 @@ pub fn read_gemini_env() -> Result<HashMap<String, String>, AppError> {
     Ok(parse_env_file(&content))
 }
 
-/// 写入 Gemini .env 文件（原子操作）
+/// Write the Gemini `.env` file atomically.
 pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppError> {
     let path = get_gemini_env_path();
 
-    // 确保目录存在
+    // Ensure the parent directory exists.
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
 
-        // 设置目录权限为 700（仅所有者可读写执行）
+        // Set directory permissions to 700 for owner-only access.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -175,7 +182,7 @@ pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppE
     let content = serialize_env_file(map);
     write_text_file(&path, &content)?;
 
-    // 设置文件权限为 600（仅所有者可读写）
+    // Set file permissions to 600 for owner-only read/write access.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -189,7 +196,7 @@ pub fn write_gemini_env_atomic(map: &HashMap<String, String>) -> Result<(), AppE
     Ok(())
 }
 
-/// 从 .env 格式转换为 Provider.settings_config (JSON Value)
+/// Convert `.env` data into `Provider.settings_config` (`JSON Value`).
 pub fn env_to_json(env_map: &HashMap<String, String>) -> Value {
     let mut json_map = serde_json::Map::new();
 
@@ -200,7 +207,7 @@ pub fn env_to_json(env_map: &HashMap<String, String>) -> Value {
     serde_json::json!({ "env": json_map })
 }
 
-/// 从 Provider.settings_config (JSON Value) 提取 .env 格式
+/// Extract `.env` data from `Provider.settings_config` (`JSON Value`).
 pub fn json_to_env(settings: &Value) -> Result<HashMap<String, String>, AppError> {
     let mut env_map = HashMap::new();
 
@@ -215,31 +222,34 @@ pub fn json_to_env(settings: &Value) -> Result<HashMap<String, String>, AppError
     Ok(env_map)
 }
 
-/// 验证 Gemini 配置的基本结构
+/// Validate the basic Gemini config structure.
 ///
-/// 此函数只验证配置的基本格式，不强制要求 GEMINI_API_KEY。
-/// 这允许用户先创建供应商配置，稍后再填写 API Key。
+/// This checks only the basic config shape and does not require
+/// `GEMINI_API_KEY`.
+/// That allows users to create the provider config first and fill in the API
+/// key later.
 ///
-/// API Key 的验证会在切换供应商时进行（通过 `validate_gemini_settings_strict`）。
+/// API key validation happens during provider switching through
+/// `validate_gemini_settings_strict`.
 pub fn validate_gemini_settings(settings: &Value) -> Result<(), AppError> {
-    // 只验证基本结构，不强制要求 GEMINI_API_KEY
-    // 如果有 env 字段，验证它是一个对象
+    // Validate only the basic structure and do not require `GEMINI_API_KEY`.
+    // If `env` is present, it must be an object.
     if let Some(env) = settings.get("env") {
         if !env.is_object() {
             return Err(AppError::localized(
                 "gemini.validation.invalid_env",
-                "Gemini 配置格式错误: env 必须是对象",
+                "Gemini config invalid: env must be an object",
                 "Gemini config invalid: env must be an object",
             ));
         }
     }
 
-    // 如果有 config 字段，验证它是对象或 null
+    // If `config` is present, it must be an object or `null`.
     if let Some(config) = settings.get("config") {
         if !(config.is_object() || config.is_null()) {
             return Err(AppError::localized(
                 "gemini.validation.invalid_config",
-                "Gemini 配置格式错误: config 必须是对象",
+                "Gemini config invalid: config must be an object",
                 "Gemini config invalid: config must be an object",
             ));
         }
@@ -248,26 +258,28 @@ pub fn validate_gemini_settings(settings: &Value) -> Result<(), AppError> {
     Ok(())
 }
 
-/// 严格验证 Gemini 配置（要求必需字段）
+/// Validate Gemini config strictly, including required fields.
 ///
-/// 此函数在切换供应商时使用，确保配置包含所有必需的字段。
-/// 对于需要 API Key 的供应商（如 PackyCode），会验证 GEMINI_API_KEY 字段。
+/// This is used when switching providers to ensure the config contains all
+/// required fields.
+/// For providers that require an API key, such as PackyCode, it validates the
+/// `GEMINI_API_KEY` field.
 pub fn validate_gemini_settings_strict(settings: &Value) -> Result<(), AppError> {
-    // 先做基础格式验证（包含 env/config 类型）
+    // Run the basic shape validation first, including `env` and `config` types.
     validate_gemini_settings(settings)?;
 
     let env_map = json_to_env(settings)?;
 
-    // 如果 env 为空，表示使用 OAuth（如 Google 官方），跳过验证
+    // An empty `env` indicates OAuth mode, such as the Google-managed provider.
     if env_map.is_empty() {
         return Ok(());
     }
 
-    // 如果 env 不为空，检查必需字段 GEMINI_API_KEY
+    // Non-empty `env` requires the `GEMINI_API_KEY` field.
     if !env_map.contains_key("GEMINI_API_KEY") {
         return Err(AppError::localized(
             "gemini.validation.missing_api_key",
-            "Gemini 配置缺少必需字段: GEMINI_API_KEY",
+            "Gemini config missing required field: GEMINI_API_KEY",
             "Gemini config missing required field: GEMINI_API_KEY",
         ));
     }
@@ -275,31 +287,32 @@ pub fn validate_gemini_settings_strict(settings: &Value) -> Result<(), AppError>
     Ok(())
 }
 
-/// 获取 Gemini settings.json 文件路径
+/// Return the Gemini `settings.json` path.
 ///
-/// 返回路径：`~/.gemini/settings.json`（与 `.env` 文件同级）
+/// The path is `~/.gemini/settings.json`, next to the `.env` file.
 pub fn get_gemini_settings_path() -> PathBuf {
     get_gemini_dir().join("settings.json")
 }
 
-/// 更新 Gemini 目录 settings.json 中的 security.auth.selectedType 字段
+/// Update `security.auth.selectedType` in Gemini `settings.json`.
 ///
-/// 此函数会：
-/// 1. 读取现有的 settings.json（如果存在）
-/// 2. 只更新 `security.auth.selectedType` 字段，保留其他所有字段
-/// 3. 原子性写入文件
+/// This function:
+/// 1. reads the existing `settings.json` if it exists
+/// 2. updates only `security.auth.selectedType` and preserves every other field
+/// 3. writes the file atomically
 ///
-/// # 参数
-/// - `selected_type`: 要设置的 selectedType 值（如 "gemini-api-key" 或 "oauth-personal"）
+/// # Parameters
+/// - `selected_type`: selectedType value to write, such as `"gemini-api-key"`
+///   or `"oauth-personal"`
 fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
     let settings_path = get_gemini_settings_path();
 
-    // 确保目录存在
+    // Ensure the parent directory exists.
     if let Some(parent) = settings_path.parent() {
         fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    // 读取现有的 settings.json（如果存在）
+    // Read the existing `settings.json` if present.
     let mut settings_content = if settings_path.exists() {
         let content =
             fs::read_to_string(&settings_path).map_err(|e| AppError::io(&settings_path, e))?;
@@ -308,7 +321,7 @@ fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
         serde_json::json!({})
     };
 
-    // 只更新 security.auth.selectedType 字段
+    // Update only `security.auth.selectedType`.
     if let Some(obj) = settings_content.as_object_mut() {
         let security = obj
             .entry("security")
@@ -328,15 +341,15 @@ fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
         }
     }
 
-    // 写入文件
+    // Write the file.
     crate::config::write_json_file(&settings_path, &settings_content)?;
 
     Ok(())
 }
 
-/// 为 Packycode Gemini 供应商写入 settings.json
+/// Write `settings.json` for the PackyCode Gemini provider.
 ///
-/// 设置 `~/.gemini/settings.json` 中的：
+/// Sets the following structure in `~/.gemini/settings.json`:
 /// ```json
 /// {
 ///   "security": {
@@ -347,14 +360,14 @@ fn update_selected_type(selected_type: &str) -> Result<(), AppError> {
 /// }
 /// ```
 ///
-/// 保留文件中的其他所有字段。
+/// Preserves all other fields already present in the file.
 pub fn write_packycode_settings() -> Result<(), AppError> {
     update_selected_type("gemini-api-key")
 }
 
-/// 为 Google 官方 Gemini 供应商写入 settings.json（OAuth 模式）
+/// Write `settings.json` for the Google Gemini provider in OAuth mode.
 ///
-/// 设置 `~/.gemini/settings.json` 中的：
+/// Sets the following structure in `~/.gemini/settings.json`:
 /// ```json
 /// {
 ///   "security": {
@@ -365,7 +378,7 @@ pub fn write_packycode_settings() -> Result<(), AppError> {
 /// }
 /// ```
 ///
-/// 保留文件中的其他所有字段。
+/// Preserves all other fields already present in the file.
 pub fn write_google_oauth_settings() -> Result<(), AppError> {
     update_selected_type("oauth-personal")
 }
@@ -427,7 +440,7 @@ GEMINI_MODEL=gemini-3.5-flash
 
     #[test]
     fn test_parse_env_file_strict_success() {
-        // 测试严格模式下正常解析
+        // Verify successful parsing in strict mode.
         let content = r#"
 # Comment line
 GOOGLE_GEMINI_BASE_URL=https://example.com
@@ -455,7 +468,7 @@ GEMINI_MODEL=gemini-3.5-flash
 
     #[test]
     fn test_parse_env_file_strict_missing_equals() {
-        // 测试严格模式下检测缺少 = 的行
+        // Verify strict mode rejects a line without `=`.
         let content = "GOOGLE_GEMINI_BASE_URL=https://example.com
 INVALID_LINE_WITHOUT_EQUALS
 GEMINI_API_KEY=sk-test123";
@@ -465,13 +478,13 @@ GEMINI_API_KEY=sk-test123";
 
         let err = result.unwrap_err();
         let err_msg = format!("{err:?}");
-        assert!(err_msg.contains("第 2 行") || err_msg.contains("line 2"));
+        assert!(err_msg.contains("line 2"));
         assert!(err_msg.contains("INVALID_LINE_WITHOUT_EQUALS"));
     }
 
     #[test]
     fn test_parse_env_file_strict_empty_key() {
-        // 测试严格模式下检测空 key
+        // Verify strict mode rejects an empty key.
         let content = "GOOGLE_GEMINI_BASE_URL=https://example.com
 =value_without_key
 GEMINI_API_KEY=sk-test123";
@@ -481,13 +494,13 @@ GEMINI_API_KEY=sk-test123";
 
         let err = result.unwrap_err();
         let err_msg = format!("{err:?}");
-        assert!(err_msg.contains("第 2 行") || err_msg.contains("line 2"));
-        assert!(err_msg.contains("empty") || err_msg.contains("空"));
+        assert!(err_msg.contains("line 2"));
+        assert!(err_msg.contains("empty"));
     }
 
     #[test]
     fn test_parse_env_file_strict_invalid_key_characters() {
-        // 测试严格模式下检测无效字符（如空格、特殊符号）
+        // Verify strict mode rejects invalid key characters.
         let content = "GOOGLE_GEMINI_BASE_URL=https://example.com
 INVALID KEY WITH SPACES=value
 GEMINI_API_KEY=sk-test123";
@@ -497,30 +510,30 @@ GEMINI_API_KEY=sk-test123";
 
         let err = result.unwrap_err();
         let err_msg = format!("{err:?}");
-        assert!(err_msg.contains("第 2 行") || err_msg.contains("line 2"));
+        assert!(err_msg.contains("line 2"));
         assert!(err_msg.contains("INVALID KEY WITH SPACES"));
     }
 
     #[test]
     fn test_parse_env_file_lax_vs_strict() {
-        // 测试宽松模式和严格模式的差异
+        // Verify the difference between permissive and strict parsing.
         let content = "VALID_KEY=value
 INVALID LINE
 KEY_WITH-DASH=value";
 
-        // 宽松模式：跳过无效行，继续解析
+        // Permissive mode skips invalid lines and keeps parsing.
         let lax_result = parse_env_file(content);
-        assert_eq!(lax_result.len(), 1); // 只有 VALID_KEY
+        assert_eq!(lax_result.len(), 1); // Only `VALID_KEY` is accepted.
         assert_eq!(lax_result.get("VALID_KEY"), Some(&"value".to_string()));
 
-        // 严格模式：遇到无效行立即返回错误
+        // Strict mode fails on the first invalid line.
         let strict_result = parse_env_file_strict(content);
         assert!(strict_result.is_err());
     }
 
     #[test]
     fn test_packycode_settings_structure() {
-        // 验证 Packycode settings.json 的结构正确
+        // Verify the PackyCode `settings.json` structure.
         let settings_content = serde_json::json!({
             "security": {
                 "auth": {
@@ -537,7 +550,7 @@ KEY_WITH-DASH=value";
 
     #[test]
     fn test_packycode_settings_merge() {
-        // 测试合并逻辑：应该保留其他字段
+        // Verify merge behavior preserves unrelated fields.
         let mut existing_settings = serde_json::json!({
             "otherField": "should-be-kept",
             "security": {
@@ -548,7 +561,7 @@ KEY_WITH-DASH=value";
             }
         });
 
-        // 模拟更新 selectedType
+        // Simulate a `selectedType` update.
         if let Some(obj) = existing_settings.as_object_mut() {
             let security = obj
                 .entry("security")
@@ -568,7 +581,7 @@ KEY_WITH-DASH=value";
             }
         }
 
-        // 验证所有字段都被保留
+        // Verify all existing fields are preserved.
         assert_eq!(existing_settings["otherField"], "should-be-kept");
         assert_eq!(existing_settings["security"]["otherSetting"], "also-kept");
         assert_eq!(
@@ -583,7 +596,7 @@ KEY_WITH-DASH=value";
 
     #[test]
     fn test_google_oauth_settings_structure() {
-        // 验证 Google OAuth settings.json 的结构正确
+        // Verify the Google OAuth `settings.json` structure.
         let settings_content = serde_json::json!({
             "security": {
                 "auth": {
@@ -600,19 +613,19 @@ KEY_WITH-DASH=value";
 
     #[test]
     fn test_validate_empty_env_for_oauth() {
-        // 测试空 env（Google 官方 OAuth）可以通过基本验证
+        // Verify an empty `env` passes base validation for Google OAuth.
         let settings = serde_json::json!({
             "env": {}
         });
 
         assert!(validate_gemini_settings(&settings).is_ok());
-        // 严格验证也应该通过（空 env 表示 OAuth）
+        // Strict validation should also pass because empty `env` means OAuth.
         assert!(validate_gemini_settings_strict(&settings).is_ok());
     }
 
     #[test]
     fn test_validate_env_with_api_key() {
-        // 测试有 API Key 的配置可以通过验证
+        // Verify config with an API key passes validation.
         let settings = serde_json::json!({
             "env": {
                 "GEMINI_API_KEY": "sk-test123",
@@ -626,22 +639,22 @@ KEY_WITH-DASH=value";
 
     #[test]
     fn test_validate_env_without_api_key_relaxed() {
-        // 测试缺少 API Key 的非空配置在基本验证中可以通过（用户稍后填写）
+        // Verify non-empty config without an API key passes base validation.
         let settings = serde_json::json!({
             "env": {
                 "GEMINI_MODEL": "gemini-3.5-flash"
             }
         });
 
-        // 基本验证应该通过（允许稍后填写 API Key）
+        // Base validation allows the API key to be filled in later.
         assert!(validate_gemini_settings(&settings).is_ok());
-        // 严格验证应该失败（切换时要求完整配置）
+        // Strict validation requires a complete config during provider switching.
         assert!(validate_gemini_settings_strict(&settings).is_err());
     }
 
     #[test]
     fn test_validate_invalid_env_type() {
-        // 测试 env 不是对象时会失败
+        // Verify validation fails when `env` is not an object.
         let settings = serde_json::json!({
             "env": "invalid_string"
         });

@@ -1,5 +1,5 @@
 /**
- * 代理配置管理 Hook
+ * Routing-configuration management hook.
  */
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -9,19 +9,19 @@ import { useTranslation } from "react-i18next";
 import type { ProxyConfig } from "@/types/proxy";
 
 /**
- * 代理配置管理
+ * Manages routing configuration.
  */
 export function useProxyConfig() {
   const queryClient = useQueryClient();
   const { t } = useTranslation();
 
-  // 查询配置
+  // Query configuration.
   const { data: config, isLoading } = useQuery({
     queryKey: ["proxyConfig"],
     queryFn: () => invoke<ProxyConfig>("get_proxy_config"),
   });
 
-  // 更新配置
+  // Update configuration.
   const updateMutation = useMutation({
     mutationFn: (newConfig: ProxyConfig) =>
       invoke("update_proxy_config", { config: newConfig }),

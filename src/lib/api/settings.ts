@@ -22,7 +22,7 @@ export interface WebDavTestResult {
 export interface CodexUnifyHistoryRestoreResult {
   restoredJsonlFiles: number;
   restoredStateRows: number;
-  /** 还原被跳过的原因（如当前目录没有账本）；存在时不应报成功 */
+  /** Why restoration was skipped, such as no ledger in the current directory. */
   skippedReason?: string;
 }
 
@@ -39,12 +39,12 @@ export const settingsApi = {
     return await invoke("save_settings", { settings });
   },
 
-  /** 是否存在统一 Codex 会话历史的迁移备份（关闭弹窗据此显示"恢复备份"勾选） */
+  /** Whether a unified Codex history backup exists for the disable dialog. */
   async hasCodexUnifyHistoryBackup(): Promise<boolean> {
     return await invoke("has_codex_unify_history_backup");
   },
 
-  /** 按迁移备份账本把当时迁入共享桶的官方会话还原回 openai 桶（幂等） */
+  /** Idempotently restores official sessions from the shared bucket to openai using the migration ledger. */
   async restoreCodexUnifiedHistory(): Promise<CodexUnifyHistoryRestoreResult> {
     return await invoke("restore_codex_unified_history");
   },
@@ -268,8 +268,9 @@ export const settingsApi = {
     });
   },
 
-  /** 探测各工具安装分布：枚举所有安装、标记冲突、生成锚定升级命令。
-   *  诊断按钮、升级前确认、升级后补诊共用此命令，各取所需字段。 */
+  /** Probes tool installations, marks conflicts, and generates anchored update
+   * commands. Diagnostics, pre-update confirmation, and post-update checks all
+   * share this command and consume their relevant fields. */
   async probeToolInstallations(
     tools: string[],
   ): Promise<ToolInstallationReport[]> {
@@ -301,7 +302,7 @@ export const settingsApi = {
   },
 };
 
-/** 单处工具安装的诊断信息（多处安装冲突检测）。字段对应后端 ToolInstallation。 */
+/** Installation diagnostics used for conflict detection; mirrors backend ToolInstallation. */
 export interface ToolInstallation {
   path: string;
   version: string | null;
@@ -311,7 +312,7 @@ export interface ToolInstallation {
   is_path_default: boolean;
 }
 
-/** 一次"探测工具安装分布"的结果。字段对应后端 ToolInstallationReport。 */
+/** Result of probing tool installations; mirrors backend ToolInstallationReport. */
 export interface ToolInstallationReport {
   tool: string;
   installs: ToolInstallation[];

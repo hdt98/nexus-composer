@@ -724,7 +724,7 @@ mod tests {
             "candidates": [{
                 "finishReason": "STOP",
                 "content": {
-                    "parts": [{ "text": "你好，Gemini" }]
+                    "parts": [{ "text": "Xin chào, Gemini" }]
                 }
             }],
             "usageMetadata": {
@@ -733,7 +733,7 @@ mod tests {
             }
         });
         let chunk = format!("data: {}\n\n", serde_json::to_string(&payload).unwrap());
-        let split_at = chunk.find("你好").unwrap() + 1;
+        let split_at = chunk.find('à').unwrap() + 1;
         let chunk_bytes = chunk.into_bytes();
         let stream = futures::stream::iter([
             Ok::<Bytes, std::io::Error>(Bytes::from(chunk_bytes[..split_at].to_vec())),
@@ -750,7 +750,7 @@ mod tests {
                 .join("")
         });
 
-        assert!(output.contains("你好，Gemini"));
+        assert!(output.contains("Xin chào, Gemini"));
         assert!(!output.contains('\u{fffd}'));
     }
 
@@ -886,7 +886,7 @@ mod tests {
                             "args": {
                                 "name": "git-commit",
                                 "parameters": {
-                                    "args": ["详细分析内容 编写提交信息 分多次提交代码"]
+                                    "args": ["Phân tích chi tiết, soạn thông điệp commit, chia mã thành nhiều commit"]
                                 }
                             }
                         }
@@ -933,7 +933,8 @@ mod tests {
         });
 
         assert!(output.contains("git-commit"));
-        assert!(output.contains("详细分析内容 编写提交信息 分多次提交代码"));
+        assert!(output
+            .contains("Phân tích chi tiết, soạn thông điệp commit, chia mã thành nhiều commit"));
         assert!(!output.contains("\\\"parameters\\\""));
     }
 

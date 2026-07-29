@@ -6,15 +6,16 @@ import { SubscriptionQuotaView } from "@/components/SubscriptionQuotaFooter";
 interface CodexOauthQuotaFooterProps {
   meta?: ProviderMeta;
   inline?: boolean;
-  /** 是否为当前激活的供应商 */
+  /** Whether this is the active provider. */
   isCurrent?: boolean;
 }
 
 /**
- * Codex OAuth (ChatGPT Plus/Pro 反代) 订阅额度 footer
+ * Subscription quota footer for Codex OAuth ChatGPT Plus/Pro routing.
  *
- * 复用 SubscriptionQuotaView 的全部渲染逻辑（5 状态 × inline/expanded）。
- * 数据源切换为 nexus-composer 自管的 OAuth token 而非 Codex CLI 凭据。
+ * Reuses all SubscriptionQuotaView rendering states in inline and expanded
+ * modes, using an OAuth token managed by nexus-composer instead of Codex CLI
+ * credentials.
  */
 const CodexOauthQuotaFooter: React.FC<CodexOauthQuotaFooterProps> = ({
   meta,

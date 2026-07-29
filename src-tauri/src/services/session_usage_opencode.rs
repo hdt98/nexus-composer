@@ -1,14 +1,14 @@
-//! OpenCode 会话日志使用追踪
+//! OpenCode session-log usage tracking.
 //!
-//! 从 ~/.local/share/opencode/opencode.db (SQLite) 中提取精确 token 使用数据。
+//! Extracts exact token usage from ~/.local/share/opencode/opencode.db (SQLite).
 //!
-//! ## 数据流
+//! ## Data flow
 //! ```text
 //! ~/.local/share/opencode/opencode.db
-//!   → session 表获取所有会话
-//!   → message 表获取 assistant 消息
-//!   → 解析 data JSON 提取 tokens/cost/model
-//!   → proxy_request_logs 表
+//!   → session table for all sessions
+//!   → message table for assistant messages
+//!   → parse data JSON for tokens, cost, and model
+//!   → proxy_request_logs table
 //! ```
 
 use crate::database::{lock_conn, Database};
@@ -24,7 +24,7 @@ use rust_decimal::Decimal;
 use std::fs;
 use std::time::SystemTime;
 
-/// 从 opencode message.data JSON 中提取的 token 和费用数据
+/// Token and cost data extracted from OpenCode message.data JSON.
 struct OpenCodeMessageData {
     input_tokens: u32,
     output_tokens: u32,
@@ -41,7 +41,7 @@ struct OpenCodeMessageQueryResult {
     has_incomplete_usage: bool,
 }
 
-/// 同步 OpenCode 使用数据
+/// Synchronizes OpenCode usage data.
 pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError> {
     let db_path = get_opencode_db_path();
 
@@ -56,12 +56,11 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 
     let db_path_str = db_path.to_string_lossy().to_string();
 
-    // 检查文件修改时间。
-    // opencode 的数据库运行在 WAL 模式：新提交先落在 -wal 文件里，
-    // 主库文件只有在 checkpoint 时才更新。因此必须同时考虑 -wal 的
-    // mtime，否则会在 checkpoint 之前漏掉刚写入的会话。
+    // Check file modification times. The OpenCode database runs in WAL mode: new commits first land
+    // in the -wal file, while the main database updates only at a checkpoint. Include -wal mtime or
+    // newly written sessions would be missed before the checkpoint.
     let metadata = fs::metadata(&db_path)
-        .map_err(|e| AppError::Config(format!("无法读取 opencode.db 元数据: {e}")))?;
+        .map_err(|e| AppError::Config(format!("Failed to read opencode.db metadata: {e}")))?;
     let mut file_modified = metadata_modified_nanos(&metadata);
 
     let wal_path = db_path.with_extension("db-wal");
@@ -71,7 +70,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
 
     let (last_modified, _last_offset) = get_sync_state(db, &db_path_str)?;
 
-    // 文件未变化则跳过
+    // Skip unchanged files.
     if file_modified <= last_modified {
         return Ok(SessionSyncResult {
             imported: 0,
@@ -81,10 +80,10 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
         });
     }
 
-    // 打开 opencode 的 SQLite 数据库（只读）
+    // Open the OpenCode SQLite database read-only.
     let opencode_conn =
         rusqlite::Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|e| AppError::Database(format!("无法打开 opencode.db: {e}")))?;
+            .map_err(|e| AppError::Database(format!("Failed to open opencode.db: {e}")))?;
 
     let mut result = SessionSyncResult {
         imported: 0,
@@ -94,20 +93,20 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
     };
     let mut has_sync_errors = false;
 
-    // 查询所有会话
+    // Query all sessions.
     let sessions = query_sessions(&opencode_conn)?;
 
     for (session_id, time_updated) in &sessions {
-        // 检查会话是否需要重新同步
+        // Check whether the session needs resynchronization.
         let sync_key = format!("{db_path_str}:{session_id}");
         let (sess_last_modified, _) = get_sync_state(db, &sync_key)?;
         if *time_updated <= sess_last_modified {
-            continue; // 会话未更新，跳过
+            continue; // Skip an unchanged session.
         }
 
         let mut session_had_error = false;
 
-        // 查询该会话的所有 assistant 消息
+        // Query every assistant message in this session.
         let mut session_has_incomplete_usage = false;
         match query_assistant_messages(&opencode_conn, session_id) {
             Ok(query_result) => {
@@ -119,7 +118,8 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
                         Ok(true) => result.imported += 1,
                         Ok(false) => result.skipped += 1,
                         Err(e) => {
-                            let msg = format!("OpenCode 消息插入失败 {request_id}: {e}");
+                            let msg =
+                                format!("Failed to insert OpenCode message {request_id}: {e}");
                             log::warn!("[OPENCODE-SYNC] {msg}");
                             result.errors.push(msg);
                             result.skipped += 1;
@@ -129,7 +129,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
                 }
             }
             Err(e) => {
-                let msg = format!("OpenCode 会话消息查询失败 {session_id}: {e}");
+                let msg = format!("Failed to query OpenCode session messages {session_id}: {e}");
                 log::warn!("[OPENCODE-SYNC] {msg}");
                 result.errors.push(msg);
                 session_had_error = true;
@@ -145,23 +145,26 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
             continue;
         }
 
-        // 更新会话级同步状态。失败时不要推进文件级状态，确保下次可重试。
+        // Update session-level synchronization state. On failure, do not advance file-level state,
+        // ensuring the next run can retry.
         if let Err(e) = update_sync_state(db, &sync_key, *time_updated, 0) {
-            let msg = format!("OpenCode 会话同步状态更新失败 {session_id}: {e}");
+            let msg = format!(
+                "Failed to update OpenCode session synchronization state {session_id}: {e}"
+            );
             log::warn!("[OPENCODE-SYNC] {msg}");
             result.errors.push(msg);
             has_sync_errors = true;
         }
     }
 
-    // 仅在本轮完全成功时推进文件级状态；否则保留下次重试入口。
+    // Advance file-level state only when the entire run succeeds; otherwise preserve the retry entry.
     if !has_sync_errors {
         update_sync_state(db, &db_path_str, file_modified, 0)?;
     }
 
     if result.imported > 0 {
         log::info!(
-            "[OPENCODE-SYNC] 同步完成: 导入 {} 条, 跳过 {} 条, 扫描 {} 个会话",
+            "[OPENCODE-SYNC] Complete: imported {}, skipped {}, scanned {} sessions",
             result.imported,
             result.skipped,
             sessions.len()
@@ -171,7 +174,7 @@ pub fn sync_opencode_usage(db: &Database) -> Result<SessionSyncResult, AppError>
     Ok(result)
 }
 
-/// 查询所有会话的 (id, sync_watermark)
+/// Queries (id, sync_watermark) for all sessions.
 fn query_sessions(conn: &rusqlite::Connection) -> Result<Vec<(String, i64)>, AppError> {
     let mut stmt = conn
         .prepare(
@@ -182,44 +185,46 @@ fn query_sessions(conn: &rusqlite::Connection) -> Result<Vec<(String, i64)>, App
              GROUP BY s.id
              ORDER BY sync_watermark",
         )
-        .map_err(|e| AppError::Database(format!("准备会话查询失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to prepare the session query: {e}")))?;
 
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
-        .map_err(|e| AppError::Database(format!("查询会话失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to query sessions: {e}")))?;
 
     let mut sessions = Vec::new();
     for row in rows {
-        sessions.push(row.map_err(|e| AppError::Database(format!("读取会话行失败: {e}")))?);
+        sessions.push(
+            row.map_err(|e| AppError::Database(format!("Failed to read a session row: {e}")))?,
+        );
     }
 
     Ok(sessions)
 }
 
-/// 查询某会话的已完成 assistant 消息，并标记是否还有未完成 usage 消息。
+/// Queries completed assistant messages in a session and reports whether any usage message remains incomplete.
 fn query_assistant_messages(
     conn: &rusqlite::Connection,
     session_id: &str,
 ) -> Result<OpenCodeMessageQueryResult, AppError> {
     let mut stmt = conn
         .prepare("SELECT id, data FROM message WHERE session_id = ?1 ORDER BY time_created")
-        .map_err(|e| AppError::Database(format!("准备消息查询失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to prepare the message query: {e}")))?;
 
     let rows = stmt
         .query_map([session_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })
-        .map_err(|e| AppError::Database(format!("查询消息失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to query messages: {e}")))?;
 
     let mut messages = Vec::new();
     let mut has_incomplete_usage = false;
     for row in rows {
         let (message_id, data_json) =
-            row.map_err(|e| AppError::Database(format!("读取消息行失败: {e}")))?;
+            row.map_err(|e| AppError::Database(format!("Failed to read a message row: {e}")))?;
 
-        // 只处理 assistant 消息
+        // Process assistant messages only.
         let value: serde_json::Value = match serde_json::from_str(&data_json) {
             Ok(v) => v,
             Err(_) => continue,
@@ -229,12 +234,12 @@ fn query_assistant_messages(
             continue;
         }
 
-        // 必须有 tokens 字段
+        // Require a tokens field.
         if value.get("tokens").is_none() {
             continue;
         }
 
-        // 跳过未完成的消息：进行中只有半截 token，且因 INSERT OR IGNORE 无法回填
+        // Skip incomplete messages, which contain partial token data that INSERT OR IGNORE cannot backfill.
         if value.get("time").and_then(|t| t.get("completed")).is_none() {
             has_incomplete_usage = true;
             continue;
@@ -251,7 +256,7 @@ fn query_assistant_messages(
     })
 }
 
-/// 解析 opencode message.data JSON 为结构化数据
+/// Parses OpenCode message.data JSON into structured data.
 fn parse_message_data(value: &serde_json::Value) -> Option<OpenCodeMessageData> {
     let tokens = value.get("tokens")?;
 
@@ -272,7 +277,7 @@ fn parse_message_data(value: &serde_json::Value) -> Option<OpenCodeMessageData> 
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
 
-    // 跳过全零 token 的消息
+    // Skip messages whose token counts are all zero.
     if input_tokens == 0
         && output_tokens == 0
         && reasoning_tokens == 0
@@ -308,7 +313,7 @@ fn parse_message_data(value: &serde_json::Value) -> Option<OpenCodeMessageData> 
     })
 }
 
-/// 插入单条 OpenCode 消息记录到 proxy_request_logs
+/// Inserts one OpenCode message record into proxy_request_logs.
 fn insert_opencode_message(
     db: &Database,
     request_id: &str,
@@ -326,8 +331,8 @@ fn insert_opencode_message(
             .unwrap_or(0)
     };
 
-    // OpenCode 使用 Anthropic 风格：input 是新鲜输入，cache 单独计
-    // output 包含 reasoning tokens（按输出计费）
+    // OpenCode follows Anthropic semantics: input is uncached input, cache is counted separately,
+    // and output includes reasoning tokens priced as output.
     let output_with_reasoning = msg.output_tokens + msg.reasoning_tokens;
 
     let dedup_key = DedupKey {
@@ -343,11 +348,11 @@ fn insert_opencode_message(
         return Ok(false);
     }
 
-    // 如果 opencode 已经提供了费用，直接使用；否则从模型定价计算
+    // Use a cost supplied by OpenCode; otherwise calculate from model pricing.
     let (input_cost, output_cost, cache_read_cost, cache_creation_cost, total_cost) =
         if msg.cost > 0.0 {
-            // opencode 已计算费用，直接使用
-            // 简化处理：全部放入 total_cost（opencode 的 cost 是聚合值，无法精确拆分）
+            // OpenCode already calculated an aggregate cost that cannot be split precisely, so store
+            // the entire value in total_cost.
             (
                 "0".to_string(),
                 "0".to_string(),
@@ -356,7 +361,7 @@ fn insert_opencode_message(
                 msg.cost.to_string(),
             )
         } else {
-            // opencode 费用为 0（如免费模型），尝试用 Nexus Composer 自带的模型定价计算
+            // If OpenCode reports zero, such as for a free model, try Nexus Composer model pricing.
             let usage = TokenUsage {
                 input_tokens: msg.input_tokens,
                 output_tokens: output_with_reasoning,
@@ -427,7 +432,7 @@ fn insert_opencode_message(
             "opencode_session",    // data_source
         ],
     )
-    .map_err(|e| AppError::Database(format!("插入 OpenCode 会话日志失败: {e}")))?;
+    .map_err(|e| AppError::Database(format!("Failed to insert the OpenCode session log: {e}")))?;
 
     Ok(inserted_rows > 0)
 }
@@ -545,7 +550,7 @@ mod tests {
         .unwrap();
 
         let result = query_assistant_messages(&conn, "s1").unwrap();
-        // 只返回已完成（带 time.completed）的消息，半截的被跳过
+        // Return only completed messages with time.completed and skip partial messages.
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].0, "done");
         assert!(result.has_incomplete_usage);

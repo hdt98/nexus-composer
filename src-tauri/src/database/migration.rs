@@ -1,6 +1,6 @@
-//! JSON → SQLite 数据迁移
+//! JSON to SQLite data migration
 //!
-//! 将旧版 config.json (MultiAppConfig) 数据迁移到 SQLite 数据库。
+//! Migrates legacy config.json (MultiAppConfig) data into SQLite.
 
 use super::{lock_conn, to_json_string, Database};
 use crate::app_config::MultiAppConfig;
@@ -8,7 +8,7 @@ use crate::error::AppError;
 use rusqlite::{params, Connection};
 
 impl Database {
-    /// 从 MultiAppConfig 迁移数据到数据库
+    /// Migrate MultiAppConfig data into the database.
     pub fn migrate_from_json(&self, config: &MultiAppConfig) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
@@ -22,9 +22,9 @@ impl Database {
         Ok(())
     }
 
-    /// 运行迁移的 dry-run 模式（在内存数据库中验证，不写入磁盘）
+    /// Run migration against an in-memory database without writing to disk.
     ///
-    /// 用于部署前验证迁移逻辑是否正确。
+    /// Validates migration logic before deployment.
     pub fn migrate_from_json_dry_run(config: &MultiAppConfig) -> Result<(), AppError> {
         let mut conn =
             Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
@@ -36,35 +36,35 @@ impl Database {
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::migrate_from_json_tx(&tx, config)?;
 
-        // 显式 drop transaction 而不提交（内存数据库会被丢弃）
+        // Drop the transaction without committing; the in-memory database is discarded.
         drop(tx);
         Ok(())
     }
 
-    /// 在事务中执行迁移
+    /// Run migration within a transaction.
     fn migrate_from_json_tx(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
     ) -> Result<(), AppError> {
-        // 1. 迁移 Providers
+        // 1. Migrate providers.
         Self::migrate_providers(tx, config)?;
 
-        // 2. 迁移 MCP Servers
+        // 2. Migrate MCP servers.
         Self::migrate_mcp_servers(tx, config)?;
 
-        // 3. 迁移 Prompts
+        // 3. Migrate prompts.
         Self::migrate_prompts(tx, config)?;
 
-        // 4. 迁移 Skills
+        // 4. Migrate skills.
         Self::migrate_skills(tx, config)?;
 
-        // 5. 迁移 Common Config
+        // 5. Migrate common configuration.
         Self::migrate_common_config(tx, config)?;
 
         Ok(())
     }
 
-    /// 迁移供应商数据
+    /// Migrate provider data.
     fn migrate_providers(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
@@ -76,7 +76,7 @@ impl Database {
             for (id, provider) in &manager.providers {
                 let is_current = if id == current_id { 1 } else { 0 };
 
-                // 处理 meta 和 endpoints
+                // Separate metadata from endpoints.
                 let mut meta_clone = provider.meta.clone().unwrap_or_default();
                 let endpoints = std::mem::take(&mut meta_clone.custom_endpoints);
 
@@ -103,7 +103,7 @@ impl Database {
                 )
                 .map_err(|e| AppError::Database(format!("Migrate provider failed: {e}")))?;
 
-                // 迁移 Endpoints
+                // Migrate endpoints.
                 for (url, endpoint) in endpoints {
                     tx.execute(
                         "INSERT INTO provider_endpoints (provider_id, app_type, url, added_at)
@@ -117,7 +117,7 @@ impl Database {
         Ok(())
     }
 
-    /// 迁移 MCP 服务器数据
+    /// Migrate MCP server data.
     fn migrate_mcp_servers(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
@@ -148,7 +148,7 @@ impl Database {
         Ok(())
     }
 
-    /// 迁移提示词数据
+    /// Migrate prompt data.
     fn migrate_prompts(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
@@ -187,21 +187,20 @@ impl Database {
         Ok(())
     }
 
-    /// 迁移 Skills 数据
+    /// Migrate skill data.
     fn migrate_skills(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
     ) -> Result<(), AppError> {
-        // v3.10.0+：Skills 的 SSOT 已迁移到文件系统（~/.cc-switch/skills/）+ 数据库统一结构。
+        // Since v3.10.0, the skill source of truth is ~/.cc-switch/skills/ plus the unified schema.
         //
-        // 旧版 config.json 里的 `skills.skills` 仅记录“安装状态”，但不包含完整元数据，
-        // 且无法保证 SSOT 目录中一定存在对应的 skill 文件。
+        // Legacy `skills.skills` records installation state without complete metadata and cannot
+        // guarantee that the corresponding skill files exist in the source-of-truth directory.
         //
-        // 因此这里不再直接把旧的安装状态写入新 skills 表，避免产生“数据库显示已安装但文件缺失”的不一致。
-        // 迁移后可通过：
-        // - 前端「导入已有」(扫描各应用的 skills 目录并复制到 SSOT)
-        // - 或后续启动时的自动扫描逻辑
-        // 来重建已安装技能记录。
+        // Do not write legacy installation state directly into the new skills table, which could
+        // mark missing files as installed. Rebuild installed skill records after migration by:
+        // - Using Import Existing to scan application skill directories and copy files into SSOT.
+        // - Running the automatic scan during a later startup.
 
         for repo in &config.skills.repos {
             tx.execute(
@@ -213,7 +212,7 @@ impl Database {
         Ok(())
     }
 
-    /// 迁移通用配置片段
+    /// Migrate common configuration snippets.
     fn migrate_common_config(
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,

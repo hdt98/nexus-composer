@@ -1,19 +1,21 @@
 //! GitHub Copilot Authentication Module
 //!
-//! 实现 GitHub OAuth 设备码流程和 Copilot 令牌管理。
-//! 支持多账号认证，每个 Provider 可关联不同的 GitHub 账号。
+//! Implements the GitHub OAuth device-code flow and Copilot token management.
+//! Supports multiple authenticated accounts, allowing each provider to bind a
+//! different GitHub account.
 //!
-//! ## 认证流程
-//! 1. 启动设备码流程，获取 device_code 和 user_code
-//! 2. 用户在浏览器中完成 GitHub 授权
-//! 3. 轮询获取 access_token
-//! 4. 使用 GitHub token 获取 Copilot token
-//! 5. 自动刷新 Copilot token（到期前 60 秒）
+//! ## Authentication flow
+//! 1. Start the device-code flow and receive `device_code` and `user_code`.
+//! 2. The user authorizes GitHub in a browser.
+//! 3. Poll for an access token.
+//! 4. Exchange the GitHub token for a Copilot token.
+//! 5. Refresh the Copilot token automatically 60 seconds before expiration.
 //!
-//! ## 多账号支持 (v3)
-//! - 每个 GitHub 账号独立存储 token
-//! - Provider 通过 meta.authBinding 关联账号
-//! - 自动迁移 v1 单账号格式到 v3 多账号 + 默认账号格式
+//! ## Multi-account support (v3)
+//! - Store tokens independently for each GitHub account.
+//! - Bind providers to accounts through `meta.authBinding`.
+//! - Migrate the v1 single-account format to the v3 multi-account format with an
+//!   explicit default account.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,16 +25,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-/// GitHub OAuth 客户端 ID（VS Code）- 用于 github.com
+/// GitHub OAuth client ID for VS Code on github.com.
 const GITHUB_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
 
-/// GitHub OAuth 客户端 ID（与 OpenCode 相同）- 在所有 GHES Copilot 实例上预注册
+/// GitHub OAuth client ID shared with OpenCode and preregistered on GHES Copilot instances.
 const GITHUB_CLIENT_ID_GHES: &str = "Ov23li8tweQw6odWQebz";
 
-/// 默认 GitHub 域名
+/// Default GitHub domain.
 const DEFAULT_GITHUB_DOMAIN: &str = "github.com";
 
-/// 根据域名选择 OAuth 客户端 ID
+/// Selects the OAuth client ID for a domain.
 fn github_client_id(domain: &str) -> &'static str {
     if domain == DEFAULT_GITHUB_DOMAIN {
         GITHUB_CLIENT_ID
@@ -45,7 +47,7 @@ fn default_github_domain() -> String {
     DEFAULT_GITHUB_DOMAIN.to_string()
 }
 
-/// GitHub 设备码 URL
+/// GitHub device-code URL.
 fn github_device_code_url(domain: &str) -> String {
     format!("https://{domain}/login/device/code")
 }
@@ -55,7 +57,7 @@ fn github_oauth_token_url(domain: &str) -> String {
     format!("https://{domain}/login/oauth/access_token")
 }
 
-/// GitHub API 基础 URL（github.com 用 api.github.com，GHES 用 {domain}/api/v3）
+/// GitHub API base URL: api.github.com for github.com, or {domain}/api/v3 for GHES.
 fn github_api_base(domain: &str) -> String {
     if domain == DEFAULT_GITHUB_DOMAIN {
         "https://api.github.com".to_string()
@@ -74,12 +76,12 @@ fn github_user_url(domain: &str) -> String {
     format!("{}/user", github_api_base(domain))
 }
 
-/// Copilot 使用量 API URL
+/// Copilot usage API URL.
 fn copilot_usage_url(domain: &str) -> String {
     format!("{}/copilot_internal/user", github_api_base(domain))
 }
 
-/// Copilot API 基础地址（github.com 用 api.githubcopilot.com，GHES 用 copilot-api.{domain}）
+/// Copilot API base URL: api.githubcopilot.com for github.com, or copilot-api.{domain} for GHES.
 fn copilot_api_base(domain: &str) -> String {
     if domain == DEFAULT_GITHUB_DOMAIN {
         "https://api.githubcopilot.com".to_string()
@@ -88,30 +90,30 @@ fn copilot_api_base(domain: &str) -> String {
     }
 }
 
-/// Token 刷新提前量（秒）
+/// Token-refresh lead time in seconds.
 const TOKEN_REFRESH_BUFFER_SECONDS: i64 = 60;
 
-/// 判断是否为 GitHub Enterprise Server（非 github.com）
+/// Returns whether a domain is GitHub Enterprise Server rather than github.com.
 fn is_ghes(domain: &str) -> bool {
     domain != DEFAULT_GITHUB_DOMAIN
 }
 
-/// 归一化 GitHub 域名（SSOT）：
-/// - 小写化
-/// - 剥离协议（https:// http://）
-/// - 剥离尾斜杠、path、query、fragment
-/// - 拒绝包含 userinfo（@）的输入
-/// - 保留端口号（如有）
+/// Normalizes a GitHub domain as the single source of truth:
+/// - lowercase
+/// - strip `https://` or `http://`
+/// - strip trailing slash, path, query, and fragment
+/// - reject userinfo containing `@`
+/// - preserve an explicit port
 fn normalize_github_domain(raw: &str) -> Result<String, CopilotAuthError> {
     let s = raw.trim();
-    // 剥离协议
+    // Strip the scheme.
     let s = s
         .strip_prefix("https://")
         .or_else(|| s.strip_prefix("http://"))
         .unwrap_or(s);
-    // 取 host 部分（到第一个 / 或 ? 或 #）
+    // Keep the host through the first `/`, `?`, or `#` delimiter.
     let host = s.split(&['/', '?', '#'][..]).next().unwrap_or(s);
-    // 拒绝 userinfo
+    // Reject userinfo.
     if host.contains('@') {
         return Err(CopilotAuthError::InvalidDomain(raw.to_string()));
     }
@@ -122,8 +124,8 @@ fn normalize_github_domain(raw: &str) -> Result<String, CopilotAuthError> {
     Ok(normalized)
 }
 
-/// 生成复合账号 ID，确保不同 GHES 实例的 user ID 不会冲突。
-/// github.com 账号保持原格式（向后兼容），GHES 账号使用 `domain:user_id` 格式。
+/// Builds a composite account ID so equal user IDs on different GHES instances do not
+/// collide. github.com retains the legacy ID; GHES uses `domain:user_id`.
 fn composite_account_id(domain: &str, user_id: u64) -> String {
     if domain == DEFAULT_GITHUB_DOMAIN {
         user_id.to_string()
@@ -132,81 +134,81 @@ fn composite_account_id(domain: &str, user_id: u64) -> String {
     }
 }
 
-/// Copilot API Header 常量
+/// Copilot API header constants.
 pub const COPILOT_EDITOR_VERSION: &str = "vscode/1.110.1";
 pub const COPILOT_PLUGIN_VERSION: &str = "copilot-chat/0.38.2";
 pub const COPILOT_USER_AGENT: &str = "GitHubCopilotChat/0.38.2";
 pub const COPILOT_API_VERSION: &str = "2025-10-01";
 pub const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 
-/// Copilot 使用量响应
+/// Copilot usage response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopilotUsageResponse {
-    /// Copilot 计划类型
+    /// Copilot plan type.
     pub copilot_plan: String,
-    /// 配额重置日期
+    /// Quota reset date.
     pub quota_reset_date: String,
-    /// 配额快照
+    /// Quota snapshot.
     pub quota_snapshots: QuotaSnapshots,
-    /// API 端点信息 (用于动态获取 API URL)
+    /// Endpoint information used to resolve the API URL dynamically.
     #[serde(default)]
     pub endpoints: Option<CopilotEndpoints>,
 }
 
-/// Copilot API 端点信息
+/// Copilot API endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopilotEndpoints {
-    /// API 端点 URL
+    /// API endpoint URL.
     pub api: String,
-    /// Telemetry 端点 URL
+    /// Telemetry endpoint URL.
     #[serde(default)]
     pub telemetry: Option<String>,
 }
 
-/// 配额快照
+/// Quota snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaSnapshots {
-    /// Chat 配额
+    /// Chat quota.
     pub chat: QuotaDetail,
-    /// Completions 配额
+    /// Completions quota.
     pub completions: QuotaDetail,
-    /// Premium 交互配额
+    /// Premium-interaction quota.
     pub premium_interactions: QuotaDetail,
 }
 
-/// 配额详情
+/// Quota details.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QuotaDetail {
-    /// 总配额
+    /// Total entitlement.
     pub entitlement: i64,
-    /// 剩余配额
+    /// Remaining quota.
     pub remaining: i64,
-    /// 剩余百分比
+    /// Percentage remaining.
     pub percent_remaining: f64,
-    /// 是否无限
+    /// Whether the quota is unlimited.
     pub unlimited: bool,
 }
 
-/// Copilot 可用模型
+/// Available Copilot model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopilotModel {
-    /// 模型 ID（用于 API 调用）
+    /// Model ID used by API calls.
     pub id: String,
-    /// 模型显示名称
+    /// Display name.
     pub name: String,
-    /// 模型供应商
+    /// Model vendor.
     pub vendor: String,
-    /// 是否在模型选择器中显示
+    /// Whether to show the model in the picker.
     pub model_picker_enabled: bool,
 }
 
-/// Copilot Models API 响应
+/// Copilot Models API response.
 #[derive(Debug, Deserialize)]
 struct CopilotModelsResponse {
     data: Vec<CopilotModelsResponseItem>,
 }
 
-/// Copilot Models API 响应项
+/// Copilot Models API response item.
 #[derive(Debug, Deserialize)]
 struct CopilotModelsResponseItem {
     id: String,
@@ -215,43 +217,43 @@ struct CopilotModelsResponseItem {
     model_picker_enabled: bool,
 }
 
-/// Copilot 认证错误
+/// Copilot authentication error.
 #[derive(Debug, thiserror::Error)]
 pub enum CopilotAuthError {
-    #[error("设备码流程未启动")]
+    #[error("Device-code flow has not started")]
     DeviceFlowNotStarted,
 
-    #[error("等待用户授权中")]
+    #[error("Waiting for user authorization")]
     AuthorizationPending,
 
-    #[error("用户拒绝授权")]
+    #[error("User denied authorization")]
     AccessDenied,
 
-    #[error("设备码已过期")]
+    #[error("Device code has expired")]
     ExpiredToken,
 
-    #[error("GitHub 令牌无效或已过期")]
+    #[error("GitHub token is invalid or expired")]
     GitHubTokenInvalid,
 
-    #[error("Copilot 令牌获取失败: {0}")]
+    #[error("Failed to obtain Copilot token: {0}")]
     CopilotTokenFetchFailed(String),
 
-    #[error("网络错误: {0}")]
+    #[error("Network error: {0}")]
     NetworkError(String),
 
-    #[error("解析错误: {0}")]
+    #[error("Parse error: {0}")]
     ParseError(String),
 
-    #[error("IO 错误: {0}")]
+    #[error("I/O error: {0}")]
     IoError(String),
 
-    #[error("用户未订阅 Copilot")]
+    #[error("User does not have a Copilot subscription")]
     NoCopilotSubscription,
 
-    #[error("账号不存在: {0}")]
+    #[error("Account not found: {0}")]
     AccountNotFound(String),
 
-    #[error("无效的 GitHub 域名: {0}")]
+    #[error("Invalid GitHub domain: {0}")]
     InvalidDomain(String),
 }
 
@@ -267,22 +269,22 @@ impl From<std::io::Error> for CopilotAuthError {
     }
 }
 
-/// GitHub 设备码响应
+/// GitHub device-code response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubDeviceCodeResponse {
-    /// 设备码（用于轮询）
+    /// Device code used for polling.
     pub device_code: String,
-    /// 用户码（显示给用户）
+    /// User code displayed to the user.
     pub user_code: String,
-    /// 验证 URL
+    /// Verification URL.
     pub verification_uri: String,
-    /// 过期时间（秒）
+    /// Expiration time in seconds.
     pub expires_in: u64,
-    /// 轮询间隔（秒）
+    /// Polling interval in seconds.
     pub interval: u64,
 }
 
-/// GitHub OAuth Token 响应
+/// GitHub OAuth token response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitHubOAuthResponse {
     access_token: Option<String>,
@@ -297,19 +299,19 @@ struct GitHubOAuthResponse {
 pub struct CopilotToken {
     /// JWT Token
     pub token: String,
-    /// 过期时间戳（Unix 秒）
+    /// Expiration timestamp in Unix seconds.
     pub expires_at: i64,
 }
 
 impl CopilotToken {
-    /// 检查令牌是否即将过期（提前 60 秒）
+    /// Returns whether the token expires within 60 seconds.
     pub fn is_expiring_soon(&self) -> bool {
         let now = chrono::Utc::now().timestamp();
         self.expires_at - now < TOKEN_REFRESH_BUFFER_SECONDS
     }
 }
 
-/// Copilot Token API 响应
+/// Copilot Token API response.
 #[derive(Debug, Deserialize)]
 struct CopilotTokenResponse {
     token: String,
@@ -318,7 +320,7 @@ struct CopilotTokenResponse {
     refresh_in: Option<i64>,
 }
 
-/// GitHub 用户信息
+/// GitHub user information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubUser {
     pub login: String,
@@ -326,18 +328,18 @@ pub struct GitHubUser {
     pub avatar_url: Option<String>,
 }
 
-/// GitHub 账号（公开信息，返回给前端）
+/// Public GitHub account information returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubAccount {
-    /// GitHub 用户 ID（字符串形式，作为唯一标识）
+    /// GitHub user ID as a unique string identifier.
     pub id: String,
-    /// GitHub 用户名
+    /// GitHub username.
     pub login: String,
-    /// 头像 URL
+    /// Avatar URL.
     pub avatar_url: Option<String>,
-    /// 认证时间戳
+    /// Authentication timestamp.
     pub authenticated_at: i64,
-    /// GitHub 域名（github.com 或 GHES 域名）
+    /// GitHub domain: github.com or a GHES domain.
     #[serde(default = "default_github_domain")]
     pub github_domain: String,
 }
@@ -354,85 +356,86 @@ impl From<&GitHubAccountData> for GitHubAccount {
     }
 }
 
-/// Copilot 认证状态（支持多账号）
+/// Copilot authentication status with multi-account support.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CopilotAuthStatus {
-    /// 所有已认证的账号
+    /// All authenticated accounts.
     pub accounts: Vec<GitHubAccount>,
-    /// 默认账号 ID（显式状态，避免依赖 HashMap 顺序）
+    /// Explicit default account ID, avoiding dependence on HashMap order.
     pub default_account_id: Option<String>,
-    /// 旧认证数据迁移失败时的状态消息（用于前端提示）
+    /// Frontend status message when legacy authentication migration fails.
     pub migration_error: Option<String>,
-    /// 是否已认证（向后兼容：有任意账号即为 true）
+    /// Backward-compatible authentication flag: true when any account exists.
     pub authenticated: bool,
-    /// GitHub 用户名（向后兼容：第一个账号的用户名）
+    /// Backward-compatible username from the first account.
     pub username: Option<String>,
-    /// Copilot 令牌过期时间（向后兼容：第一个账号的过期时间）
+    /// Backward-compatible Copilot token expiration for the first account.
     pub expires_at: Option<i64>,
 }
 
-/// 账号数据（内部存储结构）
+/// Internal account storage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GitHubAccountData {
     /// GitHub OAuth Token
     ///
-    /// 安全说明：为了复用登录状态，本地会持久化该令牌。
-    /// 当前实现未接入系统钥匙串，依赖私有文件权限（Unix 下 0600）保护。
+    /// Security note: this token is persisted locally to reuse the login. The current
+    /// implementation does not use the system keychain and relies on private file
+    /// permissions (0600 on Unix).
     pub github_token: String,
-    /// 用户信息
+    /// User information.
     pub user: GitHubUser,
-    /// 认证时间戳
+    /// Authentication timestamp.
     pub authenticated_at: i64,
-    /// GitHub 域名（github.com 或 GHES 域名）
+    /// GitHub domain: github.com or a GHES domain.
     #[serde(default = "default_github_domain")]
     pub github_domain: String,
 }
 
-/// 持久化存储结构（v3 多账号 + 默认账号格式）
+/// Persistent v3 multi-account storage with an explicit default account.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct CopilotAuthStore {
-    /// 存储格式版本（3 = 多账号 + 默认账号格式）
+    /// Storage format version; 3 is multi-account with a default account.
     #[serde(default)]
     version: u32,
-    /// 多账号数据（key = GitHub user ID）
+    /// Account data keyed by GitHub user ID.
     #[serde(default)]
     accounts: HashMap<String, GitHubAccountData>,
-    /// 默认账号 ID
+    /// Default account ID.
     #[serde(skip_serializing_if = "Option::is_none")]
     default_account_id: Option<String>,
-    /// 兼容 v1 单账号格式的字段
+    /// Field retained for v1 single-account compatibility.
     #[serde(skip_serializing_if = "Option::is_none")]
     github_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     authenticated_at: Option<i64>,
 }
 
-/// Copilot 认证管理器（支持多账号）
+/// Copilot authentication manager with multi-account support.
 pub struct CopilotAuthManager {
-    /// 所有 GitHub 账号（key = GitHub user ID）
+    /// GitHub accounts keyed by user ID.
     accounts: Arc<RwLock<HashMap<String, GitHubAccountData>>>,
-    /// 默认账号 ID
+    /// Default account ID.
     default_account_id: Arc<RwLock<Option<String>>>,
-    /// 每个账号的刷新锁，避免并发刷新重复打 GitHub API
+    /// Per-account refresh locks prevent duplicate concurrent GitHub API calls.
     refresh_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
-    /// Copilot Token 缓存（key = GitHub user ID，内存缓存，自动刷新）
+    /// In-memory, auto-refreshing Copilot token cache keyed by GitHub user ID.
     copilot_tokens: Arc<RwLock<HashMap<String, CopilotToken>>>,
-    /// Copilot Models 缓存（key = GitHub user ID，仅进程内复用）
+    /// Process-local Copilot model cache keyed by GitHub user ID.
     copilot_models: Arc<RwLock<HashMap<String, Vec<CopilotModel>>>>,
-    /// Copilot API 端点缓存（key = GitHub user ID，从 /copilot_internal/user 获取）
+    /// Copilot API endpoint cache from /copilot_internal/user, keyed by GitHub user ID.
     api_endpoints: Arc<RwLock<HashMap<String, String>>>,
-    /// 每个账号的端点拉取锁，避免并发拉取重复打 GitHub API
+    /// Per-account endpoint-fetch locks prevent duplicate concurrent GitHub API calls.
     endpoint_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
-    /// 存储路径
+    /// Storage path.
     storage_path: PathBuf,
-    /// 待迁移的旧格式 token
+    /// Legacy token awaiting migration.
     pending_migration: Arc<RwLock<Option<String>>>,
-    /// 旧认证数据迁移失败时的状态消息
+    /// Status message for a failed legacy authentication migration.
     migration_error: Arc<RwLock<Option<String>>>,
 }
 
 impl CopilotAuthManager {
-    /// 创建新的认证管理器
+    /// Creates an authentication manager.
     pub fn new(data_dir: PathBuf) -> Self {
         let storage_path = data_dir.join("copilot_auth.json");
 
@@ -449,32 +452,32 @@ impl CopilotAuthManager {
             migration_error: Arc::new(RwLock::new(None)),
         };
 
-        // 尝试从磁盘加载（同步，不发起网络请求）
+        // Load from disk synchronously without network access.
         if let Err(e) = manager.load_from_disk_sync() {
-            log::warn!("[CopilotAuth] 加载存储失败: {e}");
+            log::warn!("[CopilotAuth] Failed to load storage: {e}");
         }
 
         manager
     }
 
-    // ==================== 多账号管理方法 ====================
+    // ==================== Multi-account management ====================
 
-    /// 列出所有已认证的账号
+    /// Lists all authenticated accounts.
     pub async fn list_accounts(&self) -> Vec<GitHubAccount> {
         let accounts = self.accounts.read().await.clone();
         let default_account_id = self.resolve_default_account_id().await;
         Self::sorted_accounts(&accounts, default_account_id.as_deref())
     }
 
-    /// 获取指定账号信息
+    /// Returns one account.
     pub async fn get_account(&self, account_id: &str) -> Option<GitHubAccount> {
         let accounts = self.accounts.read().await;
         accounts.get(account_id).map(GitHubAccount::from)
     }
 
-    /// 移除指定账号
+    /// Removes one account.
     pub async fn remove_account(&self, account_id: &str) -> Result<(), CopilotAuthError> {
-        log::info!("[CopilotAuth] 移除账号: {account_id}");
+        log::info!("[CopilotAuth] Removing account: {account_id}");
 
         {
             let mut accounts = self.accounts.write().await;
@@ -483,7 +486,7 @@ impl CopilotAuthManager {
             }
         }
 
-        // 同时移除缓存的 Copilot token
+        // Remove the cached Copilot token as well.
         {
             let mut tokens = self.copilot_tokens.write().await;
             tokens.remove(account_id);
@@ -496,7 +499,7 @@ impl CopilotAuthManager {
             let mut refresh_locks = self.refresh_locks.write().await;
             refresh_locks.remove(account_id);
         }
-        // 清理 API 端点缓存
+        // Clear the API endpoint cache.
         {
             let mut api_endpoints = self.api_endpoints.write().await;
             api_endpoints.remove(account_id);
@@ -514,13 +517,13 @@ impl CopilotAuthManager {
             }
         }
 
-        // 持久化
+        // Persist the change.
         self.save_to_disk().await?;
 
         Ok(())
     }
 
-    /// 添加新账号（内部方法，在 OAuth 完成后调用）
+    /// Adds an account after OAuth completes.
     async fn add_account_internal(
         &self,
         github_token: String,
@@ -559,15 +562,15 @@ impl CopilotAuthManager {
 
         self.set_migration_error(None).await;
 
-        // 持久化
+        // Persist the change.
         self.save_to_disk().await?;
 
-        log::info!("[CopilotAuth] 添加账号成功: {}", user.login);
+        log::info!("[CopilotAuth] Added account: {}", user.login);
 
         Ok(account)
     }
 
-    /// 设置默认账号
+    /// Sets the default account.
     pub async fn set_default_account(&self, account_id: &str) -> Result<(), CopilotAuthError> {
         {
             let accounts = self.accounts.read().await;
@@ -585,9 +588,9 @@ impl CopilotAuthManager {
         Ok(())
     }
 
-    // ==================== 设备码流程 ====================
+    // ==================== Device-code flow ====================
 
-    /// 启动设备码流程
+    /// Starts the device-code flow.
     pub async fn start_device_flow(
         &self,
         github_domain: Option<&str>,
@@ -596,7 +599,7 @@ impl CopilotAuthManager {
             Some(d) => normalize_github_domain(d)?,
             None => DEFAULT_GITHUB_DOMAIN.to_string(),
         };
-        log::info!("[CopilotAuth] 启动设备码流程 (domain: {domain})");
+        log::info!("[CopilotAuth] Starting device-code flow (domain: {domain})");
 
         let response = crate::proxy::http_client::get()
             .post(github_device_code_url(&domain))
@@ -613,7 +616,7 @@ impl CopilotAuthManager {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(CopilotAuthError::NetworkError(format!(
-                "GitHub 设备码请求失败: {status} - {text}"
+                "GitHub device-code request failed: {status} - {text}"
             )));
         }
 
@@ -623,14 +626,14 @@ impl CopilotAuthManager {
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
         log::info!(
-            "[CopilotAuth] 获取设备码成功，user_code: {}",
+            "[CopilotAuth] Obtained device code; user_code: {}",
             device_code.user_code
         );
 
         Ok(device_code)
     }
 
-    /// 轮询获取 OAuth Token（返回新添加的账号，如果成功）
+    /// Polls for an OAuth token and returns the newly added account on success.
     pub async fn poll_for_token(
         &self,
         device_code: &str,
@@ -640,7 +643,7 @@ impl CopilotAuthManager {
             Some(d) => normalize_github_domain(d)?,
             None => DEFAULT_GITHUB_DOMAIN.to_string(),
         };
-        log::debug!("[CopilotAuth] 轮询 OAuth Token (domain: {domain})");
+        log::debug!("[CopilotAuth] Polling for OAuth token (domain: {domain})");
 
         let response = crate::proxy::http_client::get()
             .post(github_oauth_token_url(&domain))
@@ -659,7 +662,7 @@ impl CopilotAuthManager {
             .await
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
-        // 检查错误
+        // Check for OAuth errors.
         if let Some(error) = oauth_response.error {
             return match error.as_str() {
                 "authorization_pending" => Err(CopilotAuthError::AuthorizationPending),
@@ -674,22 +677,22 @@ impl CopilotAuthManager {
             };
         }
 
-        // 获取 access_token
+        // Extract access_token.
         let access_token = oauth_response
             .access_token
-            .ok_or_else(|| CopilotAuthError::ParseError("缺少 access_token".to_string()))?;
+            .ok_or_else(|| CopilotAuthError::ParseError("Missing access_token".to_string()))?;
 
-        log::info!("[CopilotAuth] OAuth Token 获取成功");
+        log::info!("[CopilotAuth] Obtained OAuth token");
 
-        // 获取用户信息
+        // Fetch user information.
         let user = self
             .fetch_user_info_with_token(&access_token, &domain)
             .await?;
 
-        // GHES 无需换取 Copilot Token，直接使用 OAuth token 作为 Bearer
-        // 参考 OpenCode 的实现：GHE Copilot 直接用 OAuth token 调用 copilot-api.{domain}
+        // GHES uses the OAuth token directly as Bearer and does not exchange it for a
+        // Copilot token, matching OpenCode's copilot-api.{domain} behavior.
         if !is_ghes(&domain) {
-            // github.com：验证 Copilot 订阅（获取 Copilot Token）
+            // github.com: validate the Copilot subscription by obtaining a Copilot token.
             self.fetch_copilot_token_with_github_token(
                 &access_token,
                 &user.id.to_string(),
@@ -697,10 +700,12 @@ impl CopilotAuthManager {
             )
             .await?;
         } else {
-            log::info!("[CopilotAuth] GHES 账号，跳过 Copilot Token 兑换，直接使用 OAuth token");
+            log::info!(
+                "[CopilotAuth] GHES account: using OAuth token directly without Copilot token exchange"
+            );
         }
 
-        // 添加账号
+        // Add the account.
         let account = self
             .add_account_internal(access_token, user, domain)
             .await?;
@@ -708,17 +713,17 @@ impl CopilotAuthManager {
         Ok(Some(account))
     }
 
-    // ==================== Token 获取方法 ====================
+    // ==================== Token retrieval ====================
 
-    /// 获取指定账号的有效 Copilot Token（自动刷新）
+    /// Returns an auto-refreshing valid Copilot token for an account.
     pub async fn get_valid_token_for_account(
         &self,
         account_id: &str,
     ) -> Result<String, CopilotAuthError> {
-        // 确保迁移完成
+        // Ensure migration is complete.
         self.ensure_migration_complete().await?;
 
-        // GHES 账号直接使用 GitHub OAuth token，无需 Copilot token 交换
+        // GHES accounts use the GitHub OAuth token without a Copilot token exchange.
         let domain = self.get_account_domain(account_id).await;
         if is_ghes(&domain) {
             let accounts = self.accounts.read().await;
@@ -728,7 +733,7 @@ impl CopilotAuthManager {
                 .ok_or_else(|| CopilotAuthError::AccountNotFound(account_id.to_string()));
         }
 
-        // 检查缓存的 token
+        // Check the token cache.
         {
             let tokens = self.copilot_tokens.read().await;
             if let Some(copilot_token) = tokens.get(account_id) {
@@ -738,13 +743,13 @@ impl CopilotAuthManager {
             }
         }
 
-        // 需要刷新
-        log::info!("[CopilotAuth] 账号 {account_id} 的 Copilot Token 需要刷新");
+        // Refresh is required.
+        log::info!("[CopilotAuth] Copilot token for account {account_id} needs refresh");
 
         let refresh_lock = self.get_refresh_lock(account_id).await;
         let _refresh_guard = refresh_lock.lock().await;
 
-        // double-check：等待锁期间可能已由其他请求刷新完成
+        // Double-check after waiting because another request may have refreshed it.
         {
             let tokens = self.copilot_tokens.read().await;
             if let Some(copilot_token) = tokens.get(account_id) {
@@ -754,7 +759,7 @@ impl CopilotAuthManager {
             }
         }
 
-        // 获取账号的 GitHub token
+        // Read the account's GitHub token.
         let (github_token, domain) = {
             let accounts = self.accounts.read().await;
             let account = accounts
@@ -763,20 +768,22 @@ impl CopilotAuthManager {
             (account.github_token.clone(), account.github_domain.clone())
         };
 
-        // 刷新 Copilot token
+        // Refresh the Copilot token.
         self.fetch_copilot_token_with_github_token(&github_token, account_id, &domain)
             .await?;
 
-        // 返回新 token
+        // Return the new token.
         let tokens = self.copilot_tokens.read().await;
         tokens.get(account_id).map(|t| t.token.clone()).ok_or(
-            CopilotAuthError::CopilotTokenFetchFailed("刷新后仍无令牌".to_string()),
+            CopilotAuthError::CopilotTokenFetchFailed(
+                "Token is still missing after refresh".to_string(),
+            ),
         )
     }
 
-    /// 获取有效的 Copilot Token（向后兼容：使用第一个账号）
+    /// Returns a valid Copilot token, using the first account for compatibility.
     pub async fn get_valid_token(&self) -> Result<String, CopilotAuthError> {
-        // 确保迁移完成
+        // Ensure migration is complete.
         self.ensure_migration_complete().await?;
 
         match self.resolve_default_account_id().await {
@@ -785,9 +792,9 @@ impl CopilotAuthManager {
         }
     }
 
-    // ==================== 模型和使用量 ====================
+    // ==================== Models and usage ====================
 
-    /// 获取指定账号的 Copilot 可用模型列表
+    /// Fetches available Copilot models for an account.
     pub async fn fetch_models_for_account(
         &self,
         account_id: &str,
@@ -815,15 +822,14 @@ impl CopilotAuthManager {
     ) -> Result<Vec<CopilotModel>, CopilotAuthError> {
         let copilot_token = self.get_valid_token_for_account(account_id).await?;
 
-        // 使用 get_api_endpoint() 动态解析 Copilot API 基础 URL。
-        // 对于 github.com 账号，会查询 /copilot_internal/user 获取 endpoints.api 字段。
-        // 对于 GHES 账号，/copilot_internal/user 可能不返回 endpoints——此时
-        // get_api_endpoint() 会回退到 copilot_api_base(&domain)，与之前的静态 URL
-        // 拼接结果一致。该回退行为是安全且符合预期的。
+        // Resolve the Copilot API base dynamically through get_api_endpoint(). For a
+        // github.com account, query /copilot_internal/user for endpoints.api. A GHES
+        // response may omit endpoints, in which case get_api_endpoint() safely falls
+        // back to copilot_api_base(&domain), matching the former static URL.
         let api_base = self.get_api_endpoint(account_id).await;
         let models_url = format!("{}/models", api_base);
 
-        log::info!("[CopilotAuth] 获取账号 {account_id} 的 Copilot 可用模型");
+        log::info!("[CopilotAuth] Fetching available Copilot models for account {account_id}");
 
         let response = crate::proxy::http_client::get()
             .get(&models_url)
@@ -841,7 +847,7 @@ impl CopilotAuthManager {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(CopilotAuthError::CopilotTokenFetchFailed(format!(
-                "获取模型列表失败: {status} - {text}"
+                "Failed to fetch model list: {status} - {text}"
             )));
         }
 
@@ -862,7 +868,7 @@ impl CopilotAuthManager {
             })
             .collect();
 
-        log::info!("[CopilotAuth] 获取到 {} 个可用模型", models.len());
+        log::info!("[CopilotAuth] Fetched {} available models", models.len());
 
         Ok(models)
     }
@@ -879,7 +885,7 @@ impl CopilotAuthManager {
             .map(|model| model.vendor))
     }
 
-    /// 获取 Copilot 可用模型列表（向后兼容：使用第一个账号）
+    /// Fetches available Copilot models using the first account for compatibility.
     pub async fn fetch_models(&self) -> Result<Vec<CopilotModel>, CopilotAuthError> {
         match self.resolve_default_account_id().await {
             Some(id) => self.fetch_models_for_account(&id).await,
@@ -897,7 +903,7 @@ impl CopilotAuthManager {
         }
     }
 
-    /// 获取指定账号的 Copilot 使用量信息
+    /// Fetches Copilot usage for an account.
     pub async fn fetch_usage_for_account(
         &self,
         account_id: &str,
@@ -910,7 +916,7 @@ impl CopilotAuthManager {
             (account.github_token.clone(), account.github_domain.clone())
         };
 
-        log::info!("[CopilotAuth] 获取账号 {account_id} 的 Copilot 使用量");
+        log::info!("[CopilotAuth] Fetching Copilot usage for account {account_id}");
 
         let response = crate::proxy::http_client::get()
             .get(copilot_usage_url(&domain))
@@ -931,7 +937,7 @@ impl CopilotAuthManager {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(CopilotAuthError::CopilotTokenFetchFailed(format!(
-                "获取使用量失败: {status} - {text}"
+                "Failed to fetch usage: {status} - {text}"
             )));
         }
 
@@ -940,16 +946,16 @@ impl CopilotAuthManager {
             .await
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
-        // 存储动态 API 端点（如果有）
+        // Store the dynamic API endpoint when present.
         if let Some(ref endpoints) = usage.endpoints {
             let mut api_endpoints = self.api_endpoints.write().await;
             api_endpoints.insert(account_id.to_string(), endpoints.api.clone());
-            // 使用 debug 级别避免在日志中暴露企业内部域名
-            log::debug!("[CopilotAuth] 账号 {account_id} 已保存动态 API 端点");
+            // Use debug level to avoid exposing an internal enterprise domain in logs.
+            log::debug!("[CopilotAuth] Stored dynamic API endpoint for account {account_id}");
         }
 
         log::info!(
-            "[CopilotAuth] 获取使用量成功，计划: {}, 重置日期: {}",
+            "[CopilotAuth] Fetched usage; plan: {}, reset date: {}",
             usage.copilot_plan,
             usage.quota_reset_date
         );
@@ -957,7 +963,7 @@ impl CopilotAuthManager {
         Ok(usage)
     }
 
-    /// 获取 Copilot 使用量信息（向后兼容：使用第一个账号）
+    /// Fetches Copilot usage using the first account for compatibility.
     pub async fn fetch_usage(&self) -> Result<CopilotUsageResponse, CopilotAuthError> {
         match self.resolve_default_account_id().await {
             Some(id) => self.fetch_usage_for_account(&id).await,
@@ -965,9 +971,9 @@ impl CopilotAuthManager {
         }
     }
 
-    // ==================== 状态查询 ====================
+    // ==================== Status queries ====================
 
-    /// 获取指定账号的 API 端点（缓存命中直接返回，未命中则从 API 惰性拉取）
+    /// Returns an account's API endpoint from cache or fetches it lazily.
     pub async fn get_api_endpoint(&self, account_id: &str) -> String {
         let _ = self.ensure_migration_complete().await;
 
@@ -978,11 +984,11 @@ impl CopilotAuthManager {
             }
         }
 
-        // 用锁串行化同一账号的并发拉取，避免对 GitHub API 的重复请求
+        // Serialize concurrent fetches for one account to avoid duplicate GitHub API calls.
         let lock = self.get_endpoint_lock(account_id).await;
         let _guard = lock.lock().await;
 
-        // 持锁后二次检查：可能已由其他请求填充
+        // Check again after acquiring the lock because another request may have filled it.
         {
             let endpoints = self.api_endpoints.read().await;
             if let Some(endpoint) = endpoints.get(account_id) {
@@ -994,7 +1000,7 @@ impl CopilotAuthManager {
             Ok(endpoint) => endpoint,
             Err(e) => {
                 log::debug!(
-                    "[CopilotAuth] 获取账号 {account_id} 动态 API 端点失败: {e}，使用默认值"
+                    "[CopilotAuth] Failed to fetch dynamic API endpoint for account {account_id}: {e}; using default"
                 );
                 let domain = self.get_account_domain(account_id).await;
                 copilot_api_base(&domain)
@@ -1002,14 +1008,14 @@ impl CopilotAuthManager {
         }
     }
 
-    /// 获取默认账号的 API 端点
+    /// Returns the default account's API endpoint.
     pub async fn get_default_api_endpoint(&self) -> String {
         let _ = self.ensure_migration_complete().await;
 
         match self.resolve_default_account_id().await {
             Some(id) => self.get_api_endpoint(&id).await,
             None => {
-                // 无账号时回退到 github.com 的默认端点
+                // Fall back to the github.com endpoint when no account exists.
                 copilot_api_base(DEFAULT_GITHUB_DOMAIN)
             }
         }
@@ -1024,7 +1030,7 @@ impl CopilotAuthManager {
             (account.github_token.clone(), account.github_domain.clone())
         };
 
-        log::debug!("[CopilotAuth] 为账号 {account_id} 惰性拉取动态 API 端点");
+        log::debug!("[CopilotAuth] Lazily fetching dynamic API endpoint for account {account_id}");
 
         let response = crate::proxy::http_client::get()
             .get(copilot_usage_url(&domain))
@@ -1043,7 +1049,7 @@ impl CopilotAuthManager {
 
         if !response.status().is_success() {
             return Err(CopilotAuthError::CopilotTokenFetchFailed(format!(
-                "获取 API 端点失败: {}",
+                "Failed to fetch API endpoint: {}",
                 response.status()
             )));
         }
@@ -1058,10 +1064,10 @@ impl CopilotAuthManager {
             None => copilot_api_base(&domain),
         };
 
-        // 缓存端点（包括默认值），避免重复请求
+        // Cache the endpoint, including the default, to avoid repeated requests.
         let mut api_endpoints = self.api_endpoints.write().await;
         api_endpoints.insert(account_id.to_string(), endpoint.clone());
-        log::debug!("[CopilotAuth] 账号 {account_id} 已缓存 API 端点");
+        log::debug!("[CopilotAuth] Cached API endpoint for account {account_id}");
 
         Ok(endpoint)
     }
@@ -1082,9 +1088,9 @@ impl CopilotAuthManager {
         )
     }
 
-    /// 获取认证状态（支持多账号）
+    /// Returns multi-account authentication status.
     pub async fn get_status(&self) -> CopilotAuthStatus {
-        // 确保迁移完成
+        // Ensure migration is complete.
         let _ = self.ensure_migration_complete().await;
 
         let accounts = self.accounts.read().await.clone();
@@ -1100,7 +1106,7 @@ impl CopilotAuthManager {
             .map(|a| a.user.login.clone())
             .or_else(|| account_list.first().map(|a| a.login.clone()));
 
-        // 获取默认账号的过期时间
+        // Read the default account's expiration time.
         let expires_at = default_account_id
             .as_ref()
             .and_then(|id| copilot_tokens.get(id))
@@ -1116,17 +1122,17 @@ impl CopilotAuthManager {
         }
     }
 
-    /// 检查是否已认证（有任意账号）
+    /// Returns whether any authenticated account exists.
     pub async fn is_authenticated(&self) -> bool {
         let accounts = self.accounts.read().await;
         !accounts.is_empty()
     }
 
-    /// 清除所有认证（登出所有账号）
+    /// Clears authentication and signs out every account.
     pub async fn clear_auth(&self) -> Result<(), CopilotAuthError> {
-        log::info!("[CopilotAuth] 清除所有认证");
+        log::info!("[CopilotAuth] Clearing all authentication");
 
-        // 先清理内存状态，确保即使文件删除失败用户也能看到已登出
+        // Clear in-memory state first so the UI shows signed out even if file deletion fails.
         {
             let mut accounts = self.accounts.write().await;
             accounts.clear();
@@ -1148,7 +1154,7 @@ impl CopilotAuthManager {
             let mut refresh_locks = self.refresh_locks.write().await;
             refresh_locks.clear();
         }
-        // 清理 API 端点缓存
+        // Clear the API endpoint cache.
         {
             let mut api_endpoints = self.api_endpoints.write().await;
             api_endpoints.clear();
@@ -1158,7 +1164,7 @@ impl CopilotAuthManager {
             endpoint_locks.clear();
         }
 
-        // 最后删除存储文件
+        // Delete the storage file last.
         if self.storage_path.exists() {
             std::fs::remove_file(&self.storage_path)?;
         }
@@ -1166,7 +1172,7 @@ impl CopilotAuthManager {
         Ok(())
     }
 
-    // ==================== 内部方法 ====================
+    // ==================== Internal helpers ====================
 
     fn fallback_default_account_id(
         accounts: &HashMap<String, GitHubAccountData>,
@@ -1212,7 +1218,7 @@ impl CopilotAuthManager {
         Self::fallback_default_account_id(&accounts)
     }
 
-    /// 获取指定账号的 GitHub 域名
+    /// Returns the GitHub domain for an account.
     async fn get_account_domain(&self, account_id: &str) -> String {
         let accounts = self.accounts.read().await;
         accounts
@@ -1250,11 +1256,11 @@ impl CopilotAuthManager {
         let parent = self
             .storage_path
             .parent()
-            .ok_or_else(|| CopilotAuthError::IoError("无效的存储路径".to_string()))?;
+            .ok_or_else(|| CopilotAuthError::IoError("Invalid storage path".to_string()))?;
         let file_name = self
             .storage_path
             .file_name()
-            .ok_or_else(|| CopilotAuthError::IoError("无效的存储文件名".to_string()))?
+            .ok_or_else(|| CopilotAuthError::IoError("Invalid storage file name".to_string()))?
             .to_string_lossy()
             .to_string();
         let ts = std::time::SystemTime::now()
@@ -1297,7 +1303,7 @@ impl CopilotAuthManager {
         Ok(())
     }
 
-    /// 使用指定 token 获取 GitHub 用户信息
+    /// Fetches GitHub user information with the supplied token.
     async fn fetch_user_info_with_token(
         &self,
         github_token: &str,
@@ -1321,19 +1327,21 @@ impl CopilotAuthManager {
             .await
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
-        log::info!("[CopilotAuth] 获取用户信息成功: {}", user.login);
+        log::info!("[CopilotAuth] Fetched user information: {}", user.login);
 
         Ok(user)
     }
 
-    /// 使用 GitHub token 获取 Copilot Token
+    /// Exchanges a GitHub token for a Copilot token.
     async fn fetch_copilot_token_with_github_token(
         &self,
         github_token: &str,
         account_id: &str,
         domain: &str,
     ) -> Result<(), CopilotAuthError> {
-        log::debug!("[CopilotAuth] 获取账号 {account_id} 的 Copilot Token (domain: {domain})");
+        log::debug!(
+            "[CopilotAuth] Fetching Copilot token for account {account_id} (domain: {domain})"
+        );
 
         let response = crate::proxy::http_client::get()
             .get(copilot_token_url(domain))
@@ -1366,7 +1374,7 @@ impl CopilotAuthManager {
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
         log::info!(
-            "[CopilotAuth] 账号 {} 的 Copilot Token 获取成功，过期时间: {}",
+            "[CopilotAuth] Fetched Copilot token for account {}; expires at: {}",
             account_id,
             token_response.expires_at
         );
@@ -1382,9 +1390,9 @@ impl CopilotAuthManager {
         Ok(())
     }
 
-    // ==================== 存储和迁移 ====================
+    // ==================== Storage and migration ====================
 
-    /// 从磁盘加载（仅加载 token，不发起网络请求）
+    /// Loads tokens from disk without network requests.
     fn load_from_disk_sync(&self) -> Result<(), CopilotAuthError> {
         if !self.storage_path.exists() {
             return Ok(());
@@ -1395,10 +1403,10 @@ impl CopilotAuthManager {
             .map_err(|e| CopilotAuthError::ParseError(e.to_string()))?;
 
         if store.version >= 2 {
-            // v2 多账号格式
+            // v2 multi-account format.
             if let Ok(mut accounts) = self.accounts.try_write() {
                 *accounts = store.accounts;
-                log::info!("[CopilotAuth] 从磁盘加载 {} 个账号", accounts.len());
+                log::info!("[CopilotAuth] Loaded {} accounts from disk", accounts.len());
             }
             if let Ok(mut default_account_id) = self.default_account_id.try_write() {
                 *default_account_id = store.default_account_id;
@@ -1409,8 +1417,8 @@ impl CopilotAuthManager {
                 }
             }
         } else if store.github_token.is_some() {
-            // v1 单账号格式，标记待迁移
-            log::info!("[CopilotAuth] 检测到旧格式，将在首次访问时迁移");
+            // Mark the v1 single-account format for migration on first access.
+            log::info!("[CopilotAuth] Detected legacy format; migration will run on first access");
             if let Ok(mut pending) = self.pending_migration.try_write() {
                 *pending = store.github_token;
             }
@@ -1419,7 +1427,7 @@ impl CopilotAuthManager {
         Ok(())
     }
 
-    /// 确保迁移完成
+    /// Ensures legacy migration is complete.
     async fn ensure_migration_complete(&self) -> Result<(), CopilotAuthError> {
         let pending = {
             let guard = self.pending_migration.read().await;
@@ -1427,9 +1435,9 @@ impl CopilotAuthManager {
         };
 
         if let Some(legacy_token) = pending {
-            log::info!("[CopilotAuth] 执行旧格式迁移");
+            log::info!("[CopilotAuth] Migrating legacy format");
 
-            // 获取用户信息
+            // Fetch user information.
             match self
                 .fetch_user_info_with_token(&legacy_token, DEFAULT_GITHUB_DOMAIN)
                 .await
@@ -1437,7 +1445,7 @@ impl CopilotAuthManager {
                 Ok(user) => {
                     let account_id = composite_account_id(DEFAULT_GITHUB_DOMAIN, user.id);
 
-                    // 尝试获取 Copilot token 验证订阅
+                    // Attempt to validate the subscription by obtaining a Copilot token.
                     if let Err(e) = self
                         .fetch_copilot_token_with_github_token(
                             &legacy_token,
@@ -1446,10 +1454,12 @@ impl CopilotAuthManager {
                         )
                         .await
                     {
-                        log::warn!("[CopilotAuth] 迁移时验证 Copilot 订阅失败: {e}");
+                        log::warn!(
+                            "[CopilotAuth] Failed to validate Copilot subscription during migration: {e}"
+                        );
                     }
 
-                    // 添加账号
+                    // Add the account.
                     self.add_account_internal(
                         legacy_token,
                         user,
@@ -1458,18 +1468,20 @@ impl CopilotAuthManager {
                     .await?;
                     self.set_migration_error(None).await;
 
-                    log::info!("[CopilotAuth] 旧格式迁移完成");
+                    log::info!("[CopilotAuth] Legacy format migration completed");
                 }
                 Err(e) => {
                     self.set_migration_error(Some(format!(
                         "Legacy Copilot auth migration failed: {e}"
                     )))
                     .await;
-                    log::warn!("[CopilotAuth] 迁移失败，旧 token 可能已失效: {e}");
+                    log::warn!(
+                        "[CopilotAuth] Migration failed; the legacy token may be invalid: {e}"
+                    );
                 }
             }
 
-            // 清除待迁移标记
+            // Clear the pending-migration marker.
             {
                 let mut pending = self.pending_migration.write().await;
                 *pending = None;
@@ -1479,7 +1491,7 @@ impl CopilotAuthManager {
         Ok(())
     }
 
-    /// 保存到磁盘
+    /// Saves authentication state to disk.
     async fn save_to_disk(&self) -> Result<(), CopilotAuthError> {
         let accounts = self.accounts.read().await.clone();
         let default_account_id = self.resolve_default_account_id().await;
@@ -1498,7 +1510,7 @@ impl CopilotAuthManager {
         self.write_store_atomic(&content)?;
 
         log::info!(
-            "[CopilotAuth] 保存到磁盘成功（{} 个账号）",
+            "[CopilotAuth] Saved {} accounts to disk",
             store.accounts.len()
         );
 
@@ -1515,21 +1527,21 @@ mod tests {
     fn test_copilot_token_expiry() {
         let now = chrono::Utc::now().timestamp();
 
-        // 未过期的 token (1小时后过期，不在60秒缓冲期内)
+        // Valid token expiring in one hour, outside the 60-second buffer.
         let token = CopilotToken {
             token: "test".to_string(),
             expires_at: now + 3600,
         };
         assert!(!token.is_expiring_soon());
 
-        // 即将过期的 token (30秒后过期，在60秒缓冲期内)
+        // Token expiring in 30 seconds, inside the 60-second buffer.
         let token = CopilotToken {
             token: "test".to_string(),
             expires_at: now + 30,
         };
         assert!(token.is_expiring_soon());
 
-        // 已过期的 token (也在缓冲期内)
+        // Expired token, also inside the buffer.
         let token = CopilotToken {
             token: "test".to_string(),
             expires_at: now - 100,
@@ -1618,14 +1630,14 @@ mod tests {
 
     #[test]
     fn test_legacy_format_detection() {
-        // 旧格式（v1）
+        // Legacy v1 format.
         let legacy_json = r#"{
             "github_token": "gho_legacy_token",
             "authenticated_at": 1700000000
         }"#;
 
         let store: CopilotAuthStore = serde_json::from_str(legacy_json).unwrap();
-        assert_eq!(store.version, 0); // 默认值
+        assert_eq!(store.version, 0); // Default value.
         assert!(store.github_token.is_some());
         assert!(store.accounts.is_empty());
     }
@@ -1750,7 +1762,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
 
-        // 手动设置 api_endpoints 缓存
+        // Populate the api_endpoints cache manually.
         {
             let mut api_endpoints = manager.api_endpoints.write().await;
             api_endpoints.insert(
@@ -1777,12 +1789,12 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
 
-        // 设置默认账号
+        // Set the default account.
         {
             let mut default_account_id = manager.default_account_id.write().await;
             *default_account_id = Some("12345".to_string());
         }
-        // 添加账号数据
+        // Add account data.
         {
             let mut accounts = manager.accounts.write().await;
             accounts.insert(
@@ -1799,7 +1811,7 @@ mod tests {
                 },
             );
         }
-        // 设置 API endpoint 缓存
+        // Populate the API endpoint cache.
         {
             let mut api_endpoints = manager.api_endpoints.write().await;
             api_endpoints.insert(
@@ -1817,7 +1829,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
 
-        // 添加账号数据
+        // Add account data.
         {
             let mut accounts = manager.accounts.write().await;
             accounts.insert(
@@ -1834,7 +1846,7 @@ mod tests {
                 },
             );
         }
-        // 设置 API endpoint 缓存
+        // Populate the API endpoint cache.
         {
             let mut api_endpoints = manager.api_endpoints.write().await;
             api_endpoints.insert(
@@ -1843,16 +1855,16 @@ mod tests {
             );
         }
 
-        // 确认缓存存在
+        // Verify the cache entry exists.
         {
             let api_endpoints = manager.api_endpoints.read().await;
             assert!(api_endpoints.contains_key("12345"));
         }
 
-        // 移除账号
+        // Remove the account.
         manager.remove_account("12345").await.unwrap();
 
-        // 确认缓存已清理
+        // Verify the cache was cleared.
         {
             let api_endpoints = manager.api_endpoints.read().await;
             assert!(!api_endpoints.contains_key("12345"));
@@ -1864,7 +1876,7 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
 
-        // 添加多个账号的 API endpoint 缓存
+        // Populate API endpoint cache entries for multiple accounts.
         {
             let mut api_endpoints = manager.api_endpoints.write().await;
             api_endpoints.insert(
@@ -1877,16 +1889,16 @@ mod tests {
             );
         }
 
-        // 确认缓存存在
+        // Verify the cache entries exist.
         {
             let api_endpoints = manager.api_endpoints.read().await;
             assert_eq!(api_endpoints.len(), 2);
         }
 
-        // 清除所有认证
+        // Clear all authentication.
         manager.clear_auth().await.unwrap();
 
-        // 确认缓存已清空
+        // Verify the cache is empty.
         {
             let api_endpoints = manager.api_endpoints.read().await;
             assert!(api_endpoints.is_empty());
@@ -1948,7 +1960,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_api_endpoint_cache_hit_skips_fetch() {
-        // 缓存命中时应直接返回，不发起网络请求
+        // A cache hit returns directly without a network request.
         let temp_dir = tempdir().unwrap();
         let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
 
@@ -1958,7 +1970,7 @@ mod tests {
             api_endpoints.insert("12345".to_string(), enterprise_endpoint.clone());
         }
 
-        // 即使没有账号数据，缓存命中也应直接返回
+        // A cache hit returns directly even without account data.
         let endpoint = manager.get_api_endpoint("12345").await;
         assert_eq!(endpoint, enterprise_endpoint);
     }
@@ -1974,7 +1986,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fetch_and_cache_endpoint_requires_account() {
-        // 账号不存在时 fetch_and_cache_endpoint 应返回 AccountNotFound 错误
+        // fetch_and_cache_endpoint returns AccountNotFound for a missing account.
         let temp_dir = tempdir().unwrap();
         let manager = CopilotAuthManager::new(temp_dir.path().to_path_buf());
 
@@ -1982,20 +1994,20 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             CopilotAuthError::AccountNotFound(id) => assert_eq!(id, "nonexistent"),
-            other => panic!("期望 AccountNotFound 错误，实际: {other:?}"),
+            other => panic!("Expected AccountNotFound, got: {other:?}"),
         }
     }
 
     #[test]
     fn test_normalize_github_domain() {
-        // 基本用法
+        // Basic usage.
         assert_eq!(normalize_github_domain("github.com").unwrap(), "github.com");
         assert_eq!(
             normalize_github_domain("company.ghe.com").unwrap(),
             "company.ghe.com"
         );
 
-        // 剥离协议
+        // Strip the scheme.
         assert_eq!(
             normalize_github_domain("https://company.ghe.com").unwrap(),
             "company.ghe.com"
@@ -2005,14 +2017,14 @@ mod tests {
             "company.ghe.com"
         );
 
-        // 小写化
+        // Lowercase the domain.
         assert_eq!(normalize_github_domain("GitHub.COM").unwrap(), "github.com");
         assert_eq!(
             normalize_github_domain("Company.GHE.Com").unwrap(),
             "company.ghe.com"
         );
 
-        // 剥离尾斜杠和 path
+        // Strip trailing slash and path.
         assert_eq!(
             normalize_github_domain("company.ghe.com/").unwrap(),
             "company.ghe.com"
@@ -2022,7 +2034,7 @@ mod tests {
             "company.ghe.com"
         );
 
-        // 剥离 query 和 fragment
+        // Strip query and fragment.
         assert_eq!(
             normalize_github_domain("company.ghe.com?foo=bar").unwrap(),
             "company.ghe.com"
@@ -2032,32 +2044,32 @@ mod tests {
             "company.ghe.com"
         );
 
-        // 保留端口
+        // Preserve the port.
         assert_eq!(
             normalize_github_domain("company.ghe.com:8443").unwrap(),
             "company.ghe.com:8443"
         );
 
-        // 拒绝 userinfo
+        // Reject userinfo.
         assert!(normalize_github_domain("user@company.ghe.com").is_err());
 
-        // 拒绝空输入
+        // Reject empty input.
         assert!(normalize_github_domain("").is_err());
         assert!(normalize_github_domain("   ").is_err());
     }
 
     #[test]
     fn test_composite_account_id() {
-        // github.com 保持原格式（向后兼容）
+        // Preserve the legacy github.com format.
         assert_eq!(composite_account_id("github.com", 12345), "12345");
 
-        // GHES 使用复合格式
+        // GHES uses the composite format.
         assert_eq!(
             composite_account_id("company.ghe.com", 12345),
             "company.ghe.com:12345"
         );
 
-        // 不同 GHES 实例，相同 user ID，不冲突
+        // The same user ID on different GHES instances must not collide.
         assert_ne!(
             composite_account_id("a.ghe.com", 1),
             composite_account_id("b.ghe.com", 1)

@@ -1,14 +1,14 @@
 /**
  * GitHub Copilot OAuth API
  *
- * 提供 GitHub Copilot OAuth 设备码流程相关的 API 函数。
- * 支持多账号管理。
+ * API functions for the GitHub Copilot OAuth device-code flow.
+ * Supports multiple accounts.
  */
 
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * GitHub 设备码响应
+ * GitHub device-code response
  */
 export interface CopilotDeviceCodeResponse {
   device_code: string;
@@ -19,55 +19,55 @@ export interface CopilotDeviceCodeResponse {
 }
 
 /**
- * GitHub 账号信息（公开信息）
+ * Public GitHub account information
  */
 export interface GitHubAccount {
-  /** GitHub 用户 ID（唯一标识） */
+  /** Unique GitHub user ID */
   id: string;
-  /** GitHub 用户名 */
+  /** GitHub username */
   login: string;
-  /** 头像 URL */
+  /** Avatar URL */
   avatar_url: string | null;
-  /** 认证时间戳（Unix 秒） */
+  /** Authentication timestamp in Unix seconds */
   authenticated_at: number;
-  /** GitHub 域名（github.com 或 GHES 域名） */
+  /** GitHub domain: github.com or a GHES domain */
   github_domain: string;
 }
 
 /**
- * Copilot 认证状态（多账号版本）
+ * Multi-account Copilot authentication status
  */
 export interface CopilotAuthStatus {
-  /** 是否已认证（有任意账号）- 向后兼容 */
+  /** Whether any account is authenticated; retained for backward compatibility */
   authenticated: boolean;
-  /** 默认账号 ID */
+  /** Default account ID */
   default_account_id: string | null;
-  /** 旧认证数据迁移失败时的状态消息 */
+  /** Status message when legacy authentication-data migration fails */
   migration_error?: string | null;
-  /** 第一个账号的用户名 - 向后兼容 */
+  /** First account's username; retained for backward compatibility */
   username: string | null;
-  /** Copilot Token 过期时间 - 向后兼容 */
+  /** Copilot token expiry; retained for backward compatibility */
   expires_at: number | null;
-  /** 所有已认证账号列表 */
+  /** All authenticated accounts */
   accounts: GitHubAccount[];
 }
 
 /**
- * 启动 GitHub OAuth 设备码流程
+ * Start the GitHub OAuth device-code flow.
  *
- * @returns 设备码响应，包含用户码和验证 URL
+ * @returns A device-code response containing the user code and verification URL.
  */
 export async function copilotStartDeviceFlow(): Promise<CopilotDeviceCodeResponse> {
   return invoke<CopilotDeviceCodeResponse>("copilot_start_device_flow");
 }
 
 /**
- * 轮询 OAuth Token
+ * Poll for an OAuth token.
  *
- * 使用设备码轮询 GitHub，等待用户完成授权。
+ * Poll GitHub with the device code until the user completes authorization.
  *
- * @param deviceCode - 设备码
- * @returns true 表示认证成功，false 表示仍在等待用户授权
+ * @param deviceCode - Device code
+ * @returns true when authenticated; false while awaiting user authorization.
  */
 export async function copilotPollForAuth(deviceCode: string): Promise<boolean> {
   return invoke<boolean>("copilot_poll_for_auth", {
@@ -76,32 +76,32 @@ export async function copilotPollForAuth(deviceCode: string): Promise<boolean> {
 }
 
 /**
- * 获取 Copilot 认证状态
+ * Get Copilot authentication status.
  *
- * @returns 认证状态，包含是否已认证、用户名和过期时间
+ * @returns Status containing authentication state, username, and expiry.
  */
 export async function copilotGetAuthStatus(): Promise<CopilotAuthStatus> {
   return invoke<CopilotAuthStatus>("copilot_get_auth_status");
 }
 
 /**
- * 注销 Copilot 认证
+ * Sign out of Copilot.
  */
 export async function copilotLogout(): Promise<void> {
   return invoke("copilot_logout");
 }
 
 /**
- * 检查是否已认证
+ * Check whether Copilot is authenticated.
  *
- * @returns true 表示已认证
+ * @returns true when authenticated.
  */
 export async function copilotIsAuthenticated(): Promise<boolean> {
   return invoke<boolean>("copilot_is_authenticated");
 }
 
 /**
- * Copilot 可用模型
+ * Available Copilot model
  */
 export interface CopilotModel {
   id: string;
@@ -111,9 +111,9 @@ export interface CopilotModel {
 }
 
 /**
- * 获取有效的 Copilot Token
+ * Get a valid Copilot token.
  *
- * 内部使用，用于代理请求。
+ * Used internally for proxy requests.
  *
  * @returns Copilot Token
  */
@@ -122,16 +122,16 @@ export async function copilotGetToken(): Promise<string> {
 }
 
 /**
- * 获取 Copilot 可用模型列表
+ * Get the available Copilot models.
  *
- * @returns 可用模型列表
+ * @returns Available models.
  */
 export async function copilotGetModels(): Promise<CopilotModel[]> {
   return invoke<CopilotModel[]>("copilot_get_models");
 }
 
 /**
- * 配额详情
+ * Quota details
  */
 export interface QuotaDetail {
   entitlement: number;
@@ -141,7 +141,7 @@ export interface QuotaDetail {
 }
 
 /**
- * 配额快照
+ * Quota snapshot
  */
 export interface QuotaSnapshots {
   chat: QuotaDetail;
@@ -150,7 +150,7 @@ export interface QuotaSnapshots {
 }
 
 /**
- * Copilot 使用量响应
+ * Copilot usage response
  */
 export interface CopilotUsageResponse {
   copilot_plan: string;
@@ -159,33 +159,33 @@ export interface CopilotUsageResponse {
 }
 
 /**
- * 获取 Copilot 使用量信息
+ * Get Copilot usage information.
  *
- * @returns 使用量信息，包含计划类型、重置日期和配额快照
+ * @returns Usage details including plan type, reset date, and quota snapshots.
  */
 export async function copilotGetUsage(): Promise<CopilotUsageResponse> {
   return invoke<CopilotUsageResponse>("copilot_get_usage");
 }
 
-// ==================== 多账号管理 API ====================
+// ==================== Multi-account management API ====================
 
 /**
- * 列出所有已认证的 GitHub 账号
+ * List all authenticated GitHub accounts.
  *
- * @returns 账号列表
+ * @returns Account list.
  */
 export async function copilotListAccounts(): Promise<GitHubAccount[]> {
   return invoke<GitHubAccount[]>("copilot_list_accounts");
 }
 
 /**
- * 轮询 OAuth Token（多账号版本）
+ * Poll for an OAuth token in multi-account mode.
  *
- * 使用设备码轮询 GitHub，等待用户完成授权。
- * 授权成功后返回新添加的账号信息。
+ * Poll GitHub with the device code until the user completes authorization.
+ * Return the newly added account after successful authorization.
  *
- * @param deviceCode - 设备码
- * @returns 新添加的账号信息，如果仍在等待则返回 null
+ * @param deviceCode - Device code
+ * @returns The newly added account, or null while authorization is pending.
  */
 export async function copilotPollForAccount(
   deviceCode: string,
@@ -196,18 +196,18 @@ export async function copilotPollForAccount(
 }
 
 /**
- * 移除指定的 GitHub 账号
+ * Remove a GitHub account.
  *
- * @param accountId - GitHub 用户 ID
+ * @param accountId - GitHub user ID
  */
 export async function copilotRemoveAccount(accountId: string): Promise<void> {
   return invoke("copilot_remove_account", { accountId });
 }
 
 /**
- * 设置默认 GitHub 账号
+ * Set the default GitHub account.
  *
- * @param accountId - GitHub 用户 ID
+ * @param accountId - GitHub user ID
  */
 export async function copilotSetDefaultAccount(
   accountId: string,
@@ -216,11 +216,11 @@ export async function copilotSetDefaultAccount(
 }
 
 /**
- * 获取指定账号的有效 Copilot Token
+ * Get a valid Copilot token for an account.
  *
- * 内部使用，用于代理请求。
+ * Used internally for proxy requests.
  *
- * @param accountId - GitHub 用户 ID
+ * @param accountId - GitHub user ID
  * @returns Copilot Token
  */
 export async function copilotGetTokenForAccount(
@@ -230,10 +230,10 @@ export async function copilotGetTokenForAccount(
 }
 
 /**
- * 获取指定账号的 Copilot 可用模型列表
+ * Get available Copilot models for an account.
  *
- * @param accountId - GitHub 用户 ID
- * @returns 可用模型列表
+ * @param accountId - GitHub user ID
+ * @returns Available models.
  */
 export async function copilotGetModelsForAccount(
   accountId: string,
@@ -244,10 +244,10 @@ export async function copilotGetModelsForAccount(
 }
 
 /**
- * 获取指定账号的 Copilot 使用量信息
+ * Get Copilot usage information for an account.
  *
- * @param accountId - GitHub 用户 ID
- * @returns 使用量信息
+ * @param accountId - GitHub user ID
+ * @returns Usage information.
  */
 export async function copilotGetUsageForAccount(
   accountId: string,

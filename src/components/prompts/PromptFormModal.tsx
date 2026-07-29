@@ -46,10 +46,10 @@ const PromptFormModal: React.FC<PromptFormModalProps> = ({
   const [isDarkMode, setIsDarkMode] = useState(false);
 
   useEffect(() => {
-    // 检测初始暗色模式状态
+    // Detect the initial dark-mode state.
     setIsDarkMode(document.documentElement.classList.contains("dark"));
 
-    // 监听 html 元素的 class 变化以实时响应主题切换
+    // Observe HTML class changes to respond to theme switching in real time.
     const observer = new MutationObserver(() => {
       setIsDarkMode(document.documentElement.classList.contains("dark"));
     });

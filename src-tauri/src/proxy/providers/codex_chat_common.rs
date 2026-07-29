@@ -3,8 +3,10 @@ use serde_json::{json, Map, Value};
 const THINK_OPEN_TAG: &str = "<think>";
 const THINK_CLOSE_TAG: &str = "</think>";
 
-// 穷举上游可能的 reasoning 回传字段，优先级：reasoning_content > reasoning(字符串/对象) > reasoning_details。
-// 不依赖 provider meta 的 outputFormat 声明，因此对各家 Chat 兼容接口都能兜底提取。
+// Inspect every known upstream reasoning field in priority order:
+// reasoning_content > reasoning (string/object) > reasoning_details.
+// This does not depend on the provider metadata's outputFormat declaration, so it
+// remains a fallback for every Chat-compatible API.
 pub(crate) fn extract_reasoning_field_text(value: &Value) -> Option<String> {
     for key in ["reasoning_content", "reasoning"] {
         if let Some(text) = value.get(key).and_then(|v| v.as_str()) {

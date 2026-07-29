@@ -4,21 +4,21 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import type { GlobalProxyConfig, AppProxyConfig } from "@/types/proxy";
 
-// ========== 代理服务器状态 Hooks ==========
+// ========== Proxy Server Status Hooks ==========
 
 /**
- * 获取代理服务器状态
+ * Get proxy server status.
  */
 export function useProxyStatus() {
   return useQuery({
     queryKey: ["proxyStatus"],
     queryFn: () => proxyApi.getProxyStatus(),
-    refetchInterval: 5000, // 每 5 秒刷新一次
+    refetchInterval: 5000, // Refresh every 5 seconds.
   });
 }
 
 /**
- * 检查代理服务器是否运行
+ * Check whether the proxy server is running.
  */
 export function useIsProxyRunning() {
   return useQuery({
@@ -29,7 +29,7 @@ export function useIsProxyRunning() {
 }
 
 /**
- * 检查是否处于接管模式
+ * Check whether routing takeover is active.
  */
 export function useIsLiveTakeoverActive() {
   return useQuery({
@@ -40,7 +40,7 @@ export function useIsLiveTakeoverActive() {
 }
 
 /**
- * 获取各应用接管状态
+ * Get routing takeover status for each app.
  */
 export function useProxyTakeoverStatus() {
   return useQuery({
@@ -50,10 +50,10 @@ export function useProxyTakeoverStatus() {
   });
 }
 
-// ========== 代理服务器控制 Hooks ==========
+// ========== Proxy Server Control Hooks ==========
 
 /**
- * 启动代理服务器
+ * Start the proxy server.
  */
 export function useStartProxyServer() {
   const queryClient = useQueryClient();
@@ -70,7 +70,7 @@ export function useStartProxyServer() {
 }
 
 /**
- * 停止代理服务器
+ * Stop the proxy server.
  */
 export function useStopProxyServer() {
   const queryClient = useQueryClient();
@@ -87,7 +87,7 @@ export function useStopProxyServer() {
 }
 
 /**
- * 设置应用接管状态
+ * Set routing takeover status for an app.
  */
 export function useSetProxyTakeoverForApp() {
   const queryClient = useQueryClient();
@@ -103,7 +103,7 @@ export function useSetProxyTakeoverForApp() {
 }
 
 /**
- * 代理模式下切换供应商
+ * Switch providers while proxy routing is active.
  */
 export function useSwitchProxyProvider() {
   const queryClient = useQueryClient();
@@ -129,10 +129,10 @@ export function useSwitchProxyProvider() {
   });
 }
 
-// ========== Legacy 代理配置 Hooks (兼容) ==========
+// ========== Legacy Proxy Configuration Hooks (Compatibility) ==========
 
 /**
- * 获取代理配置（旧版）
+ * Get legacy proxy configuration.
  */
 export function useProxyConfig() {
   const queryClient = useQueryClient();
@@ -165,10 +165,10 @@ export function useProxyConfig() {
   };
 }
 
-// ========== v3+ 全局/应用级配置 Hooks ==========
+// ========== v3+ Global and Per-App Configuration Hooks ==========
 
 /**
- * 获取全局代理配置
+ * Get global proxy configuration.
  */
 export function useGlobalProxyConfig() {
   return useQuery({
@@ -178,7 +178,7 @@ export function useGlobalProxyConfig() {
 }
 
 /**
- * 更新全局代理配置
+ * Update global proxy configuration.
  */
 export function useUpdateGlobalProxyConfig() {
   const queryClient = useQueryClient();
@@ -202,7 +202,7 @@ export function useUpdateGlobalProxyConfig() {
 }
 
 /**
- * 获取指定应用的代理配置
+ * Get proxy configuration for an app.
  */
 export function useAppProxyConfig(appType: string) {
   return useQuery({
@@ -213,7 +213,7 @@ export function useAppProxyConfig(appType: string) {
 }
 
 /**
- * 更新指定应用的代理配置
+ * Update proxy configuration for an app.
  */
 export function useUpdateAppProxyConfig() {
   const queryClient = useQueryClient();

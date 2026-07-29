@@ -3,9 +3,8 @@ import { isWindows } from "@/lib/platform";
 
 export type McpPreset = Omit<McpServer, "enabled" | "description">;
 
-// 创建跨平台 npx 命令配置
-// Windows 需要使用 cmd /c wrapper 来执行 npx.cmd
-// Mac/Linux 可以直接执行 npx
+// Create cross-platform npx command configuration. Windows requires a cmd /c
+// wrapper to execute npx.cmd, while macOS and Linux can invoke npx directly.
 const createNpxCommand = (
   packageName: string,
   extraArgs: string[] = [],
@@ -23,11 +22,12 @@ const createNpxCommand = (
   }
 };
 
-// 预设 MCP（逻辑简化版）：
-// - 仅包含最常用、可快速落地的 stdio 模式示例
-// - 不涉及分类/模板/测速等复杂逻辑，默认以 disabled 形式"回种"到 config.json
-// - 用户可在 MCP 面板中一键启用/编辑
-// - description 字段使用国际化 key，在使用时通过 t() 函数获取翻译
+// Simplified MCP presets:
+// - Include only common, ready-to-use stdio examples.
+// - Avoid category, template, and speed-test complexity; seed config.json with
+//   these entries disabled by default.
+// - Users can enable or edit them from the MCP panel.
+// - The description field uses an i18n key resolved with t() when consumed.
 export const mcpPresets: McpPreset[] = [
   {
     id: "fetch",
@@ -89,7 +89,7 @@ export const mcpPresets: McpPreset[] = [
   },
 ];
 
-// 获取带国际化描述的预设
+// Resolve a preset with its localized description.
 export const getMcpPresetWithDescription = (
   preset: McpPreset,
   t: (key: string) => string,

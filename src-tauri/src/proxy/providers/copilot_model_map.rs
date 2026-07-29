@@ -1,8 +1,9 @@
-//! GitHub Copilot 模型 ID 归一化与 live-list 解析
+//! GitHub Copilot model-ID normalization and live-list resolution.
 //!
-//! Copilot upstream 仅接受 dot 形式的 Claude 4.x 模型 ID（如 `claude-sonnet-4.6`），
-//! 而 Claude Code 客户端发出 dash 形式（如 `claude-sonnet-4-6`、`claude-sonnet-4-6[1m]`）。
-//! 不归一化会触发上游 400 `model_not_supported`。
+//! Copilot upstream accepts only dotted Claude 4.x model IDs such as
+//! `claude-sonnet-4.6`, while Claude Code sends dashed forms such as
+//! `claude-sonnet-4-6` and `claude-sonnet-4-6[1m]`. Without normalization,
+//! upstream returns `400 model_not_supported`.
 //!
 //! `resolve_against_models` uses the live `/models` list only to confirm that a
 //! syntax-normalized ID names the same model. It never substitutes another model.
@@ -10,8 +11,8 @@
 use super::copilot_auth::CopilotModel;
 use serde_json::Value;
 
-/// 归一化客户端 model ID 为 Copilot upstream 接受的形式。
-/// 返回 `None` 表示无需变换（已归一化、非 Claude 4.x 系列、或空输入）。
+/// Normalizes a client model ID into the form accepted by Copilot upstream.
+/// Returns `None` when no change is needed: already normalized, not Claude 4.x, or empty.
 pub(super) fn normalize_to_copilot_id(client_id: &str) -> Option<String> {
     let trimmed = client_id.trim();
     let bytes = trimmed.as_bytes();
@@ -22,7 +23,8 @@ pub(super) fn normalize_to_copilot_id(client_id: &str) -> Option<String> {
 
     let has_one_m_bracket = ends_with_ascii_ci(bytes, b"[1m]");
 
-    // Fast path: 已含点 + 不带 [1m] → 已归一化（绝大多数请求走这里）
+    // Fast path: a dotted ID without [1m] is already normalized. Most requests
+    // take this path.
     if trimmed.contains('.') && !has_one_m_bracket {
         return None;
     }
@@ -42,7 +44,7 @@ pub(super) fn normalize_to_copilot_id(client_id: &str) -> Option<String> {
     (candidate != trimmed).then_some(candidate)
 }
 
-/// 在请求体中应用 model ID 归一化。
+/// Applies model-ID normalization to a request body.
 pub fn apply_copilot_model_normalization(mut body: Value) -> Value {
     let Some(orig) = body.get("model").and_then(|v| v.as_str()) else {
         return body;
@@ -82,8 +84,9 @@ fn strip_trailing_date(id: &str) -> &str {
     }
 }
 
-/// 把 `…-X-Y`（X、Y 都是纯数字的末两段）变成 `…-X.Y`。
-/// 返回 `None` 表示模式不匹配（保守策略避免误伤 `claude-3-5-sonnet` 等历史 ID）。
+/// Converts a trailing numeric `…-X-Y` pair to `…-X.Y`.
+/// Returns `None` when the pattern does not match. This conservative behavior
+/// avoids changing legacy IDs such as `claude-3-5-sonnet`.
 fn dashes_to_dot_in_last_version(id: &str) -> Option<String> {
     let last_dash = id.rfind('-')?;
     let last_segment = &id[last_dash + 1..];
@@ -99,11 +102,11 @@ fn dashes_to_dot_in_last_version(id: &str) -> Option<String> {
     Some(format!("{head}.{last_segment}"))
 }
 
-/// 用 Copilot live 模型列表确认/降级 model ID。
+/// Confirms a model ID against Copilot's live model list.
 ///
-/// 流程：
-/// 1. 先做语法归一化（dash→dot、`[1m]`→`-1m`）
-/// 2. 在 `models` 中精确匹配；找到则使用归一化后的 ID
+/// Flow:
+/// 1. Normalize syntax first (`dash` to `dot`, `[1m]` to `-1m`).
+/// 2. Match exactly in `models`; use the normalized ID only when found.
 ///
 /// Returns `None` when no syntax change is needed or the exact model is unavailable.
 /// The unavailable case remains unchanged so upstream can return `model_not_supported`.
@@ -153,8 +156,8 @@ mod tests {
 
     #[test]
     fn one_m_bracket_on_already_dotted() {
-        // claude-sonnet-4.6[1m] 走非 fast-path 分支（has_one_m_bracket=true），
-        // 应被改写为 -1m 形式
+        // claude-sonnet-4.6[1m] bypasses the fast path because
+        // has_one_m_bracket=true and must be rewritten with the -1m suffix.
         assert_eq!(
             normalize_to_copilot_id("claude-sonnet-4.6[1m]"),
             Some("claude-sonnet-4.6-1m".to_string())
@@ -298,7 +301,8 @@ mod tests {
 
     #[test]
     fn resolve_returns_none_when_family_absent() {
-        // 账号完全没有 opus 时不做强行替换，让上游报错
+        // Do not force a substitution when the account has no Opus model; let
+        // upstream report the error.
         let models = vec![model("claude-sonnet-4.6"), model("claude-haiku-4.5")];
         assert_eq!(resolve_against_models("claude-opus-4.6", &models), None);
     }

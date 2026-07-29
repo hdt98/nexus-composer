@@ -7,16 +7,16 @@ use std::path::{Path, PathBuf};
 use crate::config::{atomic_write, get_claude_mcp_path};
 use crate::error::AppError;
 
-/// 需要在 Windows 上用 cmd /c 包装的命令
-/// 这些命令在 Windows 上实际是 .cmd 批处理文件，需要通过 cmd /c 来执行
+/// Commands that must be wrapped with `cmd /c` on Windows.
+/// On Windows, these commands are `.cmd` batch files and must run through `cmd /c`.
 #[cfg(windows)]
 const WINDOWS_WRAP_COMMANDS: &[&str] = &["npx", "npm", "yarn", "pnpm", "node", "bun", "deno"];
 
-/// Windows 平台：将 `npx args...` 转换为 `cmd /c npx args...`
-/// 解决 Claude Code /doctor 报告的 "Windows requires 'cmd /c' wrapper to execute npx" 警告
+/// On Windows, convert `npx args...` to `cmd /c npx args...`.
+/// This fixes the Claude Code `/doctor` warning: "Windows requires 'cmd /c' wrapper to execute npx".
 #[cfg(windows)]
 fn wrap_command_for_windows(obj: &mut Map<String, Value>) {
-    // 只处理 stdio 类型（默认或显式）
+    // Only handle stdio servers, whether implicit or explicit.
     let server_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("stdio");
     if server_type != "stdio" {
         return;
@@ -26,12 +26,12 @@ fn wrap_command_for_windows(obj: &mut Map<String, Value>) {
         return;
     };
 
-    // 已经是 cmd 的不重复包装
+    // Do not wrap again if the command is already `cmd`.
     if cmd.eq_ignore_ascii_case("cmd") || cmd.eq_ignore_ascii_case("cmd.exe") {
         return;
     }
 
-    // 提取命令名（去掉 .cmd 后缀和路径）
+    // Extract the command name without the path or `.cmd` suffix.
     let cmd_name = Path::new(cmd)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -45,7 +45,7 @@ fn wrap_command_for_windows(obj: &mut Map<String, Value>) {
         return;
     }
 
-    // 构建新的 args: ["/c", "原命令", ...原args]
+    // Build new args: ["/c", "original command", ...original args]
     let original_args = obj
         .get("args")
         .and_then(|v| v.as_array())
@@ -59,15 +59,17 @@ fn wrap_command_for_windows(obj: &mut Map<String, Value>) {
     obj.insert("args".into(), Value::Array(new_args));
 }
 
-/// 非 Windows 平台无需处理
+/// No handling is needed on non-Windows platforms.
 #[cfg(not(windows))]
 fn wrap_command_for_windows(_obj: &mut Map<String, Value>) {
-    // 非 Windows 平台不做任何处理
+    // No-op on non-Windows platforms.
 }
 
-/// 检测路径是否为 WSL 网络路径（如 \\wsl$\Ubuntu\... 或 \\wsl.localhost\Ubuntu\...）
-/// WSL 环境运行的是 Linux，不需要 cmd /c 包装
-/// 注意：仅检测直接 UNC 路径，映射磁盘符（如 Z: -> \\wsl$\...）无法检测
+/// Detect whether a path is a WSL network path, such as `\\wsl$\Ubuntu\...` or
+/// `\\wsl.localhost\Ubuntu\...`.
+/// WSL runs Linux, so it does not need `cmd /c` wrapping.
+/// Note: this only detects direct UNC paths. Mapped drive letters such as
+/// `Z: -> \\wsl$\...` cannot be detected.
 #[cfg(windows)]
 fn is_wsl_path(path: &Path) -> bool {
     use std::path::{Component, Prefix};
@@ -145,8 +147,9 @@ pub fn read_mcp_json() -> Result<Option<String>, AppError> {
     Ok(Some(content))
 }
 
-/// 在 ~/.claude.json 根对象写入 hasCompletedOnboarding=true（用于跳过 Claude Code 初次安装确认）
-/// 仅增量写入该字段，其他字段保持不变
+/// Write `hasCompletedOnboarding=true` to the root object in `~/.claude.json`
+/// to skip the initial Claude Code install confirmation.
+/// Only this field is updated; all other fields stay unchanged.
 pub fn set_has_completed_onboarding() -> Result<bool, AppError> {
     let path = user_config_path();
     let mut root = if path.exists() {
@@ -157,7 +160,7 @@ pub fn set_has_completed_onboarding() -> Result<bool, AppError> {
 
     let obj = root
         .as_object_mut()
-        .ok_or_else(|| AppError::Config("~/.claude.json 根必须是对象".into()))?;
+        .ok_or_else(|| AppError::Config("~/.claude.json root must be an object".into()))?;
 
     let already = obj
         .get("hasCompletedOnboarding")
@@ -172,8 +175,9 @@ pub fn set_has_completed_onboarding() -> Result<bool, AppError> {
     Ok(true)
 }
 
-/// 删除 ~/.claude.json 根对象的 hasCompletedOnboarding 字段（恢复 Claude Code 初次安装确认）
-/// 仅增量删除该字段，其他字段保持不变
+/// Remove the `hasCompletedOnboarding` field from the root object in
+/// `~/.claude.json` to restore the initial Claude Code install confirmation.
+/// Only this field is removed; all other fields stay unchanged.
 pub fn clear_has_completed_onboarding() -> Result<bool, AppError> {
     let path = user_config_path();
     if !path.exists() {
@@ -183,7 +187,7 @@ pub fn clear_has_completed_onboarding() -> Result<bool, AppError> {
     let mut root = read_json_value(&path)?;
     let obj = root
         .as_object_mut()
-        .ok_or_else(|| AppError::Config("~/.claude.json 根必须是对象".into()))?;
+        .ok_or_else(|| AppError::Config("~/.claude.json root must be an object".into()))?;
 
     let existed = obj.remove("hasCompletedOnboarding").is_some();
     if !existed {
@@ -196,42 +200,44 @@ pub fn clear_has_completed_onboarding() -> Result<bool, AppError> {
 
 pub fn upsert_mcp_server(id: &str, spec: Value) -> Result<bool, AppError> {
     if id.trim().is_empty() {
-        return Err(AppError::InvalidInput("MCP 服务器 ID 不能为空".into()));
+        return Err(AppError::InvalidInput(
+            "MCP server ID cannot be empty".into(),
+        ));
     }
-    // 基础字段校验（尽量宽松）
+    // Validate core fields with relaxed compatibility rules.
     if !spec.is_object() {
         return Err(AppError::McpValidation(
-            "MCP 服务器定义必须为 JSON 对象".into(),
+            "MCP server definition must be a JSON object".into(),
         ));
     }
     let t_opt = spec.get("type").and_then(|x| x.as_str());
-    let is_stdio = t_opt.map(|t| t == "stdio").unwrap_or(true); // 兼容缺省（按 stdio 处理）
+    let is_stdio = t_opt.map(|t| t == "stdio").unwrap_or(true); // Preserve missing `type` as stdio for compatibility.
     let is_http = t_opt.map(|t| t == "http").unwrap_or(false);
     let is_sse = t_opt.map(|t| t == "sse").unwrap_or(false);
     if !(is_stdio || is_http || is_sse) {
         return Err(AppError::McpValidation(
-            "MCP 服务器 type 必须是 'stdio'、'http' 或 'sse'（或省略表示 stdio）".into(),
+            "MCP server type must be 'stdio', 'http', or 'sse' (or omitted for stdio)".into(),
         ));
     }
 
-    // stdio 类型必须有 command
+    // stdio servers must define `command`.
     if is_stdio {
         let cmd = spec.get("command").and_then(|x| x.as_str()).unwrap_or("");
         if cmd.is_empty() {
             return Err(AppError::McpValidation(
-                "stdio 类型的 MCP 服务器缺少 command 字段".into(),
+                "stdio MCP server is missing the `command` field".into(),
             ));
         }
     }
 
-    // http/sse 类型必须有 url
+    // http/sse servers must define `url`.
     if is_http || is_sse {
         let url = spec.get("url").and_then(|x| x.as_str()).unwrap_or("");
         if url.is_empty() {
             return Err(AppError::McpValidation(if is_http {
-                "http 类型的 MCP 服务器缺少 url 字段".into()
+                "http MCP server is missing the `url` field".into()
             } else {
-                "sse 类型的 MCP 服务器缺少 url 字段".into()
+                "sse MCP server is missing the `url` field".into()
             }));
         }
     }
@@ -243,11 +249,11 @@ pub fn upsert_mcp_server(id: &str, spec: Value) -> Result<bool, AppError> {
         serde_json::json!({})
     };
 
-    // 确保 mcpServers 对象存在
+    // Ensure the `mcpServers` object exists.
     {
         let obj = root
             .as_object_mut()
-            .ok_or_else(|| AppError::Config("mcp.json 根必须是对象".into()))?;
+            .ok_or_else(|| AppError::Config("mcp.json root must be an object".into()))?;
         if !obj.contains_key("mcpServers") {
             obj.insert("mcpServers".into(), serde_json::json!({}));
         }
@@ -268,7 +274,9 @@ pub fn upsert_mcp_server(id: &str, spec: Value) -> Result<bool, AppError> {
 
 pub fn delete_mcp_server(id: &str) -> Result<bool, AppError> {
     if id.trim().is_empty() {
-        return Err(AppError::InvalidInput("MCP 服务器 ID 不能为空".into()));
+        return Err(AppError::InvalidInput(
+            "MCP server ID cannot be empty".into(),
+        ));
     }
     let path = user_config_path();
     if !path.exists() {
@@ -290,7 +298,7 @@ pub fn validate_command_in_path(cmd: &str) -> Result<bool, AppError> {
     if cmd.trim().is_empty() {
         return Ok(false);
     }
-    // 如果包含路径分隔符，直接判断是否存在可执行文件
+    // If the input includes path separators, check the executable directly.
     if cmd.contains('/') || cmd.contains('\\') {
         return Ok(Path::new(cmd).exists());
     }
@@ -323,7 +331,7 @@ pub fn validate_command_in_path(cmd: &str) -> Result<bool, AppError> {
     Ok(false)
 }
 
-/// 读取 ~/.claude.json 中的 mcpServers 映射
+/// Read the `mcpServers` map from `~/.claude.json`.
 pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>, AppError> {
     let path = user_config_path();
     if !path.exists() {
@@ -340,8 +348,9 @@ pub fn read_mcp_servers_map() -> Result<std::collections::HashMap<String, Value>
     Ok(servers)
 }
 
-/// 将给定的启用 MCP 服务器映射写入到用户级 ~/.claude.json 的 mcpServers 字段
-/// 仅覆盖 mcpServers，其他字段保持不变
+/// Write the provided enabled MCP server map to the user-level
+/// `~/.claude.json` `mcpServers` field.
+/// Only `mcpServers` is overwritten; all other fields stay unchanged.
 pub fn set_mcp_servers_map(
     servers: &std::collections::HashMap<String, Value>,
 ) -> Result<(), AppError> {
@@ -352,11 +361,15 @@ pub fn set_mcp_servers_map(
         serde_json::json!({})
     };
 
-    // 构建 mcpServers 对象：移除 UI 辅助字段（enabled/source），仅保留实际 MCP 规范
-    // 检测目标路径是否为 WSL，若是则跳过 cmd /c 包装
+    // Build the `mcpServers` object by removing UI-only helper fields
+    // (`enabled`/`source`) and keeping only the actual MCP spec.
+    // Detect WSL target paths and skip `cmd /c` wrapping for them.
     let is_wsl_target = is_wsl_path(&path);
     if is_wsl_target {
-        log::info!("检测到 WSL 路径，跳过 cmd /c 包装: {}", path.display());
+        log::info!(
+            "Detected a WSL path, skipping cmd /c wrapping: {}",
+            path.display()
+        );
     }
     let mut out: Map<String, Value> = Map::new();
     for (id, spec) in servers.iter() {
@@ -364,13 +377,15 @@ pub fn set_mcp_servers_map(
             map.clone()
         } else {
             return Err(AppError::McpValidation(format!(
-                "MCP 服务器 '{id}' 不是对象"
+                "MCP server '{id}' is not an object"
             )));
         };
 
         if let Some(server_val) = obj.remove("server") {
             let server_obj = server_val.as_object().cloned().ok_or_else(|| {
-                AppError::McpValidation(format!("MCP 服务器 '{id}' server 字段不是对象"))
+                AppError::McpValidation(format!(
+                    "MCP server '{id}' has a non-object `server` field"
+                ))
             })?;
             obj = server_obj;
         }
@@ -384,7 +399,8 @@ pub fn set_mcp_servers_map(
         obj.remove("homepage");
         obj.remove("docs");
 
-        // Windows 平台自动包装 npx/npm 等命令为 cmd /c 格式（WSL 路径除外）
+        // On Windows, automatically wrap commands such as npx/npm with
+        // `cmd /c`, except for WSL paths.
         if !is_wsl_target {
             wrap_command_for_windows(&mut obj);
         }
@@ -395,7 +411,7 @@ pub fn set_mcp_servers_map(
     {
         let obj = root
             .as_object_mut()
-            .ok_or_else(|| AppError::Config("~/.claude.json 根必须是对象".into()))?;
+            .ok_or_else(|| AppError::Config("~/.claude.json root must be an object".into()))?;
         obj.insert("mcpServers".into(), Value::Object(out));
     }
 
@@ -408,8 +424,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 测试 Windows 命令包装功能
-    /// 由于使用条件编译，在非 Windows 平台上测试的是空函数
+    /// Test Windows command wrapping behavior.
+    /// Due to conditional compilation, this exercises the no-op function on non-Windows platforms.
     #[test]
     fn test_wrap_command_for_windows_npx() {
         let mut obj = json!({"command": "npx", "args": ["-y", "@upstash/context7-mcp"]})
@@ -429,7 +445,7 @@ mod tests {
 
         #[cfg(not(windows))]
         {
-            // 非 Windows 平台不做任何处理
+            // Non-Windows platforms should leave the object unchanged.
             assert_eq!(obj["command"], "npx");
         }
     }
@@ -451,7 +467,7 @@ mod tests {
 
     #[test]
     fn test_wrap_command_for_windows_already_cmd() {
-        // 已经是 cmd 的不应该重复包装
+        // Commands already using `cmd` should not be wrapped again.
         let mut obj = json!({"command": "cmd", "args": ["/c", "npx", "-y", "foo"]})
             .as_object()
             .unwrap()
@@ -459,13 +475,14 @@ mod tests {
         wrap_command_for_windows(&mut obj);
 
         assert_eq!(obj["command"], "cmd");
-        // args 应该保持不变，不会变成 ["/c", "cmd", "/c", "npx", ...]
+        // Args should remain unchanged and must not become
+        // ["/c", "cmd", "/c", "npx", ...].
         assert_eq!(obj["args"], json!(["/c", "npx", "-y", "foo"]));
     }
 
     #[test]
     fn test_wrap_command_for_windows_http_type_skipped() {
-        // http 类型不应该被处理
+        // http servers should not be rewritten.
         let mut obj = json!({"type": "http", "url": "https://example.com/mcp"})
             .as_object()
             .unwrap()
@@ -478,21 +495,21 @@ mod tests {
 
     #[test]
     fn test_wrap_command_for_windows_other_command_skipped() {
-        // 非目标命令（如 python）不应该被包装
+        // Non-target commands such as `python` should not be wrapped.
         let mut obj = json!({"command": "python", "args": ["server.py"]})
             .as_object()
             .unwrap()
             .clone();
         wrap_command_for_windows(&mut obj);
 
-        // python 不在 WINDOWS_WRAP_COMMANDS 列表中，不应该被包装
+        // `python` is not in `WINDOWS_WRAP_COMMANDS`, so it should stay unchanged.
         assert_eq!(obj["command"], "python");
         assert_eq!(obj["args"], json!(["server.py"]));
     }
 
     #[test]
     fn test_wrap_command_for_windows_no_args() {
-        // 没有 args 的情况
+        // Handle commands with no args.
         let mut obj = json!({"command": "npx"}).as_object().unwrap().clone();
         wrap_command_for_windows(&mut obj);
 
@@ -505,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_wrap_command_for_windows_with_cmd_suffix() {
-        // 处理 npx.cmd 格式
+        // Handle `npx.cmd` command names.
         let mut obj = json!({"command": "npx.cmd", "args": ["-y", "foo"]})
             .as_object()
             .unwrap()
@@ -521,7 +538,7 @@ mod tests {
 
     #[test]
     fn test_wrap_command_for_windows_case_insensitive() {
-        // 大小写不敏感
+        // Matching should be case-insensitive.
         let mut obj = json!({"command": "NPX", "args": ["-y", "foo"]})
             .as_object()
             .unwrap()
@@ -535,10 +552,10 @@ mod tests {
         }
     }
 
-    /// 测试 WSL 路径检测功能
+    /// Test WSL path detection.
     #[test]
     fn test_is_wsl_path_wsl_dollar() {
-        // wsl$ 格式 - 各种发行版
+        // `wsl$` format across multiple distributions.
         #[cfg(windows)]
         {
             assert!(is_wsl_path(Path::new(r"\\wsl$\Ubuntu\home\user\.claude")));
@@ -554,14 +571,14 @@ mod tests {
 
         #[cfg(not(windows))]
         {
-            // 非 Windows 平台始终返回 false
+            // Non-Windows platforms always return false.
             assert!(!is_wsl_path(Path::new(r"\\wsl$\Ubuntu\home\user\.claude")));
         }
     }
 
     #[test]
     fn test_is_wsl_path_wsl_localhost() {
-        // wsl.localhost 格式
+        // `wsl.localhost` format.
         #[cfg(windows)]
         {
             assert!(is_wsl_path(Path::new(
@@ -576,7 +593,7 @@ mod tests {
 
     #[test]
     fn test_is_wsl_path_case_insensitive() {
-        // 大小写不敏感
+        // Matching should be case-insensitive.
         #[cfg(windows)]
         {
             assert!(is_wsl_path(Path::new(r"\\WSL$\Ubuntu\home\user")));
@@ -588,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_is_wsl_path_non_wsl() {
-        // 非 WSL 路径
+        // Non-WSL paths.
         assert!(!is_wsl_path(Path::new(r"C:\Users\user\.claude")));
         assert!(!is_wsl_path(Path::new(r"D:\Workspace\project")));
         #[cfg(windows)]

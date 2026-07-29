@@ -19,7 +19,7 @@ fn load_v1_config_returns_error_and_does_not_write() {
     let path = cfg_path();
     fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 
-    // 最小 v1 形状：providers + current，且不含 version/apps/mcp
+    // Minimal v1 shape: providers + current, without version/apps/mcp.
     let v1_json = r#"{"providers":{},"current":""}"#;
     fs::write(&path, v1_json).expect("seed v1 json");
     let before = fs::read_to_string(&path).expect("read before");
@@ -30,7 +30,7 @@ fn load_v1_config_returns_error_and_does_not_write() {
         other => panic!("expected Localized v1 error, got {other:?}"),
     }
 
-    // 文件不应有任何变化，且不应生成 .bak
+    // The file must remain unchanged and no .bak file should be created.
     let after = fs::read_to_string(&path).expect("read after");
     assert_eq!(before, after, "config.json should not be modified");
     let bak = home.join(".cc-switch").join("config.json.bak");
@@ -45,7 +45,7 @@ fn load_v1_with_extra_version_still_treated_as_v1() {
     let path = cfg_path();
     std::fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 
-    // 畸形：包含 providers + current + version，但没有 apps，应按 v1 处理
+    // Malformed input with providers + current + version but no apps is treated as v1.
     let v1_like = r#"{"providers":{},"current":"","version":2}"#;
     std::fs::write(&path, v1_like).expect("seed v1-like json");
     let before = std::fs::read_to_string(&path).expect("read before");
@@ -93,7 +93,7 @@ fn load_valid_v2_config_succeeds() {
     let path = cfg_path();
     fs::create_dir_all(path.parent().unwrap()).expect("create cfg dir");
 
-    // 使用默认结构序列化为 v2
+    // Serialize the default structure as v2.
     let default_cfg = MultiAppConfig::default();
     let json = serde_json::to_string_pretty(&default_cfg).expect("serialize default cfg");
     fs::write(&path, json).expect("write v2 json");

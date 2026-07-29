@@ -1,20 +1,20 @@
-//! Anthropic API 数据模型
+//! Anthropic API data models.
 //!
-//! 用于 Anthropic Messages API 的请求/响应格式转换
+//! Used to transform Anthropic Messages API requests and responses.
 
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Anthropic 请求
+/// Anthropic request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicRequest {
     pub model: String,
     pub messages: Vec<AnthropicMessage>,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<Value>, // 可以是 String 或 Vec<SystemBlock>
+    pub system: Option<Value>, // Either a String or Vec<SystemBlock>.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,14 +25,14 @@ pub struct AnthropicRequest {
     pub tool_choice: Option<Value>,
 }
 
-/// Anthropic 消息
+/// Anthropic message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicMessage {
     pub role: String,
-    pub content: Value, // String 或 Vec<ContentBlock>
+    pub content: Value, // String or Vec<ContentBlock>.
 }
 
-/// Anthropic 内容块
+/// Anthropic content block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlock {
@@ -50,7 +50,7 @@ pub enum AnthropicContentBlock {
     ToolResult { tool_use_id: String, content: Value },
 }
 
-/// 图片来源
+/// Image source.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageSource {
     #[serde(rename = "type")]
@@ -59,7 +59,7 @@ pub struct ImageSource {
     pub data: String,
 }
 
-/// Anthropic 工具定义
+/// Anthropic tool definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicTool {
     pub name: String,
@@ -68,7 +68,7 @@ pub struct AnthropicTool {
     pub input_schema: Value,
 }
 
-/// Anthropic 响应
+/// Anthropic response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicResponse {
     pub id: String,
@@ -84,7 +84,7 @@ pub struct AnthropicResponse {
     pub usage: AnthropicUsage,
 }
 
-/// Anthropic 响应内容
+/// Anthropic response content.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AnthropicResponseContent {
@@ -98,7 +98,7 @@ pub enum AnthropicResponseContent {
     },
 }
 
-/// Anthropic 使用量
+/// Anthropic usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnthropicUsage {
     pub input_tokens: u32,

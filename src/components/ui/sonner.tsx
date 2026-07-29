@@ -4,8 +4,7 @@ import { useTheme } from "@/components/theme-provider";
 export function Toaster() {
   const { theme } = useTheme();
 
-  // 将应用主题映射到 Sonner 的主题
-  // 如果是 "system"，Sonner 会自己处理
+  // Map the application theme to Sonner; Sonner handles "system" itself.
   const sonnerTheme = theme === "system" ? "system" : theme;
 
   return (

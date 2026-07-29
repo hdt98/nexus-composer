@@ -1,22 +1,22 @@
-// 配置相关 API
+// Configuration API
 import { invoke } from "@tauri-apps/api/core";
 
 export type AppType = "claude" | "codex" | "gemini" | "omo" | "omo_slim";
 
 /**
- * 获取 Claude 通用配置片段（已废弃，使用 getCommonConfigSnippet）
- * @returns 通用配置片段（JSON 字符串），如果不存在则返回 null
- * @deprecated 使用 getCommonConfigSnippet('claude') 替代
+ * Get the Claude common configuration snippet. Deprecated in favor of getCommonConfigSnippet.
+ * @returns The common configuration snippet as JSON, or null when absent.
+ * @deprecated Use getCommonConfigSnippet('claude') instead.
  */
 export async function getClaudeCommonConfigSnippet(): Promise<string | null> {
   return invoke<string | null>("get_claude_common_config_snippet");
 }
 
 /**
- * 设置 Claude 通用配置片段（已废弃，使用 setCommonConfigSnippet）
- * @param snippet - 通用配置片段（JSON 字符串）
- * @throws 如果 JSON 格式无效
- * @deprecated 使用 setCommonConfigSnippet('claude', snippet) 替代
+ * Set the Claude common configuration snippet. Deprecated in favor of setCommonConfigSnippet.
+ * @param snippet - Common configuration snippet as JSON.
+ * @throws If the JSON is invalid.
+ * @deprecated Use setCommonConfigSnippet('claude', snippet) instead.
  */
 export async function setClaudeCommonConfigSnippet(
   snippet: string,
@@ -25,9 +25,9 @@ export async function setClaudeCommonConfigSnippet(
 }
 
 /**
- * 获取通用配置片段（统一接口）
- * @param appType - 应用类型（claude/codex/gemini）
- * @returns 通用配置片段（原始字符串），如果不存在则返回 null
+ * Get a common configuration snippet through the unified API.
+ * @param appType - App type: claude, codex, or gemini.
+ * @returns The common configuration snippet as a raw string, or null when absent.
  */
 export async function getCommonConfigSnippet(
   appType: AppType,
@@ -36,10 +36,10 @@ export async function getCommonConfigSnippet(
 }
 
 /**
- * 设置通用配置片段（统一接口）
- * @param appType - 应用类型（claude/codex/gemini）
- * @param snippet - 通用配置片段（原始字符串）
- * @throws 如果格式无效（Claude/Gemini 验证 JSON，Codex 暂不验证）
+ * Set a common configuration snippet through the unified API.
+ * @param appType - App type: claude, codex, or gemini.
+ * @param snippet - Common configuration snippet as a raw string.
+ * @throws If the format is invalid. Claude and Gemini validate JSON; Codex currently does not validate.
  */
 export async function setCommonConfigSnippet(
   appType: AppType,
@@ -49,14 +49,15 @@ export async function setCommonConfigSnippet(
 }
 
 /**
- * 提取通用配置片段
+ * Extract a common configuration snippet.
  *
- * 默认读取当前激活供应商的配置；若传入 `options.settingsConfig`，则从编辑器当前内容提取。
- * 会自动排除差异化字段（API Key、模型配置、端点等），返回可复用的通用配置片段。
+ * By default, read the active provider's configuration. When `options.settingsConfig`
+ * is supplied, extract from the editor's current content. Provider-specific fields
+ * such as API keys, model configuration, and endpoints are excluded automatically.
  *
- * @param appType - 应用类型（claude/codex/gemini）
- * @param options - 可选：提取来源
- * @returns 提取的通用配置片段（JSON/TOML 字符串）
+ * @param appType - App type: claude, codex, or gemini.
+ * @param options - Optional extraction source.
+ * @returns The extracted reusable snippet as a JSON or TOML string.
  */
 export type ExtractCommonConfigSnippetOptions = {
   settingsConfig?: string;

@@ -12,8 +12,8 @@ interface UseSessionSearchResult {
 }
 
 /**
- * 使用 FlexSearch 实现会话全文搜索
- * 索引会话元数据（标题、摘要、项目目录等）
+ * Implements full-text session search with FlexSearch and indexes session
+ * metadata such as titles, summaries, and project directories.
  */
 export function useSessionSearch({
   sessions,

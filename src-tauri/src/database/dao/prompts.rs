@@ -1,6 +1,6 @@
-//! 提示词数据访问对象
+//! Prompt data-access object.
 //!
-//! 提供提示词（Prompt）的 CRUD 操作。
+//! Provides CRUD operations for prompts.
 
 use crate::database::{lock_conn, Database};
 use crate::error::AppError;
@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use rusqlite::params;
 
 impl Database {
-    /// 获取指定应用类型的所有提示词
+    /// Returns all prompts for the specified application type.
     pub fn get_prompts(&self, app_type: &str) -> Result<IndexMap<String, Prompt>, AppError> {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
@@ -53,7 +53,7 @@ impl Database {
         Ok(prompts)
     }
 
-    /// 保存提示词
+    /// Saves a prompt.
     pub fn save_prompt(&self, app_type: &str, prompt: &Prompt) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(
@@ -75,7 +75,7 @@ impl Database {
         Ok(())
     }
 
-    /// 删除提示词
+    /// Deletes a prompt.
     pub fn delete_prompt(&self, app_type: &str, id: &str) -> Result<(), AppError> {
         let conn = lock_conn!(self.conn);
         conn.execute(

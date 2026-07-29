@@ -1,12 +1,12 @@
-//! OpenAI Responses API 流式转换模块
+//! OpenAI Responses API streaming conversion module.
 //!
-//! 实现 Responses API SSE → Anthropic SSE 格式转换。
+//! Converts Responses API SSE to Anthropic SSE.
 //!
-//! Responses API 使用命名事件 (named events) 的生命周期模型：
+//! The Responses API uses a named-event lifecycle:
 //! response.created → output_item.added → content_part.added →
 //! output_text.delta → content_part.done → output_item.done → response.completed
 //!
-//! 与 Chat Completions 的 delta chunk 模型完全不同，需要独立的状态机处理。
+//! This differs from the Chat Completions delta-chunk model and requires a separate state machine.
 
 use super::transform_responses::{
     build_anthropic_usage_from_responses, map_responses_stop_reason,
@@ -95,10 +95,10 @@ fn resolve_content_index(
     }
 }
 
-/// 创建从 Responses API SSE 到 Anthropic SSE 的转换流
+/// Creates a stream that converts Responses API SSE to Anthropic SSE.
 ///
-/// 状态机跟踪: message_id, current_model, has_sent_message_start, item/content index map
-/// SSE 解析支持 named events (event: + data: 行)
+/// Tracks `message_id`, `current_model`, `has_sent_message_start`, and item/content indices.
+/// Supports named SSE events with `event:` and `data:` lines.
 pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 'static>(
     stream: impl Stream<Item = Result<Bytes, E>> + Send + 'static,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
@@ -126,13 +126,13 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                 Ok(bytes) => {
                     crate::proxy::sse::append_utf8_safe(&mut buffer, &mut utf8_remainder, &bytes);
 
-                    // SSE 事件由 \n\n 分隔
+                    // SSE events are separated by `\n\n`.
                     while let Some(block) = take_sse_block(&mut buffer) {
                         if block.trim().is_empty() {
                             continue;
                         }
 
-                        // 解析 SSE 块：提取 event: 和 data: 行
+                        // Extract `event:` and `data:` lines from the SSE block.
                         let mut event_type: Option<String> = None;
                         let mut data_parts: Vec<String> = Vec::new();
 
@@ -151,7 +151,7 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                         let data_str = data_parts.join("\n");
                         let event_name = event_type.as_deref().unwrap_or("");
 
-                        // 解析 JSON 数据
+                        // Parse JSON data.
                         let data: Value = match serde_json::from_str(&data_str) {
                             Ok(v) => v,
                             Err(_) => continue,
@@ -203,7 +203,7 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                             // response.content_part.added → content_block_start (text)
                             // ================================================
                             "response.content_part.added" => {
-                                // 确保 message_start 已发送
+                                // Ensure `message_start` was emitted.
                                 if !has_sent_message_start {
                                     let start_event = json!({
                                         "type": "message_start",
@@ -377,7 +377,7 @@ pub fn create_anthropic_sse_stream_from_responses<E: std::error::Error + Send + 
                                                 fallback_open_index = None;
                                             }
                                         }
-                                        // 确保 message_start 已发送
+                                        // Ensure `message_start` was emitted.
                                         if !has_sent_message_start {
                                             let start_event = json!({
                                                 "type": "message_start",
@@ -1198,13 +1198,13 @@ mod tests {
             "event: response.content_part.added\n",
             "data: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\",\"text\":\"\"},\"output_index\":0,\"content_index\":0}\n\n",
             "event: response.output_text.delta\n",
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你\",\"output_index\":0,\"content_index\":0}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Xin \",\"output_index\":0,\"content_index\":0}\n\n",
             "event: response.content_part.done\n",
             "data: {\"type\":\"response.content_part.done\",\"output_index\":0,\"content_index\":0}\n\n",
             "event: response.content_part.added\n",
             "data: {\"type\":\"response.content_part.added\",\"part\":{\"type\":\"output_text\",\"text\":\"\"},\"output_index\":0,\"content_index\":1}\n\n",
             "event: response.output_text.delta\n",
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"好\",\"output_index\":0,\"content_index\":1}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"chào\",\"output_index\":0,\"content_index\":1}\n\n",
             "event: response.content_part.done\n",
             "data: {\"type\":\"response.content_part.done\",\"output_index\":0,\"content_index\":1}\n\n",
             "event: response.output_text.done\n",
@@ -1266,25 +1266,25 @@ mod tests {
 
         assert_eq!(text_starts, 1);
         assert_eq!(text_stops, 1);
-        assert_eq!(text_deltas, vec!["你".to_string(), "好".to_string()]);
+        assert_eq!(text_deltas, vec!["Xin ".to_string(), "chào".to_string()]);
     }
 
     #[tokio::test]
-    async fn test_streaming_responses_chinese_split_across_chunks_no_replacement_chars() {
-        // Chinese text delta split across two TCP chunks.
+    async fn test_streaming_responses_vietnamese_split_across_chunks_no_replacement_chars() {
+        // Vietnamese text delta split across two TCP chunks.
         let full = concat!(
             "event: response.created\n",
             "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cn\",\"model\":\"gpt-4o\",\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\n",
             "event: response.output_text.delta\n",
-            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"你好世界\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Xin chào thế giới\"}\n\n",
             "event: response.completed\n",
             "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":5,\"output_tokens\":4}}}\n\n"
         );
         let bytes = full.as_bytes();
 
-        // Find "你" and split inside it
-        let ni_start = bytes.windows(3).position(|w| w == "你".as_bytes()).unwrap();
-        let split_point = ni_start + 2; // split after second byte of "你"
+        // Find "à" and split after its first byte.
+        let char_start = bytes.windows(2).position(|w| w == "à".as_bytes()).unwrap();
+        let split_point = char_start + 1;
 
         let chunk1 = Bytes::from(bytes[..split_point].to_vec());
         let chunk2 = Bytes::from(bytes[split_point..].to_vec());
@@ -1301,8 +1301,8 @@ mod tests {
             .collect::<String>();
 
         assert!(
-            merged.contains("你好世界"),
-            "expected '你好世界' in output, got replacement chars (U+FFFD)"
+            merged.contains("Xin chào thế giới"),
+            "expected 'Xin chào thế giới' in output, got replacement chars (U+FFFD)"
         );
         assert!(
             !merged.contains('\u{FFFD}'),

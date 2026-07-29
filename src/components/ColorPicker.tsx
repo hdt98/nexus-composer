@@ -33,12 +33,12 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({
   presets = DEFAULT_PRESETS,
 }) => {
   const { t } = useTranslation();
-  const displayLabel = label ?? t("providerIcon.color", "图标颜色");
+  const displayLabel = label ?? t("providerIcon.color", "Icon Color");
   return (
     <div className="space-y-3">
       <Label>{displayLabel}</Label>
 
-      {/* 颜色预设 */}
+      {/* Color presets */}
       <div className="grid grid-cols-6 gap-2">
         {presets.map((color) => (
           <button
@@ -58,7 +58,7 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({
         ))}
       </div>
 
-      {/* 自定义颜色输入 */}
+      {/* Custom color input */}
       <div className="flex items-center gap-2">
         <Input
           type="color"

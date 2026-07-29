@@ -108,13 +108,12 @@ export type ResolvedAppDirectoryOverrides = Partial<
 >;
 
 /**
- * useDirectorySettings - 目录管理
- * 负责：
- * - appConfigDir 状态
- * - resolvedDirs 状态
- * - 目录选择（browse）
- * - 目录重置
- * - 默认值计算
+ * useDirectorySettings manages directories, including:
+ * - appConfigDir state.
+ * - resolvedDirs state.
+ * - Directory selection.
+ * - Directory reset.
+ * - Default-value calculation.
  */
 export function useDirectorySettings({
   settings,
@@ -147,7 +146,7 @@ export function useDirectorySettings({
   });
   const initialAppConfigDirRef = useRef<string | undefined>(undefined);
 
-  // 加载目录信息
+  // Load directory information.
   useEffect(() => {
     let active = true;
     setIsLoading(true);
@@ -282,7 +281,7 @@ export function useDirectorySettings({
         console.error("[useDirectorySettings] Failed to pick directory", error);
         toast.error(
           t("settings.selectFileFailed", {
-            defaultValue: "选择目录失败",
+            defaultValue: "Please choose a valid SQL backup file",
           }),
         );
       }
@@ -304,7 +303,7 @@ export function useDirectorySettings({
       );
       toast.error(
         t("settings.selectFileFailed", {
-          defaultValue: "选择目录失败",
+          defaultValue: "Please choose a valid SQL backup file",
         }),
       );
     }

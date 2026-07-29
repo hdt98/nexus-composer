@@ -1,12 +1,14 @@
 /**
- * Claude Desktop 预设供应商配置模板
+ * Claude Desktop provider preset configuration templates.
  *
- * 形态与 Claude Code 预设不同：
- * - baseUrl 是顶级字段，而不是 settingsConfig.env.ANTHROPIC_BASE_URL
- * - 模型信息以"Desktop 可见模型 ID → 上游模型"表达，
- *   对应后端 ClaudeDesktopModelRoute 的 routeId / model
+ * These differ from Claude Code presets:
+ * - baseUrl is a top-level field rather than
+ *   settingsConfig.env.ANTHROPIC_BASE_URL.
+ * - Model information maps a Desktop-visible model ID to an upstream model,
+ *   corresponding to routeId/model in the backend ClaudeDesktopModelRoute.
  *
- * 翻译来源：src/config/claudeProviderPresets.ts（排除 OAuth 与不兼容预设）
+ * Adapted from src/config/claudeProviderPresets.ts, excluding OAuth and
+ * incompatible presets.
  */
 import { ProviderCategory, type LocalProxyRequestOverrides } from "../types";
 import type { PresetTheme } from "./claudeProviderPresets";
@@ -35,11 +37,13 @@ export interface ClaudeDesktopRoutePreset {
 }
 
 /**
- * Claude Desktop 3P fail-all 校验接受的角色名。Desktop 1.12603.1+ 起白名单
- * 纳入 fable（app.asar 内 ["sonnet","opus","haiku","fable","mythos"]，实测
- * 2026-06-13）；此前 1.6259.1 仅接受 sonnet/opus/haiku。mythos 官方未公开
- * 发布，暂不暴露给用户。所有预设工厂、表单角色下拉、后端
- * `next_catalog_safe_route_id` 都从此映射派生 routeId，避免散落硬编码。
+ * Role names accepted by Claude Desktop's third-party fail-all validation.
+ * Desktop 1.12603.1+ adds fable to the allowlist (observed in app.asar as
+ * ["sonnet", "opus", "haiku", "fable", "mythos"] on 2026-06-13); version
+ * 1.6259.1 accepted only sonnet/opus/haiku. Because mythos has not been
+ * publicly released, it is not exposed to users yet. Preset factories, form
+ * role options, and backend `next_catalog_safe_route_id` all derive routeId
+ * values from this map to avoid scattered hard-coding.
  */
 export const CLAUDE_DESKTOP_ROLE_ROUTE_IDS = {
   sonnet: "claude-sonnet-5",
@@ -57,7 +61,7 @@ export interface ClaudeDesktopProviderPreset {
   apiKeyUrl?: string;
   category?: ProviderCategory;
   isPartner?: boolean;
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
+  primePartner?: boolean; // Top-tier featured partner, shown with a heart badge.
   partnerPromotionKey?: string;
 
   baseUrl: string;
@@ -121,8 +125,9 @@ const mappedRoutes = (
 ];
 
 /**
- * 非 Claude 上游模型用此工厂：route ID 使用 Claude Desktop 能通过校验的
- * Sonnet/Opus/Haiku 路由，真实品牌名只写入 labelOverride 和 upstreamModel。
+ * Creates routes for non-Claude upstream models. Route IDs use the
+ * Sonnet/Opus/Haiku values accepted by Claude Desktop, while actual branded
+ * names are stored only in labelOverride and upstreamModel.
  */
 const brandedRoutes = (
   sonnet: string,

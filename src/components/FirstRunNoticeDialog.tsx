@@ -13,14 +13,15 @@ import { Button } from "@/components/ui/button";
 import { useSettingsQuery } from "@/lib/query";
 import { settingsApi } from "@/lib/api";
 
-/** 首次运行欢迎提示：仅当后端启动阶段保留 firstRunNoticeConfirmed 为空时弹出。 */
+/** First-run welcome notice shown only when startup leaves firstRunNoticeConfirmed unset. */
 export function FirstRunNoticeDialog() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data: settings } = useSettingsQuery();
 
-  // 后端启动时已经决定好要不要弹：条件不满足的话字段会立即被写成 true，
-  // 所以前端这里只需要判空即可——完全对齐 streamCheckConfirmed 等既有 flag 的模式。
+  // The backend decides at startup whether to show this notice and immediately
+  // writes true when conditions are not met. The frontend only checks for an
+  // unset value, matching existing flags such as streamCheckConfirmed.
   const isOpen = settings != null && settings.firstRunNoticeConfirmed !== true;
 
   const handleAcknowledge = async () => {

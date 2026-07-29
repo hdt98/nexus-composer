@@ -512,10 +512,10 @@ impl Database {
         }))
     }
 
-    /// 判断 providers 表是否为空（全 app_type 一起算）。
+    /// Return whether the providers table is empty across all app types.
     ///
-    /// 用于区分"全新安装"和"升级用户"：在启动流程 import/seed 之前调用。
-    /// 使用 `EXISTS` 短路查询，比 `COUNT(*)` 在将来表变大时更高效。
+    /// Call before startup import or seeding to distinguish new installs from upgrades.
+    /// Uses `EXISTS` to short-circuit instead of scanning the full table with `COUNT(*)`.
     pub fn is_providers_empty(&self) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
         let exists: bool = conn
@@ -526,10 +526,10 @@ impl Database {
         Ok(!exists)
     }
 
-    /// 仅获取指定 app 下所有 provider 的 id 集合。
+    /// Return provider IDs for one application.
     ///
-    /// 比 `get_all_providers` 轻量得多：只读 id 列、无 endpoint 子查询。
-    /// 用于只需要做存在性检查的场景（如 additive 模式的 live 同步去重）。
+    /// Reads only the ID column without endpoint queries, unlike `get_all_providers`.
+    /// Used for existence checks such as deduplicating additive live synchronization.
     pub fn get_provider_ids(&self, app_type: &str) -> Result<HashSet<String>, AppError> {
         let conn = lock_conn!(self.conn);
         let mut stmt = conn
@@ -545,10 +545,10 @@ impl Database {
         Ok(ids)
     }
 
-    /// 判断指定 app 下是否已存在任意 provider。
+    /// Return whether an application has any provider.
     ///
-    /// 启动阶段的 live import 需要使用这个更严格的判断：
-    /// 只要该 app 已经有任何 provider（包括官方 seed），就不应再自动导入 `default`。
+    /// Startup live import uses this stricter check: if any provider exists,
+    /// including an official seed, do not automatically import `default`.
     pub fn has_any_provider_for_app(&self, app_type: &str) -> Result<bool, AppError> {
         let conn = lock_conn!(self.conn);
         let exists: bool = conn
@@ -561,10 +561,10 @@ impl Database {
         Ok(exists)
     }
 
-    /// 判断指定 app 下是否存在非官方种子的供应商。
+    /// Return whether an application has a provider other than an official seed.
     ///
-    /// 比 `get_all_providers` 轻量得多：只读 id 列、无 endpoint 子查询、首条命中即返回。
-    /// 用于 `import_default_config` 决定是否跳过 live 导入。
+    /// Reads only IDs without endpoint queries and returns after the first match.
+    /// Used by `import_default_config` to decide whether to skip live import.
     pub fn has_non_official_seed_provider(&self, app_type: &str) -> Result<bool, AppError> {
         use crate::database::dao::providers_seed::is_official_seed_id;
         let conn = lock_conn!(self.conn);
@@ -583,7 +583,7 @@ impl Database {
         Ok(false)
     }
 
-    /// 计算指定 app 下一个可用的 sort_index（追加到末尾）。
+    /// Return the next sort_index for an application, appending at the end.
     fn next_sort_index_for_app(&self, app_type: &str) -> Result<usize, AppError> {
         let conn = lock_conn!(self.conn);
         let max: Option<i64> = conn
@@ -596,15 +596,14 @@ impl Database {
         Ok(max.map(|v| (v + 1) as usize).unwrap_or(0))
     }
 
-    /// 启动时调用：补齐缺失的官方预设供应商（Claude / Codex / Gemini）。
+    /// Add missing official provider presets at startup for Claude, Codex, and Gemini.
     ///
-    /// 使用 settings flag `official_providers_seeded` 保证每个数据库只执行一次：
-    /// - 全新用户：seed 三条官方预设
-    /// - 老用户升级：同样会触发一次（flag 不存在），追加到末尾，不影响已有排序
-    /// - 用户删除 seed 后：不再重建（flag 已为 true），尊重用户意图
+    /// The `official_providers_seeded` setting ensures this runs once per database:
+    /// - New installs receive three official presets.
+    /// - Upgrades without the flag append the presets without changing existing order.
+    /// - Deleted seeds remain deleted after the flag is set.
     ///
-    /// 与 `Database::save_provider` 的 UPSERT 语义配合，即使被意外重复调用
-    /// 也不会覆盖用户当前激活的供应商（is_current 字段会被保留）。
+    /// `Database::save_provider` preserves is_current if this is called more than once.
     pub fn init_default_official_providers(&self) -> Result<usize, AppError> {
         use crate::database::dao::providers_seed::OFFICIAL_SEEDS;
 
@@ -621,7 +620,7 @@ impl Database {
         for seed in OFFICIAL_SEEDS {
             let app_type_str = seed.app_type.as_str();
 
-            // 若该 id 已存在（极端情况：用户曾手动用过同 id），跳过
+            // Preserve an existing provider that uses the seed ID.
             if self.get_provider_by_id(seed.id, app_type_str)?.is_some() {
                 continue;
             }
@@ -654,20 +653,20 @@ impl Database {
             );
         }
 
-        // 即使 inserted=0（例如用户手动创建过同 id）也设置 flag 防止反复检查
+        // Set the flag even when no rows were inserted to prevent repeated checks.
         self.set_setting("official_providers_seeded", "true")?;
 
         Ok(inserted)
     }
 
-    /// 按 id 兜底插入单条 official seed（仅当目标表中该 id 不存在时插入）。
+    /// Insert one official seed by ID if it does not already exist.
     ///
-    /// 与 `init_default_official_providers` 不同：
-    /// - 不触碰 `official_providers_seeded` 全局 flag，是 on-demand 修复
-    /// - 只处理一条 seed，由调用方决定 id + app_type
-    /// - 已存在则尊重用户自定义，不覆盖
+    /// Unlike `init_default_official_providers`:
+    /// - Does not modify the global `official_providers_seeded` flag.
+    /// - Repairs only the seed selected by ID and app_type.
+    /// - Preserves any existing user customization.
     ///
-    /// 返回 Ok(true) 表示插入了新行，Ok(false) 表示已存在被跳过。
+    /// Returns Ok(true) when inserted, or Ok(false) when already present.
     pub fn ensure_official_seed_by_id(
         &self,
         seed_id: &str,

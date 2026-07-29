@@ -10,17 +10,16 @@ export interface UseSettingsMetadataResult {
 }
 
 /**
- * useSettingsMetadata - 元数据管理
- * 负责：
- * - isPortable（便携模式）
- * - requiresRestart（需要重启标志）
+ * useSettingsMetadata manages:
+ * - isPortable mode.
+ * - The requiresRestart flag.
  */
 export function useSettingsMetadata(): UseSettingsMetadataResult {
   const [isPortable, setIsPortable] = useState(false);
   const [requiresRestart, setRequiresRestart] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
 
-  // 加载元数据
+  // Load metadata.
   useEffect(() => {
     let active = true;
     setIsLoading(true);

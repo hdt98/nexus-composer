@@ -4,26 +4,26 @@ import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
 import { extractErrorMessage } from "@/utils/errorUtils";
 
-// ========== 熔断器 Hooks ==========
+// ========== Circuit Breaker Hooks ==========
 
 /**
- * 获取供应商健康状态
+ * Get provider health status.
  */
 export function useProviderHealth(providerId: string, appType: string) {
   return useQuery({
     queryKey: ["providerHealth", providerId, appType],
     queryFn: () => failoverApi.getProviderHealth(providerId, appType),
     enabled: !!providerId && !!appType,
-    refetchInterval: 5000, // 每 5 秒刷新一次
+    refetchInterval: 5000, // Refresh every 5 seconds.
     retry: false,
   });
 }
 
 /**
- * 重置熔断器
+ * Reset the circuit breaker.
  *
- * 重置后后端会检查是否应该切回优先级更高的供应商，
- * 因此需要同时刷新供应商列表和代理状态。
+ * After the reset, the backend checks whether it should switch back to a
+ * higher-priority provider, so refresh both the provider list and proxy status.
  */
 export function useResetCircuitBreaker() {
   const queryClient = useQueryClient();
@@ -37,15 +37,15 @@ export function useResetCircuitBreaker() {
       appType: string;
     }) => failoverApi.resetCircuitBreaker(providerId, appType),
     onSuccess: (_, variables) => {
-      // 刷新健康状态
+      // Refresh health status.
       queryClient.invalidateQueries({
         queryKey: ["providerHealth", variables.providerId, variables.appType],
       });
-      // 刷新供应商列表（因为可能发生了自动恢复切换）
+      // Refresh the provider list because automatic recovery may have switched it.
       queryClient.invalidateQueries({
         queryKey: ["providers", variables.appType],
       });
-      // 刷新代理状态（更新 active_targets）
+      // Refresh proxy status to update active_targets.
       queryClient.invalidateQueries({
         queryKey: ["proxyStatus"],
       });
@@ -54,7 +54,7 @@ export function useResetCircuitBreaker() {
 }
 
 /**
- * 获取熔断器配置
+ * Get the circuit breaker configuration.
  */
 export function useCircuitBreakerConfig() {
   return useQuery({
@@ -64,7 +64,7 @@ export function useCircuitBreakerConfig() {
 }
 
 /**
- * 更新熔断器配置
+ * Update the circuit breaker configuration.
  */
 export function useUpdateCircuitBreakerConfig() {
   const queryClient = useQueryClient();
@@ -78,21 +78,21 @@ export function useUpdateCircuitBreakerConfig() {
 }
 
 /**
- * 获取熔断器统计信息
+ * Get circuit breaker statistics.
  */
 export function useCircuitBreakerStats(providerId: string, appType: string) {
   return useQuery({
     queryKey: ["circuitBreakerStats", providerId, appType],
     queryFn: () => failoverApi.getCircuitBreakerStats(providerId, appType),
     enabled: !!providerId && !!appType,
-    refetchInterval: 5000, // 每 5 秒刷新一次
+    refetchInterval: 5000, // Refresh every 5 seconds.
   });
 }
 
-// ========== 故障转移队列 Hooks（新） ==========
+// ========== Failover Queue Hooks (New) ==========
 
 /**
- * 获取故障转移队列
+ * Get the failover queue.
  */
 export function useFailoverQueue(appType: string) {
   return useQuery({
@@ -103,7 +103,7 @@ export function useFailoverQueue(appType: string) {
 }
 
 /**
- * 获取可添加到队列的供应商
+ * Get providers that can be added to the failover queue.
  */
 export function useAvailableProvidersForFailover(appType: string) {
   return useQuery({
@@ -114,7 +114,7 @@ export function useAvailableProvidersForFailover(appType: string) {
 }
 
 /**
- * 添加供应商到故障转移队列
+ * Add a provider to the failover queue.
  */
 export function useAddToFailoverQueue() {
   const queryClient = useQueryClient();
@@ -142,7 +142,7 @@ export function useAddToFailoverQueue() {
 }
 
 /**
- * 从故障转移队列移除供应商
+ * Remove a provider from the failover queue.
  */
 export function useRemoveFromFailoverQueue() {
   const queryClient = useQueryClient();
@@ -165,11 +165,11 @@ export function useRemoveFromFailoverQueue() {
       queryClient.invalidateQueries({
         queryKey: ["providers", variables.appType],
       });
-      // 清除该供应商的健康状态缓存（退出队列后不再需要健康监控）
+      // Invalidate this provider's health cache; monitoring is no longer needed once it leaves the queue.
       queryClient.invalidateQueries({
         queryKey: ["providerHealth", variables.providerId, variables.appType],
       });
-      // 清除该供应商的熔断器统计缓存
+      // Invalidate this provider's circuit breaker statistics cache.
       queryClient.invalidateQueries({
         queryKey: [
           "circuitBreakerStats",
@@ -181,22 +181,22 @@ export function useRemoveFromFailoverQueue() {
   });
 }
 
-// ========== 自动故障转移开关 Hooks ==========
+// ========== Automatic Failover Toggle Hooks ==========
 
 /**
- * 获取指定应用的自动故障转移开关状态
+ * Get automatic failover status for an app.
  */
 export function useAutoFailoverEnabled(appType: string) {
   return useQuery({
     queryKey: ["autoFailoverEnabled", appType],
     queryFn: () => failoverApi.getAutoFailoverEnabled(appType),
-    // 默认值为 false（与后端保持一致）
+    // Default to false to match the backend.
     placeholderData: false,
   });
 }
 
 /**
- * 设置指定应用的自动故障转移开关状态
+ * Set automatic failover status for an app.
  */
 export function useSetAutoFailoverEnabled() {
   const queryClient = useQueryClient();
@@ -206,7 +206,7 @@ export function useSetAutoFailoverEnabled() {
     mutationFn: ({ appType, enabled }: { appType: string; enabled: boolean }) =>
       failoverApi.setAutoFailoverEnabled(appType, enabled),
 
-    // 乐观更新
+    // Optimistic update.
     onMutate: async ({ appType, enabled }) => {
       await queryClient.cancelQueries({
         queryKey: ["autoFailoverEnabled", appType],
@@ -233,17 +233,17 @@ export function useSetAutoFailoverEnabled() {
         variables.enabled
           ? t("failover.enabled", {
               app: appLabel,
-              defaultValue: `${appLabel} 故障转移已启用`,
+              defaultValue: `${appLabel} failover enabled`,
             })
           : t("failover.disabled", {
               app: appLabel,
-              defaultValue: `${appLabel} 故障转移已关闭`,
+              defaultValue: `${appLabel} failover disabled`,
             }),
         { closeButton: true },
       );
     },
 
-    // 错误时回滚
+    // Roll back on error.
     onError: (error: Error, _variables, context) => {
       if (context?.previousValue !== undefined) {
         queryClient.setQueryData(
@@ -254,23 +254,23 @@ export function useSetAutoFailoverEnabled() {
 
       const detail =
         extractErrorMessage(error) ||
-        t("common.unknown", { defaultValue: "未知错误" });
+        t("common.unknown", { defaultValue: "Unknown" });
       toast.error(
         t("failover.toggleFailed", {
           detail,
-          defaultValue: `操作失败: ${detail}`,
+          defaultValue: `Operation failed: ${detail}`,
         }),
       );
     },
 
-    // 无论成功失败，都重新获取
+    // Refetch after either success or failure.
     onSettled: (_, __, variables) => {
       queryClient.invalidateQueries({
         queryKey: ["autoFailoverEnabled", variables.appType],
       });
-      // 启用/关闭故障转移可能触发：
-      // - 立即切到队列 P1（当前供应商变化）
-      // - 队列为空时自动把当前供应商加入队列（队列内容变化）
+      // Enabling or disabling failover may trigger:
+      // - An immediate switch to queue P1, changing the current provider.
+      // - Automatic insertion of the current provider when the queue is empty.
       queryClient.invalidateQueries({
         queryKey: ["failoverQueue", variables.appType],
       });

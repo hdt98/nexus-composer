@@ -9,7 +9,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 8;
 const MAX_TIMEOUT_SECS: u64 = 30;
 const MIN_TIMEOUT_SECS: u64 = 2;
 
-/// 端点测速结果
+/// Endpoint latency-test result.
 #[derive(Debug, Clone, Serialize)]
 pub struct EndpointLatency {
     pub url: String,
@@ -18,11 +18,11 @@ pub struct EndpointLatency {
     pub error: Option<String>,
 }
 
-/// 网络测速相关业务
+/// Network latency-test service.
 pub struct SpeedtestService;
 
 impl SpeedtestService {
-    /// 测试一组端点的响应延迟。
+    /// Measures response latency for a group of endpoints.
     pub async fn test_endpoints(
         urls: Vec<String>,
         timeout_secs: Option<u64>,
@@ -42,7 +42,7 @@ impl SpeedtestService {
                     url: raw_url,
                     latency: None,
                     status: None,
-                    error: Some("URL 不能为空".to_string()),
+                    error: Some("URL cannot be empty".to_string()),
                 });
                 continue;
             }
@@ -54,7 +54,7 @@ impl SpeedtestService {
                         url: trimmed,
                         latency: None,
                         status: None,
-                        error: Some(format!("URL 无效: {err}")),
+                        error: Some(format!("Invalid URL: {err}")),
                     });
                 }
             }
@@ -70,14 +70,14 @@ impl SpeedtestService {
         let tasks = valid_targets.into_iter().map(|(idx, trimmed, parsed_url)| {
             let client = client.clone();
             async move {
-                // 先进行一次热身请求，忽略结果，仅用于复用连接/绕过首包惩罚。
+                // Warm up the connection first. Ignore this result to avoid first-request overhead.
                 let _ = client
                     .get(parsed_url.clone())
                     .timeout(request_timeout)
                     .send()
                     .await;
 
-                // 第二次请求开始计时，并将其作为结果返回。
+                // Time the second request and return it as the result.
                 let start = Instant::now();
                 let latency = match client.get(parsed_url).timeout(request_timeout).send().await {
                     Ok(resp) => EndpointLatency {
@@ -89,9 +89,9 @@ impl SpeedtestService {
                     Err(err) => {
                         let status = err.status().map(|s| s.as_u16());
                         let error_message = if err.is_timeout() {
-                            "请求超时".to_string()
+                            "Request timed out".to_string()
                         } else if err.is_connect() {
-                            "连接失败".to_string()
+                            "Connection failed".to_string()
                         } else {
                             err.to_string()
                         };
@@ -117,8 +117,8 @@ impl SpeedtestService {
     }
 
     fn build_client(timeout_secs: u64) -> Result<(Client, std::time::Duration), AppError> {
-        // 使用全局 HTTP 客户端（已包含代理配置）
-        // 返回 timeout Duration 供请求级别使用
+        // Use the global HTTP client, which already includes proxy configuration.
+        // Return the timeout Duration for request-level use.
         let timeout = std::time::Duration::from_secs(timeout_secs);
         Ok((crate::proxy::http_client::get(), timeout))
     }
@@ -175,12 +175,12 @@ mod tests {
                 .error
                 .as_deref()
                 .unwrap_or_default()
-                .starts_with("URL 无效"),
+                .starts_with("Invalid URL"),
             "invalid url should yield parse error"
         );
         assert_eq!(
             result[1].error.as_deref(),
-            Some("URL 不能为空"),
+            Some("URL cannot be empty"),
             "empty url should report validation error"
         );
     }

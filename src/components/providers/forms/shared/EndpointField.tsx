@@ -38,14 +38,14 @@ export function EndpointField({
   const { t } = useTranslation();
 
   const defaultManageLabel = t("providerForm.manageAndTest", {
-    defaultValue: "管理和测速",
+    defaultValue: "Manage & Test",
   });
   const effectiveHint =
     showFullUrlToggle && isFullUrl
       ? fullUrlHint ||
         t("providerForm.fullUrlHint", {
           defaultValue:
-            "💡 请填写完整请求 URL，并且必须开启代理后使用；代理将直接使用此 URL，不拼接路径",
+            "💡 Enter the full request URL. This mode requires routing to be enabled, and routing will use the URL as-is without appending a path",
         })
       : hint;
 
@@ -67,14 +67,14 @@ export function EndpointField({
                 }`}
               >
                 {t("providerForm.fullUrlLabel", {
-                  defaultValue: "完整 URL",
+                  defaultValue: "Full URL",
                 })}
               </span>
               <Switch
                 checked={isFullUrl}
                 onCheckedChange={onFullUrlChange}
                 aria-label={t("providerForm.fullUrlLabel", {
-                  defaultValue: "完整 URL",
+                  defaultValue: "Full URL",
                 })}
                 className="h-5 w-9"
               />

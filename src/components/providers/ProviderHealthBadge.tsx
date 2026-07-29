@@ -9,8 +9,7 @@ interface ProviderHealthBadgeProps {
 }
 
 /**
- * 供应商健康状态徽章
- * 根据连续失败次数显示不同颜色的状态指示器
+ * Provider health badge with color-coded status based on consecutive failures.
  */
 export function ProviderHealthBadge({
   consecutiveFailures,
@@ -19,22 +18,22 @@ export function ProviderHealthBadge({
 }: ProviderHealthBadgeProps) {
   const { t } = useTranslation();
 
-  // 根据失败次数计算状态
+  // Derive status from the consecutive failure count.
   const getStatus = () => {
     if (consecutiveFailures === 0) {
       return {
         labelKey: "health.operational",
-        labelFallback: "正常",
+        labelFallback: "Operational",
         status: ProviderHealthStatus.Healthy,
         color: "bg-green-500",
-        // 使用更深/柔和的背景色，去除可能的白色内容感
+        // Use a darker, softer background to avoid a washed-out appearance.
         bgColor: "bg-green-500/10",
         textColor: "text-green-600 dark:text-green-400",
       };
     } else if (isHealthy !== false) {
       return {
         labelKey: "health.degraded",
-        labelFallback: "降级",
+        labelFallback: "Degraded",
         status: ProviderHealthStatus.Degraded,
         color: "bg-yellow-500",
         bgColor: "bg-yellow-500/10",
@@ -43,7 +42,7 @@ export function ProviderHealthBadge({
     } else {
       return {
         labelKey: "health.circuitOpen",
-        labelFallback: "熔断",
+        labelFallback: "Circuit Open",
         status: ProviderHealthStatus.Failed,
         color: "bg-red-500",
         bgColor: "bg-red-500/10",
@@ -67,7 +66,7 @@ export function ProviderHealthBadge({
       )}
       title={t("health.consecutiveFailures", {
         count: consecutiveFailures,
-        defaultValue: `连续失败 ${consecutiveFailures} 次`,
+        defaultValue: "{{count}} consecutive failures",
       })}
     >
       <div className={cn("w-2 h-2 rounded-full", statusConfig.color)} />

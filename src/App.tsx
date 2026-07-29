@@ -255,8 +255,9 @@ function App() {
   const mcpPanelRef = useRef<any>(null);
   const skillsPageRef = useRef<any>(null);
   const unifiedSkillsPanelRef = useRef<any>(null);
-  // 订阅未管理 Skill 的共享缓存（实际扫描由 UnifiedSkillsPanel 进入页面时触发）。
-  // 这里 enabled 默认 false，仅用于「导入」按钮的绿点提示，不主动发起扫描。
+  // Subscribe to the shared cache of unmanaged skills. UnifiedSkillsPanel
+  // triggers the actual scan when opened. enabled defaults to false here and is
+  // used only for the green indicator on Import, without initiating a scan.
   const { data: unmanagedSkills } = useScanUnmanagedSkills();
   const hasUnmanagedSkills = (unmanagedSkills?.length ?? 0) > 0;
   const addActionButtonClass =
@@ -312,12 +313,12 @@ function App() {
   const handleDisableOmo = () => {
     disableOmoMutation.mutate(undefined, {
       onSuccess: () => {
-        toast.success(t("omo.disabled", { defaultValue: "OMO 已停用" }));
+        toast.success(t("omo.disabled", { defaultValue: "OMO disabled" }));
       },
       onError: (error: Error) => {
         toast.error(
           t("omo.disableFailed", {
-            defaultValue: "停用 OMO 失败: {{error}}",
+            defaultValue: "Failed to disable OMO: {{error}}",
             error: extractErrorMessage(error),
           }),
         );
@@ -329,12 +330,12 @@ function App() {
   const handleDisableOmoSlim = () => {
     disableOmoSlimMutation.mutate(undefined, {
       onSuccess: () => {
-        toast.success(t("omo.disabled", { defaultValue: "OMO 已停用" }));
+        toast.success(t("omo.disabled", { defaultValue: "OMO disabled" }));
       },
       onError: (error: Error) => {
         toast.error(
           t("omo.disableFailed", {
-            defaultValue: "停用 OMO 失败: {{error}}",
+            defaultValue: "Failed to disable OMO: {{error}}",
             error: extractErrorMessage(error),
           }),
         );
@@ -419,7 +420,8 @@ function App() {
       toast.warning(
         t("notifications.proxyOfficialWarning", {
           name: payload.providerName,
-          defaultValue: `当前供应商 ${payload.providerName} 是官方供应商，建议切换到第三方供应商后再使用代理接管`,
+          defaultValue:
+            "Current provider {{name}} is official. Consider switching to a third-party provider before using local routing.",
         }),
         { duration: 8000 },
       );
@@ -457,7 +459,8 @@ function App() {
   }, []);
 
   useEffect(() => {
-    // settingsData 未加载时跳过，避免用 fallback false 覆盖 Rust 侧已设好的装饰状态
+    // Skip until settingsData loads so fallback false does not overwrite the
+    // decoration state already configured by Rust.
     if (!settingsData) return;
 
     const syncWindowDecorations = async () => {
@@ -501,7 +504,9 @@ function App() {
         const migrated = await invoke<boolean>("get_migration_result");
         if (migrated) {
           toast.success(
-            t("migration.success", { defaultValue: "配置迁移成功" }),
+            t("migration.success", {
+              defaultValue: "Configuration migrated successfully",
+            }),
             { closeButton: true },
           );
         }
@@ -617,7 +622,7 @@ function App() {
       const detail =
         extractErrorMessage(error) ||
         t("notifications.openLinkFailed", {
-          defaultValue: "链接打开失败",
+          defaultValue: "Failed to open link",
         });
       toast.error(detail);
     }
@@ -661,7 +666,7 @@ function App() {
       }
       toast.success(
         t("notifications.removeFromConfigSuccess", {
-          defaultValue: "已从配置移除",
+          defaultValue: "Removed from config",
         }),
         { closeButton: true },
       );
@@ -700,7 +705,7 @@ function App() {
       settingsConfig: deepClone(provider.settingsConfig),
       websiteUrl: provider.websiteUrl,
       category: provider.category,
-      sortIndex: newSortIndex, // 复制原 sortIndex + 1
+      sortIndex: newSortIndex, // Copy the original sortIndex plus one.
       meta: provider.meta ? deepClone(provider.meta) : undefined,
       icon: provider.icon,
       iconColor: provider.iconColor,
@@ -736,7 +741,8 @@ function App() {
         const errorMessage = extractErrorMessage(error);
         toast.error(
           t("provider.duplicateLiveIdsLoadFailed", {
-            defaultValue: "读取配置中的供应商标识失败，请先修复配置后再试",
+            defaultValue:
+              "Failed to read provider IDs from the current configuration. Fix the configuration and try again.",
           }) + (errorMessage ? `: ${errorMessage}` : ""),
         );
         return;
@@ -771,10 +777,10 @@ function App() {
           console.error("[App] Failed to update sort order", error);
           toast.error(
             t("provider.sortUpdateFailed", {
-              defaultValue: "排序更新失败",
+              defaultValue: "Failed to update sort order",
             }),
           );
-          return; // 如果排序更新失败，不继续添加
+          return; // Do not continue adding after a sort-order update failure.
         }
       }
     }
@@ -794,7 +800,7 @@ function App() {
       });
       toast.success(
         t("provider.terminalOpened", {
-          defaultValue: "终端已打开",
+          defaultValue: "Terminal opened",
         }),
       );
     } catch (error) {
@@ -802,7 +808,7 @@ function App() {
       const errorMessage = extractErrorMessage(error);
       toast.error(
         t("provider.terminalOpenFailed", {
-          defaultValue: "打开终端失败",
+          defaultValue: "Failed to open terminal",
         }) + (errorMessage ? `: ${errorMessage}` : ""),
       );
     }
@@ -832,7 +838,7 @@ function App() {
   const notifyWindowControlError = (error: unknown) => {
     toast.error(
       t("notifications.windowControlFailed", {
-        defaultValue: "窗口控制失败：{{error}}",
+        defaultValue: "Window control failed: {{error}}",
         error: extractErrorMessage(error),
       }),
     );
@@ -1167,7 +1173,7 @@ function App() {
                   {currentView === "agents" && t("agents.title")}
                   {currentView === "universal" &&
                     t("universalProvider.title", {
-                      defaultValue: "统一供应商",
+                      defaultValue: "Universal Provider",
                     })}
                   {currentView === "sessions" && t("sessionManager.title")}
                   {currentView === "workspace" && t("workspace.title")}
@@ -1223,7 +1229,7 @@ function App() {
                       setCurrentView("settings");
                     }}
                     title={t("usage.title", {
-                      defaultValue: "使用统计",
+                      defaultValue: "Usage Statistics",
                     })}
                     className="hover:bg-black/5 dark:hover:bg-white/5"
                   >

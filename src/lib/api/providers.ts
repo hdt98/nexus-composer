@@ -365,9 +365,9 @@ export const providersApi = {
   },
 
   /**
-   * 打开指定提供商的终端
-   * 任何提供商都可以打开终端，不受是否为当前激活提供商的限制
-   * 终端会使用该提供商特定的 API 配置，不影响全局设置
+   * Open a terminal for a specific provider.
+   * Any provider can open a terminal, whether or not it is currently active.
+   * The terminal uses that provider's API configuration without affecting global settings.
    */
   async openTerminal(
     providerId: string,
@@ -383,48 +383,48 @@ export const providersApi = {
   },
 
   /**
-   * 从 OpenCode live 配置导入供应商到数据库
-   * OpenCode 特有功能：由于累加模式，用户可能已在 opencode.json 中配置供应商
+   * Import providers from the OpenCode live config into the database.
+   * OpenCode-specific: additive mode allows users to configure providers directly in opencode.json.
    */
   async importOpenCodeFromLive(): Promise<number> {
     return await invoke("import_opencode_providers_from_live");
   },
 
   /**
-   * 获取 OpenCode live 配置中的供应商 ID 列表
-   * 用于前端判断供应商是否已添加到 opencode.json
+   * Get provider IDs from the OpenCode live config.
+   * Used by the frontend to determine whether a provider is already in opencode.json.
    */
   async getOpenCodeLiveProviderIds(): Promise<string[]> {
     return await invoke("get_opencode_live_provider_ids");
   },
 
   /**
-   * 获取 OpenClaw live 配置中的供应商 ID 列表
-   * 用于前端判断供应商是否已添加到 openclaw.json
+   * Get provider IDs from the OpenClaw live config.
+   * Used by the frontend to determine whether a provider is already in openclaw.json.
    */
   async getOpenClawLiveProviderIds(): Promise<string[]> {
     return await invoke("get_openclaw_live_provider_ids");
   },
 
   /**
-   * 获取 Hermes live 配置中的供应商 ID 列表
-   * 用于前端判断供应商是否已添加到 Hermes 配置
+   * Get provider IDs from the Hermes live config.
+   * Used by the frontend to determine whether a provider is already in the Hermes config.
    */
   async getHermesLiveProviderIds(): Promise<string[]> {
     return await invoke("get_hermes_live_provider_ids");
   },
 
   /**
-   * 从 OpenClaw live 配置导入供应商到数据库
-   * OpenClaw 特有功能：由于累加模式，用户可能已在 openclaw.json 中配置供应商
+   * Import providers from the OpenClaw live config into the database.
+   * OpenClaw-specific: additive mode allows users to configure providers directly in openclaw.json.
    */
   async importOpenClawFromLive(): Promise<number> {
     return await invoke("import_openclaw_providers_from_live");
   },
 
   /**
-   * 从 Hermes live 配置导入供应商到数据库
-   * Hermes 特有功能：由于累加模式，用户可能已在 Hermes 配置中配置供应商
+   * Import providers from the Hermes live config into the database.
+   * Hermes-specific: additive mode allows users to configure providers directly in the Hermes config.
    */
   async importHermesFromLive(): Promise<number> {
     return await invoke("import_hermes_providers_from_live");
@@ -432,40 +432,40 @@ export const providersApi = {
 };
 
 // ============================================================================
-// 统一供应商（Universal Provider）API
+// Universal Provider API
 // ============================================================================
 
 export const universalProvidersApi = {
   /**
-   * 获取所有统一供应商
+   * Get all universal providers.
    */
   async getAll(): Promise<UniversalProvidersMap> {
     return await invoke("get_universal_providers");
   },
 
   /**
-   * 获取单个统一供应商
+   * Get one universal provider.
    */
   async get(id: string): Promise<UniversalProvider | null> {
     return await invoke("get_universal_provider", { id });
   },
 
   /**
-   * 添加或更新统一供应商
+   * Add or update a universal provider.
    */
   async upsert(provider: UniversalProvider): Promise<boolean> {
     return await invoke("upsert_universal_provider", { provider });
   },
 
   /**
-   * 删除统一供应商
+   * Delete a universal provider.
    */
   async delete(id: string): Promise<boolean> {
     return await invoke("delete_universal_provider", { id });
   },
 
   /**
-   * 手动同步统一供应商到各应用
+   * Manually synchronize a universal provider to each app.
    */
   async sync(id: string): Promise<boolean> {
     return await invoke("sync_universal_provider", { id });

@@ -19,7 +19,7 @@ interface EditProviderDialogProps {
     originalId?: string;
   }) => Promise<void> | void;
   appId: AppId;
-  isProxyTakeover?: boolean; // 代理接管模式下不读取 live（避免显示被接管后的代理配置）
+  isProxyTakeover?: boolean; // Skip live config during proxy takeover to avoid showing the rewritten proxy values.
 }
 
 const NEXUS_MODEL_CATALOG_FILES = new Set([
@@ -58,13 +58,13 @@ export function EditProviderDialog({
   const { t } = useTranslation();
   const [isFormSubmitting, setIsFormSubmitting] = useState(false);
 
-  // 默认使用传入的 provider.settingsConfig，若当前编辑对象是"当前生效供应商"，则尝试读取实时配置替换初始值
+  // Default to provider.settingsConfig. For the active provider, try to replace the initial value with live config.
   const [liveSettings, setLiveSettings] = useState<Record<
     string,
     unknown
   > | null>(null);
 
-  // 使用 ref 标记是否已经加载过，防止重复读取覆盖用户编辑
+  // Track whether live config has loaded so repeated reads cannot overwrite user edits.
   const [hasLoadedLive, setHasLoadedLive] = useState(false);
 
   useEffect(() => {
@@ -76,13 +76,13 @@ export function EditProviderDialog({
         return;
       }
 
-      // 关键修复：只在首次打开时加载一次
+      // Load only once per open session.
       if (hasLoadedLive) {
         return;
       }
 
-      // 代理接管模式：Live 配置已被代理改写，读取 live 会导致编辑界面展示代理地址/占位符等内容
-      // 因此直接回退到 SSOT（数据库）配置，避免用户困惑与误保存
+      // During proxy takeover, the proxy has rewritten live config with its address and placeholders.
+      // Fall back directly to the database source of truth to avoid confusing displays and accidental saves.
       if (isProxyTakeover) {
         if (!cancelled) {
           setLiveSettings(null);
@@ -134,7 +134,7 @@ export function EditProviderDialog({
               setHasLoadedLive(true);
             }
           } catch {
-            // 读取实时配置失败则回退到 SSOT（不打断编辑流程）
+            // Fall back to the database source of truth if reading live config fails, without interrupting editing.
             if (!cancelled) {
               setLiveSettings(null);
               setHasLoadedLive(true);
@@ -154,7 +154,7 @@ export function EditProviderDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, provider?.id, appId, hasLoadedLive, isProxyTakeover]); // 只依赖 provider.id，不依赖整个 provider 对象
+  }, [open, provider?.id, appId, hasLoadedLive, isProxyTakeover]); // Depend on provider.id rather than the entire provider object.
 
   const initialSettingsConfig = useMemo(() => {
     const base = (liveSettings ?? provider?.settingsConfig ?? {}) as Record<
@@ -162,11 +162,12 @@ export function EditProviderDialog({
       unknown
     >;
 
-    // Codex 的 modelCatalog 是 nexus-composer 私有字段，SSOT 在数据库。Live 的 config.toml
-    // 仅在写入时投影出 model_catalog_json 指针；Codex.app 改写配置、代理接管/恢复周期、
-    // 来回切换供应商都可能让 Live 丢失该投影，从而 read_live_settings 反解为空。
-    // 若放任 Live 覆盖，编辑界面会显示空映射表，保存后连同数据库里的映射一起清空（数据丢失）。
-    // 因此始终以数据库 SSOT 的 modelCatalog 为准，仅在数据库确实没有时才回退到 Live 反解结果。
+    // Codex modelCatalog is a Nexus Composer-specific field whose source of truth is the database.
+    // Live config.toml contains only a projected model_catalog_json pointer when written. Codex.app rewrites,
+    // proxy takeover and restore cycles, or provider switching may remove that projection, causing
+    // read_live_settings to reconstruct an empty value. Allowing live config to overwrite it would show an
+    // empty mapping table and erase the database mapping on save. Always prefer the database modelCatalog,
+    // falling back to the reconstructed live value only when the database has no catalog.
     if (
       appId === "codex" &&
       liveSettings &&
@@ -191,9 +192,9 @@ export function EditProviderDialog({
     }
 
     return base;
-  }, [liveSettings, provider?.settingsConfig, appId]); // 只依赖 settingsConfig，不依赖整个 provider
+  }, [liveSettings, provider?.settingsConfig, appId]); // Depend on settingsConfig rather than the entire provider.
 
-  // 固定 initialData，防止 provider 对象更新时重置表单
+  // Stabilize initialData so provider object updates do not reset the form.
   const initialData = useMemo(() => {
     if (!provider) return null;
     return {
@@ -207,9 +208,9 @@ export function EditProviderDialog({
       iconColor: provider.iconColor,
     };
   }, [
-    open, // 修复：编辑保存后再次打开显示旧数据，依赖 open 确保每次打开时重新读取最新 provider 数据
-    provider?.id, // 只依赖 ID，provider 对象更新不会触发重新计算
-    provider?.meta, // 需要依赖 meta 以便正确初始化 testConfig
+    open, // Re-read the latest provider data on every open instead of showing stale data after a save.
+    provider?.id, // Depend only on the ID so provider object updates do not trigger recalculation.
+    provider?.meta, // Include meta so testConfig initializes correctly.
     initialSettingsConfig,
   ]);
 
@@ -217,8 +218,8 @@ export function EditProviderDialog({
     async (values: ProviderFormValues) => {
       if (!provider) return;
 
-      // 注意：values.settingsConfig 已经是最终的配置字符串
-      // ProviderForm 已经为不同的 app 类型（Claude/Codex/Gemini）正确组装了配置
+      // values.settingsConfig is already the final configuration string.
+      // ProviderForm has assembled the correct configuration for Claude, Codex, or Gemini.
       const parsedConfig = JSON.parse(values.settingsConfig) as Record<
         string,
         unknown
@@ -239,7 +240,7 @@ export function EditProviderDialog({
         icon: values.icon?.trim() || undefined,
         iconColor: values.iconColor?.trim() || undefined,
         ...(values.presetCategory ? { category: values.presetCategory } : {}),
-        // 保留或更新 meta 字段
+        // Preserve or update the meta field.
         ...(values.meta ? { meta: values.meta } : {}),
       };
 

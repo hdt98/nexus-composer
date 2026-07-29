@@ -24,12 +24,13 @@ const DEFAULT_CREATED_AT: &str = "2024-01-01T00:00:00Z";
 const MIMO_REDACTED_THINKING_PLACEHOLDER: &str = "[redacted thinking]";
 const MIMO_TOOL_CALL_THINKING_PLACEHOLDER: &str = "tool call";
 
-/// Claude Desktop 模型菜单识别的 route ID 前缀。
+/// Route-ID prefix recognized by the Claude Desktop model menu.
 pub const CLAUDE_ROUTE_PREFIX: &str = "claude-";
-/// 替代前缀（与前端 `ANTHROPIC_CLAUDE_ROUTE_PREFIX` 一致）。
+/// Alternative prefix matching renderer `ANTHROPIC_CLAUDE_ROUTE_PREFIX`.
 pub const ANTHROPIC_CLAUDE_ROUTE_PREFIX: &str = "anthropic/claude-";
-/// Claude Code env 中通过 `[1M]` 后缀声明 1M 上下文能力（匹配用 `eq_ignore_ascii_case`）。
-/// Claude Desktop schema 不接受此后缀，import 边界翻译为 `supports1m` 字段。
+/// Claude Code env declares one-million-token context capability with a `[1M]` suffix, matched by
+/// `eq_ignore_ascii_case`. Claude Desktop schema rejects the suffix, so the import boundary converts
+/// it to the `supports1m` field.
 pub const ONE_M_CONTEXT_MARKER: &str = "[1m]";
 
 const CURRENT_OPUS_ROUTE_ID: &str = "claude-opus-4-8";
@@ -60,11 +61,11 @@ pub const DEFAULT_PROXY_ROUTES: &[ClaudeDesktopDefaultRoute] = &[
         env_key: "ANTHROPIC_DEFAULT_HAIKU_MODEL",
         supports_1m: true,
     },
-    // fable 置于末尾：next_catalog_safe_route_id 给非安全品牌 route 借用合法
-    // 角色名时仍按 sonnet→opus→haiku 顺序分配（向后兼容既有 catalog），不会把
-    // 无关品牌模型借用成 fable 顶配档名。UI 行序由前端 ROLE_ORDER 独立控制为
-    // Sonnet/Opus/Fable/Haiku（所有 proxy 路径都经 normalizeProxyRows 重排），
-    // 与此处物理顺序无关。
+    // Keep fable last. When next_catalog_safe_route_id borrows a valid role name for a brand-unsafe
+    // route, assignment remains sonnet → opus → haiku for compatibility with existing catalogs and
+    // does not label an unrelated model as the top-tier fable role. Renderer ROLE_ORDER independently
+    // displays Sonnet/Opus/Fable/Haiku, with every proxy path reordered by normalizeProxyRows, so UI
+    // order does not depend on this physical order.
     ClaudeDesktopDefaultRoute {
         route_id: "claude-fable-5",
         env_key: "ANTHROPIC_DEFAULT_FABLE_MODEL",
@@ -246,11 +247,11 @@ pub fn is_claude_safe_model_id(model: &str) -> bool {
         return false;
     };
 
-    // 角色前缀后必须还有实际模型标识，拒绝 claude-sonnet- 这类退化值
-    // （否则会写入 profile 并触发 Claude Desktop fail-all 拒收整组）。
-    // Claude Desktop 1.12603.1+ 的 fail-all validator 角色白名单已纳入 fable
-    // （app.asar 内 ["sonnet","opus","haiku","fable","mythos"]），故 claude-fable-*
-    // 可安全写入 profile。mythos 官方未公开发布，暂不暴露给用户。
+    // A role prefix must be followed by an actual model identifier. Reject degenerate values such as
+    // claude-sonnet- because writing one to a profile triggers Claude Desktop's fail-all validator and
+    // rejects the entire group. Claude Desktop 1.12603.1+ includes fable in its role allowlist
+    // (`["sonnet","opus","haiku","fable","mythos"]` in app.asar), so claude-fable-* is safe in a
+    // profile. Mythos has not been publicly released and is not exposed to users yet.
     ["sonnet-", "opus-", "haiku-", "fable-"]
         .iter()
         .any(|prefix| {
@@ -298,7 +299,7 @@ pub fn direct_gateway_credentials(
         .ok_or_else(|| {
             AppError::localized(
                 "claude_desktop.provider.env_missing",
-                "Claude Desktop 直连供应商缺少 env 配置",
+                "The direct Claude Desktop provider is missing env configuration",
                 "Claude Desktop direct provider is missing env configuration",
             )
         })?;
@@ -311,7 +312,7 @@ pub fn direct_gateway_credentials(
         .ok_or_else(|| {
             AppError::localized(
                 "claude_desktop.provider.base_url_missing",
-                "Claude Desktop 直连供应商缺少 ANTHROPIC_BASE_URL",
+                "The direct Claude Desktop provider is missing ANTHROPIC_BASE_URL",
                 "Claude Desktop direct provider is missing ANTHROPIC_BASE_URL",
             )
         })?
@@ -325,7 +326,7 @@ pub fn direct_gateway_credentials(
         .ok_or_else(|| {
             AppError::localized(
                 "claude_desktop.provider.auth_token_missing",
-                "Claude Desktop 直连供应商缺少 ANTHROPIC_AUTH_TOKEN（Bearer Token）",
+                "The direct Claude Desktop provider is missing ANTHROPIC_AUTH_TOKEN (bearer token)",
                 "Claude Desktop direct provider is missing ANTHROPIC_AUTH_TOKEN (Bearer Token)",
             )
         })?
@@ -342,7 +343,7 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
     if !provider.settings_config.is_object() {
         return Err(AppError::localized(
             "claude_desktop.provider.settings_not_object",
-            "Claude Desktop 直连供应商配置必须是 JSON 对象",
+            "Direct Claude Desktop provider configuration must be a JSON object",
             "Claude Desktop direct provider configuration must be a JSON object",
         ));
     }
@@ -352,7 +353,7 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
             if !api_format.trim().is_empty() && api_format != "anthropic" {
                 return Err(AppError::localized(
                     "claude_desktop.provider.api_format_unsupported",
-                    "Claude Desktop 第一阶段只支持原生 Anthropic Messages API",
+                    "The first Claude Desktop phase supports only the native Anthropic Messages API",
                     "Claude Desktop phase 1 only supports native Anthropic Messages API",
                 ));
             }
@@ -364,7 +365,7 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
         ) {
             return Err(AppError::localized(
                 "claude_desktop.provider.mode_unsupported",
-                "该供应商是 Claude Desktop 本地路由模式，不能按直连模式写入",
+                "This provider uses Claude Desktop local-routing mode and cannot be written as direct mode",
                 "This Claude Desktop provider uses proxy mode and cannot be written as direct mode",
             ));
         }
@@ -375,7 +376,7 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
         ) {
             return Err(AppError::localized(
                 "claude_desktop.provider.type_unsupported",
-                "Claude Desktop 直连模式不支持需要本地代理转换的供应商",
+                "Claude Desktop direct mode does not support providers that require local proxy conversion",
                 "Claude Desktop direct mode does not support providers that require local proxy conversion",
             ));
         }
@@ -383,7 +384,7 @@ pub fn validate_direct_provider(provider: &Provider) -> Result<(), AppError> {
         if meta.is_full_url == Some(true) {
             return Err(AppError::localized(
                 "claude_desktop.provider.full_url_unsupported",
-                "Claude Desktop 直连模式不支持完整 URL 端点配置",
+                "Claude Desktop direct mode does not support full-URL endpoint configuration",
                 "Claude Desktop direct mode does not support full URL endpoint configuration",
             ));
         }
@@ -402,7 +403,7 @@ pub fn validate_proxy_provider(provider: &Provider) -> Result<(), AppError> {
     if !provider.settings_config.is_object() {
         return Err(AppError::localized(
             "claude_desktop.provider.settings_not_object",
-            "Claude Desktop 本地路由供应商配置必须是 JSON 对象",
+            "Claude Desktop local-routing provider configuration must be a JSON object",
             "Claude Desktop proxy provider configuration must be a JSON object",
         ));
     }
@@ -415,7 +416,7 @@ pub fn validate_proxy_provider(provider: &Provider) -> Result<(), AppError> {
             ) {
                 return Err(AppError::localized(
                     "claude_desktop.provider.api_format_unsupported",
-                    format!("Claude Desktop 本地路由模式不支持 API 格式: {api_format}"),
+                    format!("Claude Desktop local-routing mode does not support API format: {api_format}"),
                     format!("Claude Desktop proxy mode does not support API format: {api_format}"),
                 ));
             }
@@ -427,7 +428,7 @@ pub fn validate_proxy_provider(provider: &Provider) -> Result<(), AppError> {
     if !has_proxy_base_url_and_key(provider) {
         return Err(AppError::localized(
             "claude_desktop.provider.credentials_missing",
-            "Claude Desktop 本地路由供应商缺少 Base URL 或 API Key",
+            "The Claude Desktop local-routing provider is missing a base URL or API key",
             "Claude Desktop proxy provider is missing Base URL or API key",
         ));
     }
@@ -510,7 +511,7 @@ fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceMode
             return Err(AppError::localized(
                 "claude_desktop.provider.route_invalid",
                 format!(
-                    "Claude Desktop 直连模型必须使用 claude-* 或 anthropic/claude-* 名称: {route_id}"
+                    "Direct Claude Desktop models must use a claude-* or anthropic/claude-* name: {route_id}"
                 ),
                 format!(
                     "Claude Desktop direct model must use a claude-* or anthropic/claude-* name: {route_id}"
@@ -522,7 +523,7 @@ fn direct_inference_model_specs(provider: &Provider) -> Result<Vec<InferenceMode
             return Err(AppError::localized(
                 "claude_desktop.provider.direct_mapping_unsupported",
                 format!(
-                    "Claude Desktop 直连模式不能映射模型: {route_id} -> {upstream_model}；非 Claude 官方模型请使用本地路由模式"
+                    "Claude Desktop direct mode cannot map model {route_id} -> {upstream_model}; use local-routing mode for non-official Claude models"
                 ),
                 format!(
                     "Claude Desktop direct mode cannot map models: {route_id} -> {upstream_model}; use proxy mode for non-Claude official models"
@@ -560,7 +561,7 @@ pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>
         .ok_or_else(|| {
             AppError::localized(
                 "claude_desktop.provider.routes_missing",
-                "Claude Desktop 本地路由模式缺少模型路由映射",
+                "Claude Desktop local-routing mode is missing model route mappings",
                 "Claude Desktop proxy mode is missing model route mappings",
             )
         })?;
@@ -608,7 +609,7 @@ pub fn proxy_model_routes(provider: &Provider) -> Result<Vec<ResolvedModelRoute>
     if result.is_empty() {
         return Err(AppError::localized(
             "claude_desktop.provider.routes_missing",
-            "Claude Desktop 本地路由模式至少需要一个模型路由映射",
+            "Claude Desktop local-routing mode requires at least one model route mapping",
             "Claude Desktop proxy mode requires at least one model route mapping",
         ));
     }
@@ -688,7 +689,7 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
         .ok_or_else(|| {
             AppError::localized(
                 "claude_desktop.provider.model_missing",
-                "Claude Desktop 请求缺少 model 字段",
+                "The Claude Desktop request is missing the model field",
                 "Claude Desktop request is missing the model field",
             )
         })?;
@@ -706,12 +707,12 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
         .map(|route| route.upstream_model.clone())
         .or_else(|| legacy_raw_route_upstream_model(provider, requested))
         .or_else(|| {
-            // 角色关键词回落:Claude Desktop 的部分调用(如子 agent)会请求带发布
-            // 日期后缀的完整官方名(claude-haiku-4-5-20251001),与 manifest 暴露的
-            // 简短 route_id(claude-haiku-4-5)不精确相等。按 opus/haiku/fable/sonnet
-            // 归类到同档已配置路由,对齐 Claude Code model_mapper 的宽松匹配。
-            // 匹配前已剥离本地 [1m] 标记；这里仍只对 Claude Desktop 认可的
-            // 安全模型名回落，避免非 Claude route 被误映射。
+            // Role-keyword fallback: some Claude Desktop calls, including subagents, request a full
+            // official name with a release-date suffix such as claude-haiku-4-5-20251001, which does
+            // not exactly equal the short manifest route_id claude-haiku-4-5. Classify it into the
+            // configured opus/haiku/fable/sonnet tier, matching Claude Code model_mapper's tolerant
+            // behavior. The local [1m] marker has already been removed; fallback still applies only
+            // to model names that Claude Desktop recognizes as safe, avoiding misrouting non-Claude IDs.
             if !is_claude_safe_model_id(requested) {
                 return None;
             }
@@ -719,9 +720,10 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
             routes
                 .iter()
                 .find(|route| claude_role_keyword(&route.route_id) == Some(role))
-                // 老用户只配了 Sonnet/Opus/Haiku 三档时，fable 请求降级到 opus 档，
-                // 与官方安全分类器的降级方向一致，避免 route_unknown 硬错误。
-                // 用户一旦显式配置 fable 档，上面的精确角色匹配会优先命中。
+                // When an existing user configured only Sonnet, Opus, and Haiku, downgrade a fable
+                // request to Opus. This follows the official safe classifier and avoids a hard
+                // route_unknown error. An explicitly configured Fable tier wins through exact role
+                // matching above.
                 .or_else(|| {
                     (role == "fable")
                         .then(|| {
@@ -736,7 +738,7 @@ pub fn map_proxy_request_model(mut body: Value, provider: &Provider) -> Result<V
         .ok_or_else(|| {
             AppError::localized(
                 "claude_desktop.provider.route_unknown",
-                format!("Claude Desktop 模型路由未配置: {requested_raw}"),
+                format!("Claude Desktop model route is not configured: {requested_raw}"),
                 format!("Claude Desktop model route is not configured: {requested_raw}"),
             )
         })?;
@@ -781,9 +783,10 @@ fn is_compatible_opus_route_alias(route_id: &str, requested: &str) -> bool {
     )
 }
 
-/// 按角色关键词(opus / haiku / fable / sonnet)归类一个 Claude 模型名/route_id。
-/// 仅在命中明确角色词时返回 Some,未知模型返回 None(不回落,保持精确报错语义)。
-/// 与前端 `routeRoleFromId` 同序(opus → haiku → fable → sonnet)。
+/// Classifies a Claude model name or route_id by role keyword: opus, haiku, fable, or sonnet.
+/// Returns Some only for an explicit role keyword. Unknown models return None without fallback,
+/// preserving precise error semantics. Order matches renderer `routeRoleFromId`:
+/// opus → haiku → fable → sonnet.
 fn claude_role_keyword(model: &str) -> Option<&'static str> {
     let normalized = model.to_ascii_lowercase();
     if normalized.contains("opus") {
@@ -918,7 +921,7 @@ pub fn proxy_gateway_base_url_from_db(db: &Database) -> Result<String, AppError>
     let config = futures::executor::block_on(db.get_proxy_config())?;
     if config.listen_port == 0 {
         return Err(AppError::Config(
-            "Claude Desktop 代理地址需要真实监听端口；请先启动本地代理或使用固定端口".to_string(),
+            "The Claude Desktop proxy URL requires an active listening port; start the local proxy or use a fixed port".to_string(),
         ));
     }
     Ok(format!(
@@ -1310,7 +1313,7 @@ fn proxy_origin_from_parts(listen_address: &str, listen_port: u16) -> String {
 fn unsupported_platform_error() -> AppError {
     AppError::localized(
         "claude_desktop.unsupported_platform",
-        "当前平台暂不支持 Claude Desktop 3P 配置。第一阶段仅支持 macOS 和 Windows。",
+        "Claude Desktop third-party configuration is not supported on this platform yet. The first phase supports only macOS and Windows.",
         "Claude Desktop 3P configuration is not supported on this platform yet. Phase 1 only supports macOS and Windows.",
     )
 }
@@ -1374,7 +1377,7 @@ mod tests {
         let err = proxy_gateway_base_url_from_db(&db)
             .expect_err("unresolved ephemeral port should not produce a :0 URL");
         assert!(
-            err.to_string().contains("真实监听端口"),
+            err.to_string().contains("active listening port"),
             "unexpected error: {err}"
         );
     }
@@ -1547,7 +1550,13 @@ mod tests {
             .model = "mimo-v2.5-pro".to_string();
 
         let err = validate_provider(&provider).expect_err("direct mapping should fail");
-        assert!(err.to_string().contains("本地路由模式"));
+        assert!(matches!(
+            err,
+            AppError::Localized {
+                key: "claude_desktop.provider.direct_mapping_unsupported",
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1626,9 +1635,10 @@ mod tests {
 
     #[test]
     fn claude_desktop_proxy_maps_dated_role_alias_via_keyword() {
-        // 复现反馈：Claude Desktop 子 agent 请求带发布日期后缀的完整官方名
-        // （claude-haiku-4-5-20251001），与 manifest 的简短 route_id（claude-haiku-4-5）
-        // 不精确相等，旧逻辑会报 route_unknown。角色关键词回落应将其映射到 Haiku 档。
+        // Reproduce the report: a Claude Desktop subagent requests the full official name with a
+        // release-date suffix, claude-haiku-4-5-20251001, which does not exactly match the short
+        // manifest route_id claude-haiku-4-5. Legacy logic returned route_unknown; role-keyword
+        // fallback must map it to the Haiku tier.
         let mut provider = proxy_provider("proxy");
         provider
             .meta
@@ -1675,7 +1685,7 @@ mod tests {
         .expect("dated Sonnet alias should map via role keyword");
         assert_eq!(mapped_sonnet["model"], json!("deepseek-v4-pro"));
 
-        // 不含任何角色关键词的模型仍然报错，避免被误映射。
+        // A model without a role keyword still errors to prevent accidental mapping.
         let err = map_proxy_request_model(json!({"model": "gpt-5"}), &provider)
             .expect_err("model without a role keyword should still fail");
         assert!(err.to_string().contains("gpt-5"));
@@ -1683,8 +1693,9 @@ mod tests {
 
     #[test]
     fn claude_desktop_proxy_maps_fable_to_opus_tier() {
-        // issue #4026/#4049：老用户只配 Sonnet/Opus/Haiku 三档、未显式配置
-        // fable 档时，fable 请求按官方分类器降级方向回落到 opus 档兜底。
+        // Issues #4026/#4049: when an existing user configured only Sonnet, Opus, and Haiku without
+        // an explicit Fable tier, a fable request falls back to Opus in the official classifier's
+        // downgrade direction.
         let mut provider = proxy_provider("proxy");
         provider
             .meta
@@ -1716,7 +1727,7 @@ mod tests {
         .expect("fable should fall back to the opus tier");
         assert_eq!(mapped["model"], json!("upstream-opus"));
 
-        // 带 [1m] 标记与日期后缀的形态也应命中同一回落。
+        // A form with both the [1m] marker and a date suffix uses the same fallback.
         let mapped_one_m = map_proxy_request_model(
             json!({"model": "claude-fable-5[1m]", "messages": []}),
             &provider,
@@ -1734,7 +1745,7 @@ mod tests {
 
     #[test]
     fn claude_desktop_proxy_fable_without_opus_route_still_errors() {
-        // 没有 opus 档可回落时保持精确报错语义，不静默落到其他档。
+        // Without an Opus tier, preserve the precise error instead of silently choosing another tier.
         let mut provider = proxy_provider("proxy");
         provider
             .meta
@@ -1759,8 +1770,8 @@ mod tests {
 
     #[test]
     fn claude_desktop_proxy_maps_fable_to_dedicated_route() {
-        // Desktop 1.12603.1+ fail-all 校验已放行 claude-fable-5，用户可显式配置
-        // 独立 fable 档；此时 fable 请求精确命中 fable 档，不再降级到 opus。
+        // Desktop 1.12603.1+ accepts claude-fable-5 in fail-all validation, so users may configure an
+        // independent Fable tier. A fable request then matches Fable exactly instead of downgrading to Opus.
         let mut provider = proxy_provider("proxy");
         provider
             .meta
@@ -1785,7 +1796,7 @@ mod tests {
             ),
         ]);
 
-        // 精确匹配优先命中 fable 档
+        // Exact matching prefers the Fable tier.
         let mapped = map_proxy_request_model(
             json!({"model": "claude-fable-5", "messages": []}),
             &provider,
@@ -1793,7 +1804,7 @@ mod tests {
         .expect("explicit fable route should match");
         assert_eq!(mapped["model"], json!("upstream-fable"));
 
-        // 带日期后缀经角色关键词回落仍归 fable 档，而非降级 opus
+        // Role-keyword fallback for a date-suffixed request still selects Fable instead of Opus.
         let mapped_dated = map_proxy_request_model(
             json!({"model": "claude-fable-5-20260609", "messages": []}),
             &provider,
@@ -2066,7 +2077,7 @@ mod tests {
         assert!(!is_claude_safe_model_id("anthropic/claude-"));
         assert!(!is_claude_safe_model_id("sonnet"));
         assert!(!is_claude_safe_model_id("sonnet-"));
-        // 角色前缀后无实际标识的退化值必须拒绝
+        // Reject a degenerate role prefix with no actual identifier after it.
         assert!(!is_claude_safe_model_id("claude-sonnet-"));
         assert!(!is_claude_safe_model_id("claude-opus-"));
         assert!(!is_claude_safe_model_id("anthropic/claude-haiku-"));

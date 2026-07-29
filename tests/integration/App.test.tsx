@@ -363,7 +363,9 @@ describe("App integration with MSW", () => {
 
     await waitFor(() => {
       expect(toastErrorMock).toHaveBeenCalledWith(
-        expect.stringContaining("读取配置中的供应商标识失败"),
+        expect.stringContaining(
+          "Failed to read provider IDs from the current configuration",
+        ),
       );
     });
 

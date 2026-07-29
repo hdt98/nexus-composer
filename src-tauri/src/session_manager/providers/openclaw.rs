@@ -380,7 +380,7 @@ mod tests {
             r#"{
                 "agent:main:main": {
                     "sessionId": "session-abc",
-                    "displayName": "重构登录模块"
+                    "displayName": "Refactor the login module"
                 }
             }"#,
         )
@@ -388,7 +388,7 @@ mod tests {
 
         let display_names = load_display_names(sessions_dir);
         let meta = parse_session(&path, Some(&display_names)).unwrap();
-        assert_eq!(meta.title.as_deref(), Some("重构登录模块"));
+        assert_eq!(meta.title.as_deref(), Some("Refactor the login module"));
     }
 
     #[test]

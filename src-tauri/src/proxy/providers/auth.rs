@@ -1,22 +1,22 @@
 //! Authentication Types
 //!
-//! 定义认证信息和认证策略，支持多种上游供应商的认证方式。
+//! Defines authentication data and strategies for multiple upstream providers.
 
-/// 认证信息
+/// Authentication information.
 ///
-/// 包含 API Key 和对应的认证策略
+/// Contains an API key and its corresponding authentication strategy.
 #[derive(Debug, Clone)]
 pub struct AuthInfo {
     /// API Key
     pub api_key: String,
-    /// 认证策略
+    /// Authentication strategy.
     pub strategy: AuthStrategy,
-    /// OAuth access_token（用于 GoogleOAuth 策略）
+    /// OAuth access token used by the GoogleOAuth strategy.
     pub access_token: Option<String>,
 }
 
 impl AuthInfo {
-    /// 创建新的认证信息
+    /// Creates authentication information.
     pub fn new(api_key: String, strategy: AuthStrategy) -> Self {
         Self {
             api_key,
@@ -25,7 +25,7 @@ impl AuthInfo {
         }
     }
 
-    /// 创建带有 access_token 的认证信息（用于 OAuth）
+    /// Creates OAuth authentication information with an access token.
     pub fn with_access_token(api_key: String, access_token: String) -> Self {
         Self {
             api_key,
@@ -34,10 +34,10 @@ impl AuthInfo {
         }
     }
 
-    /// 返回遮蔽后的 API Key（用于日志输出）
+    /// Returns a masked API key suitable for logging.
     ///
-    /// 显示前4位和后4位，中间用 `...` 代替
-    /// 如果 key 长度不足8位，则返回 `***`
+    /// Shows the first and last four characters separated by `...`.
+    /// Returns `***` when the key is fewer than eight characters long.
     #[allow(dead_code)]
     pub fn masked_key(&self) -> String {
         if self.api_key.chars().count() > 8 {
@@ -57,7 +57,7 @@ impl AuthInfo {
         }
     }
 
-    /// 返回遮蔽后的 access_token（用于日志输出）
+    /// Returns a masked access token suitable for logging.
     #[allow(dead_code)]
     pub fn masked_access_token(&self) -> Option<String> {
         self.access_token.as_ref().map(|token| {
@@ -79,54 +79,54 @@ impl AuthInfo {
     }
 }
 
-/// 认证策略
+/// Authentication strategy.
 ///
-/// 不同供应商使用不同的认证方式
+/// Providers use different authentication schemes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthStrategy {
-    /// Anthropic 认证方式
+    /// Anthropic authentication.
     /// - Header: `x-api-key: <api_key>`
     /// - Header: `anthropic-version: 2023-06-01`
     Anthropic,
 
-    /// Claude 中转服务认证方式（仅 Bearer，无 x-api-key）
+    /// Claude relay authentication using only Bearer, without `x-api-key`.
     ///
     /// - Header: `Authorization: Bearer <api_key>`
     ///
-    /// 用于不支持 x-api-key 的中转服务
+    /// Used by relay services that do not support `x-api-key`.
     ClaudeAuth,
 
-    /// Bearer Token 认证方式（OpenAI 等）
+    /// Bearer-token authentication, used by OpenAI and similar providers.
     ///
     /// - Header: `Authorization: Bearer <api_key>`
     Bearer,
 
-    /// Google API Key 认证方式
+    /// Google API-key authentication.
     ///
     /// - Header: `x-goog-api-key: <api_key>`
     Google,
 
-    /// Google OAuth 认证方式
+    /// Google OAuth authentication.
     ///
     /// - Header: `Authorization: Bearer <access_token>`
     ///
-    /// 用于 Gemini CLI 等需要 OAuth 的场景
+    /// Used by OAuth clients such as Gemini CLI.
     GoogleOAuth,
 
-    /// GitHub Copilot 认证方式
+    /// GitHub Copilot authentication.
     ///
     /// - Header: `Authorization: Bearer <copilot_token>`
     ///
-    /// 使用动态获取的 Copilot Token（通过 GitHub OAuth 设备码流程获取）
+    /// Uses a Copilot token obtained dynamically through the GitHub OAuth device-code flow.
     GitHubCopilot,
 
-    /// Codex OAuth 认证方式（ChatGPT Plus/Pro）
+    /// Codex OAuth authentication for ChatGPT Plus/Pro.
     ///
     /// - Header: `Authorization: Bearer <access_token>`
-    /// - Header: `ChatGPT-Account-Id: <account_id>` (来自 forwarder 注入)
+    /// - Header: `ChatGPT-Account-Id: <account_id>` (injected by the forwarder)
     /// - Header: `originator: nexus-composer`
     ///
-    /// 使用动态获取的 OpenAI access_token（通过 Device Code 流程获取）
+    /// Uses an OpenAI access token obtained dynamically through the device-code flow.
     CodexOAuth,
 }
 
@@ -160,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_masked_key_utf8_safe() {
-        let auth = AuthInfo::new("测试⚠️1234567890".to_string(), AuthStrategy::Bearer);
+        let auth = AuthInfo::new("test⚠️1234567890".to_string(), AuthStrategy::Bearer);
         let masked = auth.masked_key();
         assert!(!masked.is_empty());
     }
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn test_masked_access_token_utf8_safe() {
         let auth =
-            AuthInfo::with_access_token("refresh".to_string(), "令牌⚠️1234567890".to_string());
+            AuthInfo::with_access_token("refresh".to_string(), "token⚠️1234567890".to_string());
         let masked = auth.masked_access_token().unwrap();
         assert!(!masked.is_empty());
     }

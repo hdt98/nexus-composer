@@ -179,12 +179,12 @@ export function UsageHero({
       cacheWriteState === "na"
         ? t(
             "usage.cacheWriteNotReported",
-            "OpenAI 协议不区分缓存写入，仅上报缓存命中",
+            "OpenAI protocol doesn't distinguish cache creation; only cache hits are reported",
           )
         : cacheWriteState === "partial"
           ? t(
               "usage.cacheWritePartial",
-              "部分协议（如 OpenAI）不上报缓存写入，数值可能偏低",
+              "Some protocols (e.g. OpenAI) don't report cache creation; the value may be incomplete",
             )
           : undefined,
   };
@@ -234,7 +234,7 @@ export function UsageHero({
                         <span className="text-muted-foreground/30">•</span>
                       </>
                     )}
-                    {t("usage.realTotal", "真实消耗 Tokens")}
+                    {t("usage.realTotal", "Tokens Processed")}
                   </div>
                   <div className="flex items-baseline gap-2">
                     <span
@@ -276,7 +276,7 @@ export function UsageHero({
             <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
               <MiniStat
                 icon={<ArrowDownToLine className="h-3.5 w-3.5" />}
-                label={t("usage.freshInput", "新增输入")}
+                label={t("usage.freshInput", "Fresh Input")}
                 value={formatTokensShort(input, lang)}
                 accent="text-blue-500"
               />
@@ -288,7 +288,7 @@ export function UsageHero({
               />
               <MiniStat
                 icon={<Database className="h-3.5 w-3.5" />}
-                label={t("usage.cacheWrite", "缓存写入")}
+                label={t("usage.cacheWrite", "Creation")}
                 value={cacheWriteDisplay.value}
                 accent="text-amber-500"
                 muted={cacheWriteDisplay.muted}
@@ -296,7 +296,7 @@ export function UsageHero({
               />
               <MiniStat
                 icon={<Sparkles className="h-3.5 w-3.5" />}
-                label={t("usage.cacheRead", "缓存命中")}
+                label={t("usage.cacheRead", "Hit")}
                 value={formatTokensShort(cacheRead, lang)}
                 accent="text-emerald-500"
               />
@@ -304,7 +304,7 @@ export function UsageHero({
               <div className="col-span-2 lg:col-span-1 flex flex-col justify-center rounded-xl border border-border/40 bg-background/40 p-3 shadow-sm">
                 <div className="flex items-center justify-between text-[11px] mb-2">
                   <span className="text-muted-foreground font-medium">
-                    {t("usage.cacheHitRate", "缓存命中率")}
+                    {t("usage.cacheHitRate", "Cache Hit Rate")}
                   </span>
                   <span className="font-bold text-emerald-500 tabular-nums">
                     {hitPercentLabel}%

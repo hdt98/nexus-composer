@@ -132,41 +132,39 @@ jobs:
       - name: Prepare Tauri signing key
         shell: bash
         run: |
-          # 调试：检查 Secret 是否存在
+          # Fail early when the signing secret is unavailable.
           if [ -z "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}" ]; then
-            echo "❌ TAURI_SIGNING_PRIVATE_KEY Secret 为空或不存在" >&2
-            echo "请检查 GitHub 仓库 Settings > Secrets and variables > Actions" >&2
+            echo "❌ TAURI_SIGNING_PRIVATE_KEY is empty or missing" >&2
+            echo "Check GitHub Settings > Secrets and variables > Actions" >&2
             exit 1
           fi
           
           RAW="${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}"
-          # 目标：提供正确的私钥“文件路径”给 Tauri CLI，避免内容解码歧义
+          # Normalize the signing key into a file before passing it to Tauri.
           KEY_PATH="$RUNNER_TEMP/tauri_signing.key"
-          # 情况 1：原始两行文本（第一行以 "untrusted comment:" 开头）
+          # Case 1: the original two-line text starts with "untrusted comment:".
           if echo "$RAW" | head -n1 | grep -q '^untrusted comment:'; then
             printf '%s\n' "$RAW" > "$KEY_PATH"
-            echo "✅ 使用原始两行密钥文件格式"
+            echo "✅ Using the original two-line signing key"
           else
-            # 情况 2：整体被 base64 包裹（解包后应当是两行）
+            # Case 2: the complete two-line key was wrapped in base64.
             if DECODED=$(printf '%s' "$RAW" | (base64 --decode 2>/dev/null || base64 -D 2>/dev/null)) \
                && echo "$DECODED" | head -n1 | grep -q '^untrusted comment:'; then
               printf '%s\n' "$DECODED" > "$KEY_PATH"
-              echo "✅ 成功解码 base64 包裹密钥，已还原为两行文件"
+              echo "✅ Decoded the base64-wrapped two-line signing key"
             else
-              # 情况 3：已是第二行（纯 Base64 一行）→ 构造两行文件
+              # Case 3: only the base64 payload line was provided.
               if echo "$RAW" | grep -Eq '^[A-Za-z0-9+/=]+$'; then
                 ONE=$(printf '%s' "$RAW" | tr -d '\r\n')
                 printf '%s\n%s\n' "untrusted comment: tauri signing key" "$ONE" > "$KEY_PATH"
-                echo "✅ 使用一行 Base64 私钥，已构造两行文件"
+                echo "✅ Reconstructed the signing key from its base64 payload"
               else
-                echo "❌ TAURI_SIGNING_PRIVATE_KEY 格式无法识别：既不是两行原文，也不是其 base64，亦非一行 base64" >&2
+                echo "❌ TAURI_SIGNING_PRIVATE_KEY is not a two-line key, a base64-wrapped key, or a base64 payload" >&2
                 exit 1
               fi
             fi
           fi
-          # 将“完整两行内容”作为环境变量注入（Tauri 支持传入完整私钥文本或文件路径）
-          # 使用多行写入语法，保持换行以便解析
-          # 将完整两行私钥内容进行 base64 编码，作为单行内容注入环境变量
+          # Encode the normalized two-line key as one environment-variable line.
           if command -v base64 >/dev/null 2>&1; then
             KEY_B64=$(base64 < "$KEY_PATH" | tr -d '\r\n')
           elif command -v openssl >/dev/null 2>&1; then
@@ -175,7 +173,7 @@ jobs:
             KEY_B64=$(KEY_PATH="$KEY_PATH" node -e "process.stdout.write(require('fs').readFileSync(process.env.KEY_PATH).toString('base64'))")
           fi
           if [ -z "$KEY_B64" ]; then
-            echo "❌ 无法生成私钥 base64 内容" >&2
+            echo "❌ Failed to generate base64 content for the signing key" >&2
             exit 1
           fi
           echo "TAURI_SIGNING_PRIVATE_KEY=$KEY_B64" >> "$GITHUB_ENV"
@@ -662,7 +660,7 @@ jobs:
           VERSION="${TAG#v}"
           PUB_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           base_url="https://github.com/$REPO/releases/download/$TAG"
-          # 初始化空平台映射
+          # Initialize an empty platform map.
           mac_url=""; mac_sig=""
           win_x64_url=""; win_x64_sig=""
           win_arm64_url=""; win_arm64_sig=""
@@ -676,7 +674,7 @@ jobs:
             sig_content=$(cat "$sig")
             case "$fname" in
               *.tar.gz)
-                # 视为 macOS updater artifact
+                # Treat tar.gz files as macOS updater artifacts.
                 mac_url="$url"; mac_sig="$sig_content";;
               *-Windows-arm64.msi)
                 win_arm64_url="$url"; win_arm64_sig="$sig_content";;
@@ -688,7 +686,7 @@ jobs:
                 linux_x64_url="$url"; linux_x64_sig="$sig_content";;
             esac
           done
-          # 构造 JSON（仅包含存在的目标）
+          # Build JSON containing only available targets.
           tmp_json=$(mktemp)
           {
             echo '{'
@@ -698,7 +696,7 @@ jobs:
             echo '  "platforms": {'
             first=1
             if [ -n "$mac_url" ] && [ -n "$mac_sig" ]; then
-              # 为兼容 arm64 / x64，重复写入两个键，指向同一 universal 包
+              # Point both macOS architectures to the same universal package.
               for key in darwin-aarch64 darwin-x86_64; do
                 [ $first -eq 0 ] && echo ','
                 echo "    \"$key\": {\"signature\": \"$mac_sig\", \"url\": \"$mac_url\"}"

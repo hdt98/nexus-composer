@@ -1,42 +1,42 @@
-//! Handler 配置模块
+//! Handler configuration module.
 //!
-//! 定义各 API 处理器的配置结构和使用量解析器
+//! Defines configuration structures and usage parsers for API handlers.
 
 use crate::app_config::AppType;
 use crate::proxy::usage::parser::TokenUsage;
 use serde_json::Value;
 
-/// 使用量解析器类型别名
+/// Usage parser type aliases.
 pub type StreamUsageParser = fn(&[Value]) -> Option<TokenUsage>;
 pub type ResponseUsageParser = fn(&Value) -> Option<TokenUsage>;
 
-/// 模型提取器类型别名
-/// 参数: (流式事件列表, 请求中的模型名称) -> 最终使用的模型名称
+/// Model extractor type alias.
+/// Arguments: (stream events, requested model name) -> final model name.
 pub type StreamModelExtractor = fn(&[Value], &str) -> String;
 
-/// 流式 usage 事件预过滤器类型别名。
+/// Streaming usage event prefilter type alias.
 ///
-/// 参数是 SSE `data:` 原始字符串。返回 false 时跳过 JSON parse，避免在
-/// token/chunk 高频路径上解析与 usage 无关的事件。
+/// Receives the raw SSE `data:` string. Returning false skips JSON parsing for
+/// usage-independent events on the high-frequency token/chunk path.
 pub type StreamUsageEventFilter = fn(&str) -> bool;
 
-/// 各 API 的使用量解析配置
+/// Usage parsing configuration for an API.
 #[derive(Clone, Copy)]
 pub struct UsageParserConfig {
-    /// 流式响应解析器
+    /// Streaming response parser.
     pub stream_parser: StreamUsageParser,
-    /// 非流式响应解析器
+    /// Non-streaming response parser.
     pub response_parser: ResponseUsageParser,
-    /// 流式响应中的模型提取器
+    /// Model extractor for streaming responses.
     pub model_extractor: StreamModelExtractor,
-    /// 流式 usage 事件预过滤器
+    /// Streaming usage event prefilter.
     pub stream_event_filter: Option<StreamUsageEventFilter>,
-    /// 应用类型字符串（用于日志记录）
+    /// App type string used for logging.
     pub app_type_str: &'static str,
 }
 
 // ============================================================================
-// 流式 usage 事件预过滤
+// Streaming usage event prefilters
 // ============================================================================
 
 pub fn claude_stream_usage_event_filter(data: &str) -> bool {
@@ -56,15 +56,15 @@ fn gemini_stream_usage_event_filter(data: &str) -> bool {
 }
 
 // ============================================================================
-// 模型提取器实现
+// Model extractor implementations
 // ============================================================================
 
-/// Claude 流式响应模型提取（优先使用 usage.model）
+/// Extracts the model from a Claude stream, preferring `usage.model`.
 ///
-/// 空字符串模型名视为缺失（转换层对无回显上游会合成 model:""），
-/// 落到 fallback_model（映射后的出站模型或客户端请求模型）。
+/// An empty model is missing because the conversion layer synthesizes `model: ""`
+/// when upstream omits it. Falls back to the mapped outbound model or requested model.
 fn claude_model_extractor(events: &[Value], fallback_model: &str) -> String {
-    // 首先尝试从解析的 usage 中获取模型
+    // Prefer the model from parsed usage.
     if let Some(usage) = TokenUsage::from_claude_stream_events(events) {
         if let Some(model) = usage.model.filter(|m| !m.is_empty()) {
             return model;
@@ -73,15 +73,15 @@ fn claude_model_extractor(events: &[Value], fallback_model: &str) -> String {
     fallback_model.to_string()
 }
 
-/// OpenAI Chat Completions 流式响应模型提取（优先使用 usage.model）
+/// Extracts the model from an OpenAI Chat Completions stream, preferring `usage.model`.
 fn openai_model_extractor(events: &[Value], fallback_model: &str) -> String {
-    // 首先尝试从解析的 usage 中获取模型
+    // Prefer the model from parsed usage.
     if let Some(usage) = TokenUsage::from_openai_stream_events(events) {
         if let Some(model) = usage.model.filter(|m| !m.is_empty()) {
             return model;
         }
     }
-    // 回退：从事件中直接提取
+    // Fall back to extracting it directly from an event.
     events
         .iter()
         .find_map(|e| e.get("model")?.as_str().filter(|m| !m.is_empty()))
@@ -89,15 +89,15 @@ fn openai_model_extractor(events: &[Value], fallback_model: &str) -> String {
         .to_string()
 }
 
-/// Codex 智能流式响应模型提取（自动检测格式）
+/// Extracts the model from a Codex stream with automatic format detection.
 fn codex_auto_model_extractor(events: &[Value], fallback_model: &str) -> String {
-    // 首先尝试从解析的 usage 中获取模型
+    // Prefer the model from parsed usage.
     if let Some(usage) = TokenUsage::from_codex_stream_events_auto(events) {
         if let Some(model) = usage.model.filter(|m| !m.is_empty()) {
             return model;
         }
     }
-    // 回退：从 response.completed 事件中提取
+    // Fall back to the `response.completed` event.
     events
         .iter()
         .find_map(|e| {
@@ -111,7 +111,7 @@ fn codex_auto_model_extractor(events: &[Value], fallback_model: &str) -> String 
             }
         })
         .or_else(|| {
-            // 再回退：从 OpenAI 格式事件中提取
+            // Then fall back to an OpenAI-format event.
             events
                 .iter()
                 .find_map(|e| e.get("model")?.as_str().filter(|m| !m.is_empty()))
@@ -120,9 +120,9 @@ fn codex_auto_model_extractor(events: &[Value], fallback_model: &str) -> String 
         .to_string()
 }
 
-/// Gemini 流式响应模型提取（优先使用 usage.model）
+/// Extracts the model from a Gemini stream, preferring `usage.model`.
 fn gemini_model_extractor(events: &[Value], fallback_model: &str) -> String {
-    // 首先尝试从解析的 usage 中获取模型
+    // Prefer the model from parsed usage.
     if let Some(usage) = TokenUsage::from_gemini_stream_chunks(events) {
         if let Some(model) = usage.model.filter(|m| !m.is_empty()) {
             return model;
@@ -132,10 +132,10 @@ fn gemini_model_extractor(events: &[Value], fallback_model: &str) -> String {
 }
 
 // ============================================================================
-// 预定义配置
+// Predefined configurations
 // ============================================================================
 
-/// Claude API 解析配置
+/// Claude API parser configuration.
 pub const CLAUDE_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     stream_parser: TokenUsage::from_claude_stream_events,
     response_parser: TokenUsage::from_claude_response,
@@ -144,7 +144,7 @@ pub const CLAUDE_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     app_type_str: "claude",
 };
 
-/// OpenAI Chat Completions API 解析配置（用于 Codex /v1/chat/completions）
+/// OpenAI Chat Completions parser configuration for Codex `/v1/chat/completions`.
 pub const OPENAI_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     stream_parser: TokenUsage::from_openai_stream_events,
     response_parser: TokenUsage::from_openai_response,
@@ -153,7 +153,7 @@ pub const OPENAI_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     app_type_str: "codex",
 };
 
-/// Codex 智能解析配置（自动检测 OpenAI 或 Codex 格式）
+/// Codex parser configuration with automatic OpenAI or Codex format detection.
 pub const CODEX_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     stream_parser: TokenUsage::from_codex_stream_events_auto,
     response_parser: TokenUsage::from_codex_response_auto,
@@ -162,7 +162,7 @@ pub const CODEX_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     app_type_str: "codex",
 };
 
-/// Gemini API 解析配置
+/// Gemini API parser configuration.
 pub const GEMINI_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
     stream_parser: TokenUsage::from_gemini_stream_chunks,
     response_parser: TokenUsage::from_gemini_response,
@@ -172,26 +172,26 @@ pub const GEMINI_PARSER_CONFIG: UsageParserConfig = UsageParserConfig {
 };
 
 // ============================================================================
-// Handler 配置（预留，用于进一步简化）
+// Handler configuration reserved for future consolidation
 // ============================================================================
 
-/// Handler 基础配置
+/// Base handler configuration.
 ///
-/// 预留结构，可用于进一步统一各 handler 的配置
+/// Reserved for consolidating handler configuration.
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct HandlerConfig {
-    /// 应用类型
+    /// App type.
     pub app_type: AppType,
-    /// 日志标签
+    /// Log tag.
     pub tag: &'static str,
-    /// 应用类型字符串
+    /// App type string.
     pub app_type_str: &'static str,
-    /// 使用量解析配置
+    /// Usage parser configuration.
     pub parser_config: &'static UsageParserConfig,
 }
 
-/// Claude Handler 配置
+/// Claude handler configuration.
 #[allow(dead_code)]
 pub const CLAUDE_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     app_type: AppType::Claude,
@@ -200,7 +200,7 @@ pub const CLAUDE_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     parser_config: &CLAUDE_PARSER_CONFIG,
 };
 
-/// Codex Chat Completions Handler 配置
+/// Codex Chat Completions handler configuration.
 #[allow(dead_code)]
 pub const CODEX_CHAT_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     app_type: AppType::Codex,
@@ -209,7 +209,7 @@ pub const CODEX_CHAT_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     parser_config: &OPENAI_PARSER_CONFIG,
 };
 
-/// Codex Responses Handler 配置
+/// Codex Responses handler configuration.
 #[allow(dead_code)]
 pub const CODEX_RESPONSES_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     app_type: AppType::Codex,
@@ -218,7 +218,7 @@ pub const CODEX_RESPONSES_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     parser_config: &CODEX_PARSER_CONFIG,
 };
 
-/// Gemini Handler 配置
+/// Gemini handler configuration.
 #[allow(dead_code)]
 pub const GEMINI_HANDLER_CONFIG: HandlerConfig = HandlerConfig {
     app_type: AppType::Gemini,

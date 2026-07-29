@@ -4,7 +4,7 @@ use crate::services::subscription::SubscriptionQuota;
 pub async fn get_coding_plan_quota(
     base_url: String,
     api_key: String,
-    // 火山方舟用控制面 AK/SK 签名查询用量；其他供应商不传，沿用 api_key。
+    // Volcengine Ark signs control-plane quota queries with AK/SK; other providers reuse api_key.
     access_key_id: Option<String>,
     secret_access_key: Option<String>,
 ) -> Result<SubscriptionQuota, String> {

@@ -1,9 +1,9 @@
-//! Hermes Agent 配置文件读写模块
+//! Hermes Agent configuration-file module.
 //!
-//! 处理 `~/.hermes/config.yaml` 配置文件的读写操作（YAML 格式）。
-//! Hermes 使用累加式供应商管理，所有供应商配置共存于同一配置文件中。
+//! Reads and writes the YAML file `~/.hermes/config.yaml`. Hermes manages providers
+//! additively, so every provider configuration coexists in one file.
 //!
-//! ## 配置结构示例
+//! ## Example configuration structure
 //!
 //! ```yaml
 //! model:
@@ -44,12 +44,12 @@ use std::sync::{Mutex, OnceLock};
 // Path Functions
 // ============================================================================
 
-/// 获取 Hermes 配置目录
+/// Returns the Hermes configuration directory.
 ///
-/// 解析顺序对齐 Hermes 自身的 `get_hermes_home()`:
-///   1. CCS 设置 `hermes_config_dir`(显式覆盖)
-///   2. `HERMES_HOME` 环境变量(trim 后非空;按原样,不展开 `~`,与 Hermes `Path(val)` 一致)
-///   3. 平台默认(Windows: `%LOCALAPPDATA%\hermes`,Mac/Linux: `~/.hermes`)
+/// Resolution order matches Hermes `get_hermes_home()`:
+///   1. The `hermes_config_dir` setting as an explicit override.
+///   2. A non-empty, trimmed `HERMES_HOME`, used literally without expanding `~`, matching `Path(val)`.
+///   3. The platform default: `%LOCALAPPDATA%\hermes` on Windows, `~/.hermes` on macOS/Linux.
 pub fn get_hermes_dir() -> PathBuf {
     if let Some(override_dir) = get_hermes_override_dir() {
         return override_dir;
@@ -66,8 +66,8 @@ pub fn get_hermes_dir() -> PathBuf {
     default_hermes_dir()
 }
 
-/// 平台默认 Hermes 目录(Windows):对齐 Hermes `_get_platform_default_hermes_home()`——
-/// 读 `LOCALAPPDATA` 环境变量,缺失/空时回退 `~\AppData\Local`,再拼 `hermes`。
+/// Default Hermes directory on Windows, matching `_get_platform_default_hermes_home()`.
+/// Reads `LOCALAPPDATA`, falls back to `~\AppData\Local` when absent or empty, then appends `hermes`.
 #[cfg(target_os = "windows")]
 fn default_hermes_dir() -> PathBuf {
     windows_local_hermes_dir(
@@ -76,15 +76,15 @@ fn default_hermes_dir() -> PathBuf {
     )
 }
 
-/// 平台默认 Hermes 目录(Mac/Linux):`~/.hermes`。
+/// Default Hermes directory on macOS/Linux: `~/.hermes`.
 #[cfg(not(target_os = "windows"))]
 fn default_hermes_dir() -> PathBuf {
     crate::config::get_home_dir().join(".hermes")
 }
 
-/// Windows `%LOCALAPPDATA%\hermes` 路径计算(纯函数,便于跨平台单测)。
-/// 对齐 Hermes 的 `os.environ.get("LOCALAPPDATA", "").strip()`:trim 后为空
-/// (缺失/空/纯空白)则回退 `<home>\AppData\Local\hermes`。
+/// Computes the Windows `%LOCALAPPDATA%\hermes` path as a pure, cross-platform-testable function.
+/// Matches `os.environ.get("LOCALAPPDATA", "").strip()` in Hermes: an absent, empty, or whitespace-only
+/// value falls back to `<home>\AppData\Local\hermes`.
 #[cfg(any(target_os = "windows", test))]
 fn windows_local_hermes_dir(localappdata: Option<&std::ffi::OsStr>, home: &Path) -> PathBuf {
     localappdata
@@ -95,9 +95,9 @@ fn windows_local_hermes_dir(localappdata: Option<&std::ffi::OsStr>, home: &Path)
         .join("hermes")
 }
 
-/// 获取 Hermes 配置文件路径
+/// Returns the Hermes configuration-file path.
 ///
-/// 返回 `~/.hermes/config.yaml`
+/// Returns `~/.hermes/config.yaml`.
 pub fn get_hermes_config_path() -> PathBuf {
     get_hermes_dir().join("config.yaml")
 }
@@ -111,7 +111,7 @@ fn hermes_write_lock() -> &'static Mutex<()> {
 // Type Definitions
 // ============================================================================
 
-/// Hermes 写入结果
+/// Result of writing Hermes configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct HermesWriteOutcome {
@@ -141,9 +141,9 @@ pub struct HermesModelConfig {
 // Core YAML Read Functions
 // ============================================================================
 
-/// 读取 Hermes 配置文件为 serde_yaml::Value
+/// Reads the Hermes configuration file as serde_yaml::Value.
 ///
-/// 如果文件不存在，返回空 Mapping
+/// Returns an empty mapping if the file does not exist.
 pub fn read_hermes_config() -> Result<serde_yaml::Value, AppError> {
     let path = get_hermes_config_path();
     if !path.exists() {

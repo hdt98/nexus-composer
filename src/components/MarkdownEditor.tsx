@@ -32,7 +32,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
   useEffect(() => {
     if (!editorRef.current) return;
 
-    // 定义基础主题
+    // Define the base theme.
     const baseTheme = EditorView.baseTheme({
       "&": {
         height: "100%",
@@ -74,7 +74,7 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
         }),
       );
     } else {
-      // 只读模式下隐藏光标和高亮行
+      // Hide the cursor and active-line highlight in read-only mode.
       extensions.push(
         EditorView.theme({
           ".cm-cursor, .cm-dropCursor": { border: "none" },
@@ -84,11 +84,11 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
       );
     }
 
-    // 如果启用深色模式，添加深色主题
+    // Add the dark theme when dark mode is enabled.
     if (darkMode) {
       extensions.push(oneDark);
     } else {
-      // 浅色模式下的简单样式调整，使其更融入 UI
+      // Apply light-mode styles that blend with the surrounding UI.
       extensions.push(
         EditorView.theme(
           {
@@ -112,13 +112,13 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
       );
     }
 
-    // 创建初始状态
+    // Create the initial state.
     const state = EditorState.create({
       doc: value,
       extensions,
     });
 
-    // 创建编辑器视图
+    // Create the editor view.
     const view = new EditorView({
       state,
       parent: editorRef.current,
@@ -130,9 +130,9 @@ const MarkdownEditor: React.FC<MarkdownEditorProps> = ({
       view.destroy();
       viewRef.current = null;
     };
-  }, [darkMode, readOnly, minHeight, maxHeight, placeholderText]); // 添加 placeholderText 依赖以支持国际化切换
+  }, [darkMode, readOnly, minHeight, maxHeight, placeholderText]); // Rebuild when localized placeholder text changes.
 
-  // 当 value 从外部改变时更新编辑器内容
+  // Update editor content when value changes externally.
   useEffect(() => {
     if (viewRef.current && viewRef.current.state.doc.toString() !== value) {
       const transaction = viewRef.current.state.update({

@@ -66,7 +66,7 @@ export function getUsageRangePresetLabel(
 ): string {
   switch (preset) {
     case "today":
-      return t("usage.presetToday", { defaultValue: "当天" });
+      return t("usage.presetToday", { defaultValue: "Today" });
     case "1d":
       return t("usage.preset1d", { defaultValue: "1d" });
     case "7d":
@@ -76,6 +76,6 @@ export function getUsageRangePresetLabel(
     case "30d":
       return t("usage.preset30d", { defaultValue: "30d" });
     case "custom":
-      return t("usage.customRange", { defaultValue: "日历筛选" });
+      return t("usage.customRange", { defaultValue: "Calendar Filter" });
   }
 }

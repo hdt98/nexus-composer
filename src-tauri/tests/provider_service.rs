@@ -146,7 +146,7 @@ command = "say"
         );
     }
 
-    // 使用新的统一 MCP 结构（v3.7.0+）
+    // Use the unified MCP structure introduced in v3.7.0.
     let servers = initial_config
         .mcp
         .servers
@@ -219,12 +219,12 @@ command = "say"
         .get("config")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    // provider 存储的是原始配置，不包含 MCP 同步后的内容
+    // Provider storage keeps the original configuration without synchronized MCP content.
     assert!(
         new_config_text.contains("mcp_servers.latest"),
         "provider config should contain original MCP servers"
     );
-    // live 文件额外包含同步的 MCP 服务器
+    // The live file additionally contains synchronized MCP servers.
     assert!(
         config_text.contains("mcp_servers.echo-server"),
         "live config should include synced MCP servers"
@@ -1960,8 +1960,8 @@ fn provider_service_switch_claude_updates_live_and_state() {
     );
 }
 
-/// 切走勾选了通用配置的 Claude 供应商时，应把它 live 里新增的可共享键
-/// （用户直接在应用内装插件/改偏好）捕获进通用配置片段，并带到下一个供应商。
+/// Switching away from a Claude provider with common config enabled captures new shareable live
+/// keys, such as plugin or preference changes, and applies them to the next provider.
 #[test]
 fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -1972,8 +1972,8 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }
-    // A 的 live = A 私有密钥（含非 Anthropic 的 OpenRouter 凭据）+ 已共享的 theme
-    // + 用户刚在应用内新增的 enableAllProjectMcpServers
+    // Provider A's live config contains private credentials, a shared theme, and a newly added
+    // enableAllProjectMcpServers setting.
     let live = json!({
         "env": { "ANTHROPIC_API_KEY": "a-key", "OPENROUTER_API_KEY": "sk-or-leak" },
         "theme": "dark",
@@ -2026,7 +2026,7 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
 
     ProviderService::switch(&state, AppType::Claude, "b").expect("switch should succeed");
 
-    // 片段应捕获到新增键，并保留已有共享键，且绝不含密钥
+    // Capture new keys, preserve existing shared keys, and exclude all credentials.
     let snippet = state
         .db
         .get_config_snippet(AppType::Claude.as_str())
@@ -2059,7 +2059,7 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
         "non-Anthropic Claude credentials must never leak into the shared snippet"
     );
 
-    // 新增键应通过通用配置带到 B 的 live
+    // Propagate the new key to provider B through common configuration.
     let live_after: serde_json::Value =
         read_json_file(&settings_path).expect("read live after switch");
     assert_eq!(
@@ -2084,8 +2084,8 @@ fn switch_claude_syncs_new_shared_keys_from_live_into_common_config() {
     );
 }
 
-/// 用户在应用内删掉一个已共享的键后，切换应把删除同步进通用配置，
-/// 且不会在切到下一个供应商时被重新注入（否则会"删不掉"）。
+/// After a user deletes a shared key in the application, switching propagates the deletion to
+/// common configuration and does not inject the key into the next provider.
 #[test]
 fn switch_claude_syncs_deletions_from_live_into_common_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -2096,7 +2096,7 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
     if let Some(parent) = settings_path.parent() {
         std::fs::create_dir_all(parent).expect("create claude settings dir");
     }
-    // live 里 theme 还在，但用户已删掉 enableAllProjectMcpServers
+    // The live theme remains, but enableAllProjectMcpServers was deleted.
     let live = json!({
         "env": { "ANTHROPIC_API_KEY": "a-key" },
         "theme": "dark"
@@ -2138,7 +2138,7 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
     }
 
     let state = create_test_state_with_config(&config).expect("create test state");
-    // 片段里仍残留 enableAllProjectMcpServers（上次共享的）
+    // The snippet still contains enableAllProjectMcpServers from the previous synchronization.
     state
         .db
         .set_config_snippet(
@@ -2166,7 +2166,7 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
         "untouched shared key should remain"
     );
 
-    // 切到 B 后 live 不应再出现被删除的键
+    // The deleted key must not appear in provider B's live configuration.
     let live_after: serde_json::Value =
         read_json_file(&settings_path).expect("read live after switch");
     assert!(
@@ -2175,7 +2175,7 @@ fn switch_claude_syncs_deletions_from_live_into_common_config() {
     );
 }
 
-/// 未勾选"写入通用配置"的供应商，其 live 改动不应自动污染通用配置片段。
+/// Live changes from a provider that opted out must not modify common configuration.
 #[test]
 fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -2202,7 +2202,7 @@ fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
             .get_manager_mut(&AppType::Claude)
             .expect("claude manager");
         manager.current = "a".to_string();
-        // A 未勾选通用配置（meta = None）
+        // Provider A opted out of common configuration with meta = None.
         manager.providers.insert(
             "a".to_string(),
             Provider::with_id(
@@ -2252,7 +2252,7 @@ fn switch_claude_does_not_sync_common_config_for_opted_out_provider() {
     );
 }
 
-/// 用户显式清空过通用配置（_cleared）后，切换不应把片段重新塞回来。
+/// Switching must not restore common configuration after the user explicitly cleared it.
 #[test]
 fn switch_claude_respects_explicitly_cleared_common_config() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
@@ -2334,7 +2334,7 @@ fn provider_service_switch_missing_provider_returns_error() {
     match err {
         AppError::Message(msg) => {
             assert!(
-                msg.contains("不存在") || msg.contains("not found"),
+                msg.contains("does not exist") || msg.contains("not found"),
                 "expected provider not found message, got {msg}"
             );
         }
@@ -2438,8 +2438,8 @@ fn provider_service_delete_codex_removes_provider_and_files() {
         !providers.contains_key("to-delete"),
         "provider entry should be removed"
     );
-    // v3.7.0+ 不再使用供应商特定文件（如 auth-*.json, config-*.toml）
-    // 删除供应商只影响数据库记录，不清理这些旧格式文件
+    // v3.7.0+ no longer uses provider-specific files such as auth-*.json or config-*.toml.
+    // Deleting a provider affects only the database and leaves legacy files unchanged.
 }
 
 #[test]
@@ -2498,8 +2498,8 @@ fn provider_service_delete_claude_removes_provider_files() {
         !providers.contains_key("delete"),
         "claude provider should be removed"
     );
-    // v3.7.0+ 不再使用供应商特定文件（如 settings-*.json）
-    // 删除供应商只影响数据库记录，不清理这些旧格式文件
+    // v3.7.0+ no longer uses provider-specific files such as settings-*.json.
+    // Deleting a provider affects only the database and leaves legacy files unchanged.
 }
 
 #[test]
@@ -2532,19 +2532,16 @@ fn provider_service_delete_current_provider_returns_error() {
     let err = ProviderService::delete(&app_state, AppType::Claude, "keep")
         .expect_err("deleting current provider should fail");
     match err {
-        AppError::Localized { zh, .. } => assert!(
-            zh.contains("不能删除当前正在使用的供应商")
-                || zh.contains("无法删除当前正在使用的供应商"),
-            "unexpected message: {zh}"
+        AppError::Localized { message, .. } => assert!(
+            message.contains("Cannot delete the provider that is currently in use"),
+            "unexpected message: {message}"
         ),
         AppError::Config(msg) => assert!(
-            msg.contains("不能删除当前正在使用的供应商")
-                || msg.contains("无法删除当前正在使用的供应商"),
+            msg.contains("Cannot delete the provider that is currently in use"),
             "unexpected message: {msg}"
         ),
         AppError::Message(msg) => assert!(
-            msg.contains("不能删除当前正在使用的供应商")
-                || msg.contains("无法删除当前正在使用的供应商"),
+            msg.contains("Cannot delete the provider that is currently in use"),
             "unexpected message: {msg}"
         ),
         other => panic!("expected Config/Message error, got {other:?}"),
@@ -2557,7 +2554,8 @@ fn recover_from_crash_without_backup_cleans_placeholder_instead_of_writing_it_ba
     reset_test_fs();
     let _home = ensure_test_home();
 
-    // 接管态 Claude Live，且 DB 中无备份（模拟切换 app_config_dir 后新库首启的场景）
+    // Claude live config is under takeover with no database backup, simulating first startup after
+    // switching app_config_dir to a new database.
     let taken_over_live = json!({
         "env": {
             "ANTHROPIC_BASE_URL": "http://127.0.0.1:15721",
@@ -2574,7 +2572,7 @@ fn recover_from_crash_without_backup_cleans_placeholder_instead_of_writing_it_ba
 
     let state = create_test_state().expect("create test state");
 
-    // 模拟历史异常：接管态 Live 已被导入成 current provider（SSOT 被污染）
+    // Simulate legacy corruption where a taken-over live config became the current provider.
     let provider = Provider::with_id(
         "default".to_string(),
         "default".to_string(),

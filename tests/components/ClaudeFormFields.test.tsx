@@ -128,14 +128,14 @@ describe("ClaudeFormFields", () => {
     modelFetchApiMock.fetchModelsForConfig.mockResolvedValue([]);
   });
 
-  it("不会在 Copilot 表单打开时自动获取模型列表", () => {
+  it("does not fetch models automatically when the Copilot form opens", () => {
     renderCopilotForm();
 
     expect(copilotApiMock.copilotGetModels).not.toHaveBeenCalled();
     expect(copilotApiMock.copilotGetModelsForAccount).not.toHaveBeenCalled();
   });
 
-  it("点击获取模型列表后才请求当前 Copilot 账号的模型", async () => {
+  it("fetches models for the current Copilot account only on request", async () => {
     renderCopilotForm();
 
     fireEvent.click(
@@ -152,13 +152,13 @@ describe("ClaudeFormFields", () => {
     expect(copilotApiMock.copilotGetModels).not.toHaveBeenCalled();
   });
 
-  it("不会在 Codex OAuth 表单打开时自动获取模型列表", () => {
+  it("does not fetch models automatically when the Codex OAuth form opens", () => {
     renderCodexOauthForm();
 
     expect(modelFetchApiMock.fetchCodexOauthModels).not.toHaveBeenCalled();
   });
 
-  it("点击获取模型列表后才请求当前 Codex OAuth 账号的模型", async () => {
+  it("fetches models for the current Codex OAuth account only on request", async () => {
     renderCodexOauthForm();
 
     fireEvent.click(

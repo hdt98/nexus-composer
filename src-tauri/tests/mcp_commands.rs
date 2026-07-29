@@ -44,7 +44,7 @@ fn import_default_config_claude_persists_provider() {
     import_default_config_test_hook(&state, AppType::Claude)
         .expect("import default config succeeds");
 
-    // 验证内存状态
+    // Verify in-memory state.
     let providers = state
         .db
         .get_all_providers(AppType::Claude.as_str())
@@ -60,7 +60,7 @@ fn import_default_config_claude_persists_provider() {
         "default provider should capture live settings"
     );
 
-    // 验证数据已持久化到数据库（v3.7.0+ 使用 SQLite 而非 config.json）
+    // Verify persistence to SQLite, which replaced config.json in v3.7.0.
     let db_path = home.join(".cc-switch").join("cc-switch.db");
     assert!(
         db_path.exists(),
@@ -81,19 +81,19 @@ fn import_default_config_without_live_file_returns_error() {
     let err = import_default_config_test_hook(&state, AppType::Claude)
         .expect_err("missing live file should error");
     match err {
-        AppError::Localized { zh, .. } => assert!(
-            zh.contains("Claude Code 配置文件不存在"),
-            "unexpected error message: {zh}"
+        AppError::Localized { message, .. } => assert!(
+            message.contains("Claude settings file is missing"),
+            "unexpected error message: {message}"
         ),
         AppError::Message(msg) => assert!(
-            msg.contains("Claude Code 配置文件不存在"),
+            msg.contains("Claude settings file is missing"),
             "unexpected error message: {msg}"
         ),
         other => panic!("unexpected error variant: {other:?}"),
     }
 
-    // 使用数据库架构，不再检查 config.json
-    // 失败的导入不应该向数据库写入任何供应商
+    // Use the database schema instead of checking config.json.
+    // A failed import must not write providers to the database.
     let providers = state
         .db
         .get_all_providers(AppType::Claude.as_str())
@@ -143,7 +143,7 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
         "imported server should have Claude app enabled"
     );
 
-    // 验证数据已持久化到数据库
+    // Verify that data was persisted to the database.
     let db_path = home.join(".cc-switch").join("cc-switch.db");
     assert!(
         db_path.exists(),
@@ -264,7 +264,7 @@ fn import_mcp_from_claude_invalid_json_preserves_state() {
     let _home = ensure_test_home();
 
     let mcp_path = get_claude_mcp_path();
-    fs::write(&mcp_path, "{\"mcpServers\":") // 不完整 JSON
+    fs::write(&mcp_path, "{\"mcpServers\":") // Incomplete JSON.
         .expect("seed invalid ~/.claude.json");
 
     let state = create_test_state().expect("create test state");
@@ -273,13 +273,13 @@ fn import_mcp_from_claude_invalid_json_preserves_state() {
         McpService::import_from_claude(&state).expect_err("invalid json should bubble up error");
     match err {
         AppError::McpValidation(msg) => assert!(
-            msg.contains("解析 ~/.claude.json 失败"),
+            msg.contains("~/.claude.json"),
             "unexpected error message: {msg}"
         ),
         other => panic!("unexpected error variant: {other:?}"),
     }
 
-    // 使用数据库架构，检查 MCP 服务器未被写入
+    // Verify through the database that no MCP server was written.
     let servers = state.db.get_all_mcp_servers().expect("get all mcp servers");
     assert!(
         servers.is_empty(),
@@ -293,7 +293,7 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 创建 Codex 配置目录和文件
+    // Create the Codex configuration directory and files.
     let codex_dir = home.join(".codex");
     fs::create_dir_all(&codex_dir).expect("create codex dir");
     fs::write(
@@ -306,7 +306,7 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
 
-    // v3.7.0: 使用统一结构
+    // v3.7.0: Use the unified structure.
     config.mcp.servers = Some(HashMap::new());
     config.mcp.servers.as_mut().unwrap().insert(
         "codex-server".into(),
@@ -319,7 +319,7 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
             }),
             apps: McpApps {
                 claude: false,
-                codex: false, // 初始未启用
+                codex: false, // Initially disabled.
                 gemini: false,
                 opencode: false,
                 hermes: false,
@@ -333,7 +333,7 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
 
     let state = create_test_state_with_config(&config).expect("create test state");
 
-    // v3.7.0: 使用 toggle_app 替代 set_enabled
+    // v3.7.0: Use toggle_app instead of set_enabled.
     McpService::toggle_app(&state, "codex-server", AppType::Codex, true)
         .expect("toggle_app should succeed");
 
@@ -364,7 +364,7 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 确认 Codex 配置目录不存在（模拟“未安装/未运行过 Codex CLI”）
+    // Simulate Codex CLI not being installed or initialized by omitting ~/.codex.
     assert!(
         !home.join(".codex").exists(),
         "~/.codex should not exist in fresh test environment"
@@ -372,7 +372,7 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
 
     let state = create_test_state().expect("create test state");
 
-    // 先插入一个未启用 Codex 的 MCP 服务器（避免 upsert 触发同步）
+    // Insert a Codex-disabled MCP server first to avoid synchronization during upsert.
     McpService::upsert_server(
         &state,
         McpServer {
@@ -397,7 +397,7 @@ fn enabling_codex_mcp_skips_when_codex_dir_missing() {
     )
     .expect("insert server without syncing");
 
-    // 启用 Codex：目录缺失时应跳过写入（不创建 ~/.codex/config.toml）
+    // Enabling Codex skips the write when ~/.codex is absent.
     McpService::toggle_app(&state, "codex-server", AppType::Codex, true)
         .expect("toggle codex should succeed even when ~/.codex is missing");
 
@@ -413,10 +413,10 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 模拟 Claude 已安装/已初始化：存在 ~/.claude 目录
+    // Simulate an installed and initialized Claude with an existing ~/.claude directory.
     fs::create_dir_all(home.join(".claude")).expect("create ~/.claude dir");
 
-    // 先创建一个启用 Claude 的 MCP 服务器
+    // Create an MCP server enabled for Claude.
     let state = support::create_test_state().expect("create test state");
     McpService::upsert_server(
         &state,
@@ -442,7 +442,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
     )
     .expect("upsert should sync to Claude live config");
 
-    // 确认已写入 ~/.claude.json
+    // Verify that ~/.claude.json was written.
     let mcp_path = get_claude_mcp_path();
     let text = fs::read_to_string(&mcp_path).expect("read ~/.claude.json");
     let v: serde_json::Value = serde_json::from_str(&text).expect("parse ~/.claude.json");
@@ -451,7 +451,7 @@ fn upsert_mcp_server_disabling_app_removes_from_claude_live_config() {
         "echo should exist in Claude live config after enabling"
     );
 
-    // 再次 upsert：取消勾选 Claude（apps.claude=false），应从 Claude live 配置中移除
+    // Upsert again with Claude disabled to remove the server from live configuration.
     McpService::upsert_server(
         &state,
         McpServer {
@@ -535,12 +535,12 @@ fn import_mcp_from_gemini_sse_url_only_is_valid() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // Gemini MCP 位于 ~/.gemini/settings.json
+    // Gemini MCP configuration is stored in ~/.gemini/settings.json.
     let gemini_dir = home.join(".gemini");
     fs::create_dir_all(&gemini_dir).expect("create gemini dir");
     let settings_path = gemini_dir.join("settings.json");
 
-    // Gemini SSE：只包含 url（Gemini 不使用 type 字段）
+    // Gemini SSE entries contain only a URL because Gemini does not use a type field.
     let gemini_settings = json!({
         "mcpServers": {
             "sse-server": {
@@ -576,7 +576,7 @@ fn enabling_gemini_mcp_skips_when_gemini_dir_missing() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 确认 Gemini 配置目录不存在（模拟“未安装/未运行过 Gemini CLI”）
+    // Simulate Gemini CLI not being installed or initialized by omitting ~/.gemini.
     assert!(
         !home.join(".gemini").exists(),
         "~/.gemini should not exist in fresh test environment"
@@ -584,7 +584,7 @@ fn enabling_gemini_mcp_skips_when_gemini_dir_missing() {
 
     let state = create_test_state().expect("create test state");
 
-    // 先插入一个未启用 Gemini 的 MCP 服务器（避免 upsert 触发同步）
+    // Insert a Gemini-disabled MCP server first to avoid synchronization during upsert.
     McpService::upsert_server(
         &state,
         McpServer {
@@ -609,7 +609,7 @@ fn enabling_gemini_mcp_skips_when_gemini_dir_missing() {
     )
     .expect("insert server without syncing");
 
-    // 启用 Gemini：目录缺失时应跳过写入（不创建 ~/.gemini/settings.json）
+    // Enabling Gemini skips the write when ~/.gemini is absent.
     McpService::toggle_app(&state, "gemini-server", AppType::Gemini, true)
         .expect("toggle gemini should succeed even when ~/.gemini is missing");
 
@@ -627,7 +627,7 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
     reset_test_fs();
     let home = ensure_test_home();
 
-    // 确认 Claude 相关目录/文件都不存在（模拟“未安装/未运行过 Claude”）
+    // Simulate Claude not being installed or initialized by omitting its directory and file.
     assert!(
         !home.join(".claude").exists(),
         "~/.claude should not exist in fresh test environment"
@@ -639,7 +639,7 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
 
     let state = create_test_state().expect("create test state");
 
-    // 先插入一个未启用 Claude 的 MCP 服务器（避免 upsert 触发同步）
+    // Insert a Claude-disabled MCP server first to avoid synchronization during upsert.
     McpService::upsert_server(
         &state,
         McpServer {
@@ -664,7 +664,7 @@ fn enabling_claude_mcp_skips_when_claude_config_absent() {
     )
     .expect("insert server without syncing");
 
-    // 启用 Claude：配置缺失时应跳过写入（不创建 ~/.claude.json）
+    // Enabling Claude skips the write when its configuration is absent.
     McpService::toggle_app(&state, "claude-server", AppType::Claude, true)
         .expect("toggle claude should succeed even when ~/.claude is missing");
 

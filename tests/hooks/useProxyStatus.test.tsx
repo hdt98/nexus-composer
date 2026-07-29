@@ -24,7 +24,7 @@ vi.mock("react-i18next", () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) => {
       if (key === "proxy.server.started") {
-        return `代理服务已启动 - ${options?.address}:${options?.port}`;
+        return `Routing service started - ${options?.address}:${options?.port}`;
       }
 
       if (typeof options?.defaultValue === "string") {
@@ -111,7 +111,7 @@ describe("useProxyStatus", () => {
     });
 
     expect(toastSuccessMock).toHaveBeenCalledWith(
-      "代理服务已启动 - 127.0.0.1:15721",
+      "Routing service started - 127.0.0.1:15721",
       { closeButton: true },
     );
   });

@@ -15,7 +15,7 @@ export interface CopilotQuota {
 
 export interface UseCopilotQuotaOptions {
   enabled?: boolean;
-  /** 是否启用自动轮询（5 分钟）与窗口 focus 重取 */
+  /** Whether to poll every five minutes and refetch on window focus. */
   autoQuery?: boolean;
 }
 

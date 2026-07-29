@@ -17,7 +17,7 @@ export function ModelTestConfigPanel() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // 使用字符串状态以支持完全清空数字输入框
+  // Use string state so numeric inputs can be completely cleared.
   const [config, setConfig] = useState({
     timeoutSecs: "8",
     maxRetries: "1",
@@ -46,7 +46,7 @@ export function ModelTestConfigPanel() {
   }
 
   async function handleSave() {
-    // 解析数字，空值使用默认值，0 是有效值
+    // Parse numbers, using defaults for empty values while preserving valid zero.
     const parseNum = (val: string, defaultVal: number) => {
       const n = parseInt(val);
       return isNaN(n) ? defaultVal : n;
@@ -85,18 +85,18 @@ export function ModelTestConfigPanel() {
         </Alert>
       )}
 
-      {/* 连通检测语义说明：可达 ≠ 配置正确 */}
+      {/* Connectivity semantics: reachable does not imply correct configuration */}
       <Alert>
         <Info className="h-4 w-4" />
         <AlertDescription>
           {t("streamCheck.connectivityNote", {
             defaultValue:
-              "连通检测仅探测供应商地址是否可达，不发送真实模型请求。收到任意响应即视为“可达”——这不代表鉴权或模型配置一定正确。",
+              'Connectivity check only probes whether the provider address is reachable; it does not send a real model request. Any response counts as "reachable" — which does not guarantee that auth or model settings are correct.',
           })}
         </AlertDescription>
       </Alert>
 
-      {/* 检查参数配置 */}
+      {/* Check parameters */}
       <div className="space-y-4">
         <h4 className="text-sm font-medium text-muted-foreground">
           {t("streamCheck.checkParams")}

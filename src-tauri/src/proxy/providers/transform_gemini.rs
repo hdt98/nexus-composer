@@ -39,10 +39,11 @@ pub(crate) fn is_synthesized_tool_call_id(id: &str) -> bool {
     id.starts_with(SYNTHESIZED_ID_PREFIX)
 }
 
-/// Anthropic 请求 → Gemini 原生请求。
+/// Converts an Anthropic request to Gemini's native request format.
 ///
-/// 转换工具库 API：当前无生产调用方（连通性检查不再发真实请求，曾是其唯一 crate 内
-/// 消费者），但保留其转换逻辑与下方测试套件，供代理转换路径复用 / 未来接线。
+/// This conversion API currently has no production caller because the
+/// connectivity check no longer sends real requests. Keep it and its tests
+/// available for proxy-path reuse and future integration.
 #[allow(dead_code)]
 pub fn anthropic_to_gemini(body: Value) -> Result<Value, ProxyError> {
     anthropic_to_gemini_with_shadow(body, None, None, None)
@@ -1118,12 +1119,11 @@ pub(crate) fn build_anthropic_usage(usage: Option<&Value>) -> Value {
         .get("cachedContentTokenCount")
         .and_then(|value| value.as_u64())
         .unwrap_or(0);
-    // Gemini 的 promptTokenCount 含缓存命中（cachedContentTokenCount）；而 Anthropic
-    // 语义下 input_tokens 必须是不含 cache 的 fresh input、cache_read 单列。本路径转成
-    // Anthropic 后以 app_type=claude 记账，calculator 对 claude 设 input_includes_cache_read
-    // =false 不再从 input 扣 cache，因此这里必须先扣减，否则缓存 token 会被双重计费
-    // （一次按完整 input 价、一次按 cache_read 价）。output 仍按 total-prompt 计算
-    // （prompt 是总输入，扣减只作用于 input/cache 的拆分，不影响 output）。
+    // Gemini's promptTokenCount includes cachedContentTokenCount, while
+    // Anthropic reports fresh input and cache reads separately. This path is
+    // billed as app_type=claude, whose calculator already treats input as
+    // excluding cache reads, so subtract here to avoid double billing cached
+    // tokens. Output remains total minus the full prompt count.
     let input_tokens = prompt_tokens.saturating_sub(cached_tokens);
     let output_tokens = total_tokens.saturating_sub(prompt_tokens);
 
@@ -1383,10 +1383,9 @@ mod tests {
         assert_eq!(result["content"][0]["type"], "text");
         assert_eq!(result["content"][0]["text"], "Hello from Gemini");
         assert_eq!(result["stop_reason"], "end_turn");
-        // input_tokens = promptTokenCount(12) - cachedContentTokenCount(3) = 9（fresh input）。
-        // Gemini 的 promptTokenCount 含缓存命中，但 Anthropic 语义要求 input 不含 cache、
-        // cache_read 单列；二者相加(9+3)=总输入 12。扣减避免本路径以 app_type=claude
-        // 记账时把缓存 token 双重计费。
+        // input_tokens = promptTokenCount(12) - cachedContentTokenCount(3) = 9.
+        // Anthropic reports fresh input and cache reads separately, so 9 + 3
+        // preserves the total input of 12 without double billing cached tokens.
         assert_eq!(result["usage"]["input_tokens"], 9);
         assert_eq!(result["usage"]["output_tokens"], 8);
         assert_eq!(result["usage"]["cache_read_input_tokens"], 3);
@@ -1436,7 +1435,7 @@ mod tests {
                             "args": {
                                 "name": "git-commit",
                                 "parameters": {
-                                    "args": ["详细分析内容 编写提交信息 分多次提交代码"]
+                                    "args": ["Phân tích chi tiết, soạn thông điệp commit, chia mã thành nhiều commit"]
                                 }
                             }
                         }
@@ -1465,7 +1464,7 @@ mod tests {
         assert_eq!(result["content"][0]["input"]["skill"], "git-commit");
         assert_eq!(
             result["content"][0]["input"]["args"],
-            "详细分析内容 编写提交信息 分多次提交代码"
+            "Phân tích chi tiết, soạn thông điệp commit, chia mã thành nhiều commit"
         );
         assert!(result["content"][0]["input"].get("name").is_none());
         assert!(result["content"][0]["input"].get("parameters").is_none());

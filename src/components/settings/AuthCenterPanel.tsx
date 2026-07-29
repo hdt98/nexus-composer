@@ -17,14 +17,14 @@ export function AuthCenterPanel() {
               <ShieldCheck className="h-5 w-5 text-primary" />
               <h3 className="text-base font-semibold">
                 {t("settings.authCenter.title", {
-                  defaultValue: "OAuth 认证中心",
+                  defaultValue: "OAuth Authentication Center",
                 })}
               </h3>
             </div>
             <p className="text-sm text-muted-foreground">
               {t("settings.authCenter.description", {
                 defaultValue:
-                  "在 Claude Code 中使用您的其他订阅，请注意合规风险。",
+                  "Use your other subscriptions in Claude Code — please be mindful of compliance risks.",
               })}
             </p>
           </div>
@@ -43,7 +43,7 @@ export function AuthCenterPanel() {
             <h4 className="font-medium">GitHub Copilot</h4>
             <p className="text-sm text-muted-foreground">
               {t("settings.authCenter.copilotDescription", {
-                defaultValue: "管理 GitHub Copilot 账号",
+                defaultValue: "Manage GitHub Copilot accounts",
               })}
             </p>
           </div>
@@ -61,7 +61,7 @@ export function AuthCenterPanel() {
             <h4 className="font-medium">ChatGPT (Codex OAuth)</h4>
             <p className="text-sm text-muted-foreground">
               {t("settings.authCenter.codexOauthDescription", {
-                defaultValue: "管理 ChatGPT 账号",
+                defaultValue: "Manage ChatGPT accounts",
               })}
             </p>
           </div>

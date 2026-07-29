@@ -288,8 +288,8 @@ describe("SettingsPage Component", () => {
 
     renderSettingsPage();
 
-    expect(screen.queryByText("language:zh")).not.toBeInTheDocument();
-    // 加载状态下显示 spinner 而不是表单内容
+    expect(screen.queryByText("settings.title")).not.toBeInTheDocument();
+    // Show a spinner instead of form content while loading.
     expect(document.querySelector(".animate-spin")).toBeInTheDocument();
   });
 
@@ -318,7 +318,7 @@ describe("SettingsPage Component", () => {
 
   it("should render general and advanced tabs and trigger child callbacks", () => {
     const onOpenChange = vi.fn();
-    // 设置 selectedFile 后，按钮显示 settings.import（可执行导入）
+    // After selectedFile is set, the actionable button shows settings.import.
     importExportMock = createImportExportMock({
       selectedFile: "/tmp/config.json",
     });
@@ -343,7 +343,7 @@ describe("SettingsPage Component", () => {
     expect(screen.getByText("webdav-sync-section:none")).toBeInTheDocument();
     fireEvent.click(screen.getByText("settings.advanced.data.title"));
 
-    // 有文件时，点击导入按钮执行 importConfig
+    // With a file selected, the import button invokes importConfig.
     fireEvent.click(screen.getByRole("button", { name: /settings\.import/ }));
     expect(importExportMock.importConfig).toHaveBeenCalled();
 
@@ -352,7 +352,7 @@ describe("SettingsPage Component", () => {
     );
     expect(importExportMock.exportConfig).toHaveBeenCalled();
 
-    // 清除选择按钮
+    // Clear-selection button.
     fireEvent.click(screen.getByRole("button", { name: "common.clear" }));
     expect(importExportMock.clearSelection).toHaveBeenCalled();
   });
@@ -393,7 +393,7 @@ describe("SettingsPage Component", () => {
 
     renderSettingsPage({ onOpenChange });
 
-    // 保存按钮在 advanced tab 中
+    // The save button is in the advanced tab.
     fireEvent.click(screen.getByText("settings.tabAdvanced"));
     fireEvent.click(screen.getByRole("button", { name: /common\.save/ }));
 

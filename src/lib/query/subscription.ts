@@ -40,18 +40,19 @@ export function useSubscriptionQuota(
 
 export interface UseCodexOauthQuotaOptions {
   enabled?: boolean;
-  /** 是否启用自动轮询（5 分钟）与窗口 focus 重取 */
+  /** Whether to poll every five minutes and refetch on window focus. */
   autoQuery?: boolean;
 }
 
 /**
- * Codex OAuth (ChatGPT Plus/Pro 反代) 订阅额度查询 hook
+ * Queries subscription quota through Codex OAuth for ChatGPT Plus/Pro routing.
  *
- * 与 `useSubscriptionQuota` 平行：数据走 nexus-composer 自管的 OAuth token，
- * 而不是 Codex CLI 的 ~/.codex/auth.json。
+ * Parallel to `useSubscriptionQuota`, but uses an OAuth token managed by
+ * nexus-composer rather than Codex CLI's ~/.codex/auth.json.
  *
- * Query key 包含 accountId，多张卡片绑定到同一账号时会自动去重共享请求。
- * accountId 为 null 时使用 "default" 占位，让后端 fallback 到默认账号。
+ * The query key includes accountId so cards bound to the same account
+ * automatically deduplicate and share requests. A null accountId uses the
+ * "default" placeholder so the backend falls back to its default account.
  */
 export function useCodexOauthQuota(
   meta: ProviderMeta | undefined,

@@ -1,12 +1,12 @@
-//! 模型映射模块
+//! Model mapping module.
 //!
-//! 在请求转发前，根据 Provider 配置替换请求中的模型名称
+//! Replaces request model names from provider configuration before forwarding.
 
 use crate::claude_desktop_config::ONE_M_CONTEXT_MARKER;
 use crate::provider::Provider;
 use serde_json::Value;
 
-/// 模型映射配置
+/// Model mapping configuration.
 pub struct ModelMapping {
     pub haiku_model: Option<String>,
     pub sonnet_model: Option<String>,
@@ -16,7 +16,7 @@ pub struct ModelMapping {
 }
 
 impl ModelMapping {
-    /// 从 Provider 配置中提取模型映射
+    /// Extracts model mappings from provider configuration.
     pub fn from_provider(provider: &Provider) -> Self {
         let env = provider.settings_config.get("env");
 
@@ -49,7 +49,7 @@ impl ModelMapping {
         }
     }
 
-    /// 检查是否配置了任何模型映射
+    /// Returns whether any model mapping is configured.
     pub fn has_mapping(&self) -> bool {
         self.haiku_model.is_some()
             || self.sonnet_model.is_some()
@@ -58,17 +58,17 @@ impl ModelMapping {
             || self.default_model.is_some()
     }
 
-    /// 根据原始模型名称获取映射后的模型
+    /// Returns the mapped model for an original model name.
     pub fn map_model(&self, original_model: &str) -> String {
         let model_lower = original_model.to_lowercase();
 
-        // 1. 按模型类型匹配
+        // 1. Match the model tier.
         if model_lower.contains("fable") {
             if let Some(ref m) = self.fable_model {
                 return m.clone();
             }
-            // 未单独配置 fable 档时归入 opus 档，与 Claude Code 官方
-            // 分类器降级方向一致（fable→opus），避免落到 default 失去层级。
+            // Without a Fable mapping, fall back to Opus like Claude Code's classifier
+            // (`fable` to `opus`) rather than losing the tier through the default mapping.
             if let Some(ref m) = self.opus_model {
                 return m.clone();
             }
@@ -89,39 +89,39 @@ impl ModelMapping {
             }
         }
 
-        // 2. 默认模型
+        // 2. Use the default model.
         if let Some(ref m) = self.default_model {
             return m.clone();
         }
 
-        // 3. 无映射，保持原样
+        // 3. Preserve the original when no mapping applies.
         original_model.to_string()
     }
 }
 
-/// 对请求体应用模型映射
+/// Applies model mapping to a request body.
 ///
-/// 返回 (映射后的请求体, 原始模型名, 映射后模型名)
+/// Returns the mapped body, original model name, and mapped model name.
 pub fn apply_model_mapping(
     mut body: Value,
     provider: &Provider,
 ) -> (Value, Option<String>, Option<String>) {
     let mapping = ModelMapping::from_provider(provider);
 
-    // 如果没有配置映射，直接返回
+    // Return unchanged when no mappings are configured.
     if !mapping.has_mapping() {
         let original = body.get("model").and_then(|m| m.as_str()).map(String::from);
         return (body, original, None);
     }
 
-    // 提取原始模型名
+    // Extract the original model name.
     let original_model = body.get("model").and_then(|m| m.as_str()).map(String::from);
 
     if let Some(ref original) = original_model {
         let mapped = mapping.map_model(original);
 
         if mapped != *original {
-            log::debug!("[ModelMapper] 模型映射: {original} → {mapped}");
+            log::debug!("[ModelMapper] Model mapping: {original} → {mapped}");
             body["model"] = serde_json::json!(mapped);
             return (body, Some(original.clone()), Some(mapped));
         }
@@ -130,8 +130,8 @@ pub fn apply_model_mapping(
     (body, original_model, None)
 }
 
-/// Claude Code 通过 `[1M]` 后缀声明 100 万上下文能力；上游 API
-/// 通常不接受这个本地能力标记，转发前需要剥离。
+/// Claude Code uses the `[1M]` suffix to declare one-million-token context support.
+/// Upstream APIs generally reject this local capability marker, so remove it before forwarding.
 pub fn strip_one_m_suffix_for_upstream(model: &str) -> &str {
     let trimmed = model.trim_end();
     let marker = ONE_M_CONTEXT_MARKER.as_bytes();
@@ -151,7 +151,7 @@ pub fn strip_one_m_suffix_for_upstream_from_body(mut body: Value) -> Value {
 
     let stripped = strip_one_m_suffix_for_upstream(model);
     if stripped != model {
-        log::debug!("[ModelMapper] 去除本地 1M 标记: {model} → {stripped}");
+        log::debug!("[ModelMapper] Removed local 1M marker: {model} → {stripped}");
         body["model"] = serde_json::json!(stripped);
     }
     body
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_fable_with_one_m_suffix_mapping() {
-        // Claude Code 实际会发 claude-fable-5[1m] 形态（issue #3980）
+        // Claude Code sends the `claude-fable-5[1m]` form (issue #3980).
         let provider = create_provider_with_mapping();
         let body = json!({"model": "claude-fable-5[1m]"});
         let (result, _, mapped) = apply_model_mapping(body, &provider);
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_thinking_does_not_affect_model_mapping() {
-        // Issue #2081: thinking 参数不应影响模型映射
+        // Issue #2081: thinking parameters must not affect model mapping.
         let provider = create_provider_with_mapping();
         let body = json!({
             "model": "claude-sonnet-4-5",
@@ -295,7 +295,7 @@ mod tests {
 
     #[test]
     fn test_thinking_adaptive_does_not_affect_model_mapping() {
-        // Issue #2081: adaptive thinking 也不应影响模型映射
+        // Issue #2081: adaptive thinking must not affect model mapping either.
         let provider = create_provider_with_mapping();
         let body = json!({
             "model": "claude-sonnet-4-5",

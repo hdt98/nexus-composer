@@ -5,15 +5,15 @@ use std::sync::{OnceLock, RwLock};
 pub struct InitErrorPayload {
     pub path: String,
     pub error: String,
-    /// 错误类别。`Some("db_version_too_new")` 表示数据库版本过新（应用过旧），
-    /// 前端据此展示「升级应用」恢复界面而非直接退出。
+    /// Error category. `Some("db_version_too_new")` means the database is newer than
+    /// the application supports; the renderer shows an upgrade recovery screen instead of exiting.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// 磁盘上数据库的 user_version（数据库版本过新时填充）
+    /// On-disk database user_version, populated when the database is too new.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub db_version: Option<i32>,
-    /// 当前应用支持的 SCHEMA_VERSION（数据库版本过新时填充）。
-    /// 当升级到最新版后 db_version 仍 > supported_version，说明可能由第三方客户端创建。
+    /// SCHEMA_VERSION supported by the current application, populated when the database is too new.
+    /// If db_version remains greater after upgrading, a third-party client may have created it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported_version: Option<i32>,
 }
@@ -36,7 +36,7 @@ pub fn get_init_error() -> Option<InitErrorPayload> {
 }
 
 // ============================================================
-// 迁移结果状态
+// Migration result state.
 // ============================================================
 
 static MIGRATION_SUCCESS: OnceLock<RwLock<bool>> = OnceLock::new();
@@ -51,7 +51,7 @@ pub fn set_migration_success() {
     }
 }
 
-/// 获取并消费迁移成功状态（只返回一次 true，之后返回 false）
+/// Returns and consumes the successful-migration flag: true once, then false.
 pub fn take_migration_success() -> bool {
     if let Ok(mut guard) = migration_cell().write() {
         let val = *guard;
@@ -63,7 +63,7 @@ pub fn take_migration_success() -> bool {
 }
 
 // ============================================================
-// Skills SSOT 迁移结果状态
+// Skills SSOT migration result state.
 // ============================================================
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,7 +94,7 @@ pub fn set_skills_migration_error(error: String) {
     }
 }
 
-/// 获取并消费 Skills 迁移结果（只返回一次 Some，之后返回 None）
+/// Returns and consumes the Skills migration result: Some once, then None.
 pub fn take_skills_migration_result() -> Option<SkillsMigrationPayload> {
     if let Ok(mut guard) = skills_migration_cell().write() {
         guard.take()

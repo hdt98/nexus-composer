@@ -275,7 +275,7 @@ export function HermesFormFields({
     <>
       <div className="space-y-2">
         <FormLabel htmlFor="hermes-api-mode">
-          {t("hermes.form.apiMode", { defaultValue: "API 模式" })}
+          {t("hermes.form.apiMode", { defaultValue: "API Mode" })}
         </FormLabel>
         <Select
           value={apiMode}
@@ -294,14 +294,15 @@ export function HermesFormFields({
         </Select>
         <p className="text-xs text-muted-foreground">
           {t("hermes.form.apiModeHint", {
-            defaultValue: "供应商 API 协议。请根据端点选择正确的协议。",
+            defaultValue:
+              "Provider API protocol. Choose the format that matches your endpoint.",
           })}
         </p>
       </div>
 
       <div className="space-y-2">
         <FormLabel htmlFor="hermes-baseurl">
-          {t("hermes.form.baseUrl", { defaultValue: "API 端点" })}
+          {t("hermes.form.baseUrl", { defaultValue: "API Endpoint" })}
         </FormLabel>
         <Input
           id="hermes-baseurl"
@@ -321,7 +322,7 @@ export function HermesFormFields({
         ) : (
           <p className="text-xs text-muted-foreground">
             {t("hermes.form.baseUrlHint", {
-              defaultValue: "供应商的 API 端点地址。",
+              defaultValue: "The API endpoint URL for this provider.",
             })}
           </p>
         )}
@@ -330,8 +331,9 @@ export function HermesFormFields({
       <ApiKeySection
         value={apiKey}
         onChange={onApiKeyChange}
-        // Hermes 没有 OAuth-only 的免 key 官方供应商：即便是 official 预设
-        // （如 Nous Research）也需用户自填 key，故不让 official 禁用输入框。
+        // Hermes has no OAuth-only official provider without an API key. Even
+        // official presets such as Nous Research require a user-supplied key,
+        // so the official category does not disable this field.
         category={category === "official" ? undefined : category}
         shouldShowLink={shouldShowApiKeyLink}
         websiteUrl={websiteUrl}
@@ -342,7 +344,7 @@ export function HermesFormFields({
       <div className="space-y-3">
         <div className="flex items-center justify-between">
           <FormLabel>
-            {t("hermes.form.models", { defaultValue: "模型列表" })}
+            {t("hermes.form.models", { defaultValue: "Models" })}
           </FormLabel>
           <div className="flex gap-1">
             <Button
@@ -368,7 +370,7 @@ export function HermesFormFields({
               className="h-7 gap-1"
             >
               <Plus className="h-3.5 w-3.5" />
-              {t("hermes.form.addModel", { defaultValue: "添加模型" })}
+              {t("hermes.form.addModel", { defaultValue: "Add model" })}
             </Button>
           </div>
         </div>
@@ -376,7 +378,8 @@ export function HermesFormFields({
         {models.length === 0 ? (
           <p className="text-sm text-muted-foreground py-2">
             {t("hermes.form.noModels", {
-              defaultValue: "暂无模型配置。切换到此供应商时将无默认模型。",
+              defaultValue:
+                "No models configured. Switching to this provider won't change the default model.",
             })}
           </p>
         ) : (
@@ -397,10 +400,10 @@ export function HermesFormFields({
                   >
                     {index === 0
                       ? t("hermes.form.primaryModel", {
-                          defaultValue: "默认模型",
+                          defaultValue: "Default",
                         })
                       : t("hermes.form.fallbackModel", {
-                          defaultValue: "备选模型",
+                          defaultValue: "Alternate",
                         })}
                   </span>
                 </div>
@@ -408,7 +411,7 @@ export function HermesFormFields({
                 <div className="flex items-center gap-2">
                   <div className="flex-1 space-y-1">
                     <label className="text-xs text-muted-foreground">
-                      {t("hermes.form.modelId", { defaultValue: "模型 ID" })}
+                      {t("hermes.form.modelId", { defaultValue: "Model ID" })}
                     </label>
                     <div className="flex gap-1">
                       <Input
@@ -464,7 +467,7 @@ export function HermesFormFields({
                   <div className="flex-1 space-y-1">
                     <label className="text-xs text-muted-foreground">
                       {t("hermes.form.modelName", {
-                        defaultValue: "显示名称",
+                        defaultValue: "Display name",
                       })}
                     </label>
                     <Input
@@ -496,7 +499,7 @@ export function HermesFormFields({
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">
                       {t("hermes.form.contextLength", {
-                        defaultValue: "上下文长度",
+                        defaultValue: "Context length",
                       })}
                     </label>
                     <Input
@@ -521,7 +524,7 @@ export function HermesFormFields({
         <p className="text-xs text-muted-foreground">
           {t("hermes.form.modelsHint", {
             defaultValue:
-              "切换到此供应商时，第一个模型会写入顶层 model.default。",
+              "On switch, the first model is written to top-level model.default.",
           })}
         </p>
       </div>
@@ -534,7 +537,7 @@ export function HermesFormFields({
         <div className="space-y-1">
           <label className="text-xs text-muted-foreground">
             {t("hermes.form.rateLimitDelay", {
-              defaultValue: "请求间隔（秒）",
+              defaultValue: "Rate limit delay (seconds)",
             })}
           </label>
           <Input
@@ -558,7 +561,7 @@ export function HermesFormFields({
           <p className="text-xs text-muted-foreground">
             {t("hermes.form.rateLimitDelayHint", {
               defaultValue:
-                "连续请求间的最小间隔秒数（可选）。留空表示无限制。",
+                "Minimum delay in seconds between consecutive requests (optional). Leave empty for no limit.",
             })}
           </p>
         </div>

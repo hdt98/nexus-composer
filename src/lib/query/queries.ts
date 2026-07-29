@@ -34,7 +34,7 @@ const sortProviders = (
       const timeA = a.createdAt ?? 0;
       const timeB = b.createdAt ?? 0;
       if (timeA === timeB) {
-        return a.name.localeCompare(b.name, "zh-CN");
+        return a.name.localeCompare(b.name, "en-US");
       }
       return timeA - timeB;
     })
@@ -49,7 +49,7 @@ export interface ProvidersQueryData {
 }
 
 export interface UseProvidersQueryOptions {
-  isProxyRunning?: boolean; // 代理服务是否运行中
+  isProxyRunning?: boolean; // Whether the proxy service is running
 }
 
 export const useProvidersQuery = (
@@ -61,8 +61,8 @@ export const useProvidersQuery = (
   return useQuery({
     queryKey: ["providers", appId],
     placeholderData: keepPreviousData,
-    // 当代理服务运行时，每 10 秒刷新一次供应商列表
-    // 这样可以自动反映后端熔断器自动禁用代理目标的变更
+    // While the proxy is running, refresh providers every 10 seconds so
+    // circuit-breaker changes to disabled proxy targets appear automatically.
     refetchInterval: isProxyRunning ? 10000 : false,
     queryFn: async () => {
       let providers: Record<string, Provider> = {};
@@ -71,13 +71,13 @@ export const useProvidersQuery = (
       try {
         providers = await providersApi.getAll(appId);
       } catch (error) {
-        console.error("获取供应商列表失败:", error);
+        console.error("Failed to get providers:", error);
       }
 
       try {
         currentProviderId = await providersApi.getCurrent(appId);
       } catch (error) {
-        console.error("获取当前供应商失败:", error);
+        console.error("Failed to get the current provider:", error);
       }
 
       return {
@@ -97,54 +97,58 @@ export const useSettingsQuery = (): UseQueryResult<Settings> => {
 
 export interface UseUsageQueryOptions {
   enabled?: boolean;
-  autoQueryInterval?: number; // 自动查询间隔（分钟），0 表示禁用
+  autoQueryInterval?: number; // Automatic query interval in minutes; 0 disables it
 }
 
-/** 最近一次成功的用量结果快照（keep-last-good 用）。 */
+/** Most recent successful usage snapshot for keep-last-good behavior. */
 export interface LastGoodUsage {
   data: UsageResult;
-  at: number; // 该成功结果的获取时刻（ms）
+  at: number; // Time when the successful result was obtained, in milliseconds
 }
 
-/** 在最近一次成功后多久内，失败仍继续展示该成功值。 */
-export const KEEP_LAST_GOOD_MS = 10 * 60 * 1000; // 10 分钟
+/** How long failures may continue showing the last successful value. */
+export const KEEP_LAST_GOOD_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
- * 判断一次用量查询失败是否属于"瞬时/网络类"（可被 keep-last-good 短暂掩盖）。
+ * Determine whether a usage-query failure is transient or network-related and
+ * may therefore be hidden briefly by keep-last-good.
  *
- * 仅瞬时失败才允许继续展示上一次成功；**确定性失败**（鉴权失败、空 API Key、
- * 未知供应商、4xx、脚本/解析错误等）必须立即透出——用户改/删凭据后要马上看到，
- * 否则会一直显示过期额度直到窗口结束。
+ * Only transient failures may preserve the last successful value. Deterministic
+ * failures such as authentication errors, empty API keys, unknown providers,
+ * 4xx responses, or script/parse errors must surface immediately so credential
+ * changes do not leave stale quota values visible until the window expires.
  *
- * 采用**白名单**：只认后端稳定的网络类错误前缀 + HTTP 5xx，失败安全——任何未识别
- * 的错误一律按"非瞬时"立即透出，绝不误掩盖确定性失败。需与后端错误文案保持同步：
- * - 原生 balance/coding_plan/subscription：reqwest send 失败/超时 → `"Network error: …"`；
- *   上游非 2xx → `"API error (HTTP <code>…)"`
- * - JS 脚本 usage_script：`request_failed` → "请求失败/Request failed"、
- *   `read_response_failed` → "读取响应失败/Failed to read response"（仅 zh/en 两种本地化）；
- *   上游非 2xx → `"HTTP <code> …"`
+ * This uses an allowlist of stable backend network-error prefixes and HTTP 5xx
+ * responses. Unrecognized errors fail safely as non-transient and surface
+ * immediately. Keep these cases aligned with backend-owned English errors:
+ * - Native balance/coding_plan/subscription request failures and timeouts use
+ *   `"Network error: …"`; non-2xx upstream responses use
+ *   `"API error (HTTP <code>…)"`.
+ * - JavaScript usage_script `request_failed` uses "Request failed" and
+ *   `read_response_failed` uses "Failed to read response"; non-2xx upstream
+ *   responses use `"HTTP <code> …"`.
  *
- * HTTP 状态：**5xx**（服务端错误，通常瞬时）归为 transient；**4xx**（鉴权/客户端
- * 错误，如 401/403/404/429）保持确定性，立即透出。
+ * HTTP 5xx server errors are usually transient. HTTP 4xx authentication or
+ * client errors, including 401/403/404/429, remain deterministic and surface
+ * immediately.
  */
 export function isTransientUsageError(result: UsageResult): boolean {
   if (result.success) return false;
   const e = result.error?.toLowerCase() ?? "";
   if (!e) return false;
 
-  // 网络类（send 失败/超时/读取响应失败）
+  // Network failures: send errors, timeouts, and response-read errors.
   if (
-    e.includes("network error") || // 原生路径
-    e.includes("request failed") || // JS 脚本 (en)
-    e.includes("请求失败") || // JS 脚本 (zh)
-    e.includes("failed to read response") || // JS 脚本 (en)
-    e.includes("读取响应失败") // JS 脚本 (zh)
+    e.includes("network error") || // Native path
+    e.includes("request failed") || // JavaScript usage script
+    e.includes("failed to read response") // JavaScript usage script
   ) {
     return true;
   }
 
-  // HTTP 状态码：5xx 视为瞬时，4xx 视为确定性。错误文案里第一处 "HTTP <code>" 即为
-  // 上游状态码（原生 "API error (HTTP 500…)"、JS 脚本 "HTTP 500 …"）。
+  // Treat 5xx as transient and 4xx as deterministic. The first "HTTP <code>"
+  // in the error is the upstream status, for example native
+  // "API error (HTTP 500…)" or JavaScript "HTTP 500 …".
   const httpMatch = e.match(/http\s+(\d{3})/);
   if (httpMatch) {
     const status = Number(httpMatch[1]);
@@ -155,19 +159,24 @@ export function isTransientUsageError(result: UsageResult): boolean {
 }
 
 /**
- * Keep-last-good 的纯决策函数（无 ref、无时钟，`now` 注入以便测试）。
+ * Pure keep-last-good decision function. It has no ref or clock; `now` is
+ * injected for tests.
  *
- * 用量端点面向跨境/第三方，单次网络抖动会让后端返回 `Ok(success:false)` 当作"新数据"
- * 覆盖掉上一次成功，使卡片瞬间翻红——这是"一会成功一会失败"观感的主因。
- * 策略：当失败是**瞬时/网络类**（见 [`isTransientUsageError`]）且最近一次成功在
- * `keepMs` 内时，不抹掉它，继续展示该成功值，并把 `lastQueriedAt` 指向该成功的时刻
- * （相对时间自然走到"10 分钟前"后过期翻红）；超出窗口、或从无成功记录时照常展示失败。
+ * Cross-region and third-party endpoints can return `Ok(success:false)` after
+ * a brief network interruption. Treating that as new data immediately replaces
+ * a successful value and makes the card flicker between success and failure.
+ * When a failure is transient (see [`isTransientUsageError`]) and the latest
+ * success is within `keepMs`, keep displaying that success and point
+ * `lastQueriedAt` to its timestamp. Outside the window, or without a previous
+ * success, display the failure normally.
  *
- * **确定性失败**（鉴权/空 key/未知供应商/4xx 等）不仅立即透出，还会**清空 `lastGood`**：
- * 旧成功快照已不可信，否则随后一次网络抖动会把"配置/鉴权已失效"的旧额度重新复活。
+ * Deterministic failures such as authentication errors, empty keys, unknown
+ * providers, and 4xx responses also clear `lastGood`. The old snapshot is no
+ * longer trustworthy and must not reappear after a later network interruption.
  *
- * 注：会 reject 的传输层失败（Copilot/DB）react-query 本就保留上次 `data`，这里
- * 主要修的是 `Ok(success:false)` 这条覆盖路径。
+ * React Query already retains previous data for rejected transport failures
+ * such as Copilot or database errors. This primarily handles the
+ * `Ok(success:false)` overwrite path.
  */
 export function resolveDisplayUsage(
   raw: UsageResult | undefined,
@@ -182,11 +191,11 @@ export function resolveDisplayUsage(
 } {
   let lastGood = prevLastGood;
   if (raw?.success) {
-    // 成功：刷新快照
+    // Refresh the snapshot after success.
     lastGood = { data: raw, at: dataUpdatedAt || now };
   } else if (raw && !isTransientUsageError(raw)) {
-    // 确定性失败（鉴权/空 key/未知供应商/4xx 等）：旧成功快照已不可信，丢弃它，
-    // 避免后续一次网络抖动把"配置/鉴权已失效"的旧额度重新复活。
+    // A deterministic failure makes the previous snapshot untrustworthy.
+    // Discard it so a later network interruption cannot revive invalid quota.
     lastGood = null;
   }
 
@@ -195,7 +204,7 @@ export function resolveDisplayUsage(
   if (
     raw &&
     !raw.success &&
-    isTransientUsageError(raw) && // 仅瞬时/网络类失败才掩盖；确定性失败立即透出
+    isTransientUsageError(raw) && // Hide only transient failures; deterministic ones surface immediately.
     lastGood &&
     now - lastGood.at < keepMs
   ) {
@@ -213,12 +222,12 @@ export const useUsageQuery = (
 ) => {
   const { enabled = true, autoQueryInterval = 0 } = options || {};
 
-  // 计算 staleTime：如果有自动刷新间隔，使用该间隔；否则默认 5 分钟
-  // 这样可以避免切换 app 页面时重复触发查询
+  // Match staleTime to the automatic refresh interval, or default to five
+  // minutes, to avoid duplicate queries when switching application pages.
   const staleTime =
     autoQueryInterval > 0
-      ? autoQueryInterval * 60 * 1000 // 与刷新间隔保持一致
-      : 5 * 60 * 1000; // 默认 5 分钟
+      ? autoQueryInterval * 60 * 1000 // Match the refresh interval.
+      : 5 * 60 * 1000; // Default to five minutes.
 
   const query = useQuery<UsageResult>({
     queryKey: usageKeys.script(providerId, appId),
@@ -226,22 +235,24 @@ export const useUsageQuery = (
     enabled: enabled && !!providerId,
     refetchInterval:
       autoQueryInterval > 0
-        ? Math.max(autoQueryInterval, 1) * 60 * 1000 // 最小1分钟
+        ? Math.max(autoQueryInterval, 1) * 60 * 1000 // Minimum one minute
         : false,
-    refetchIntervalInBackground: true, // 后台也继续定时查询
+    refetchIntervalInBackground: true, // Continue scheduled queries in the background.
     refetchOnWindowFocus: false,
-    // 用量查询面向跨境/第三方端点，单次网络抖动或瞬时 5xx 不应直接判失败。
-    // 重试一次以吸收瞬时故障（与 useSubscriptionQuota 的 retry:1 保持一致）。
-    // 注意：原生 balance/coding_plan 路径把网络错误折叠成 Ok(success:false)，
-    // 这类不会触发 react-query 重试；本项主要覆盖会 reject 的传输层失败（Copilot/DB 等）。
+    // Cross-region and third-party usage endpoints should tolerate one brief
+    // network interruption or transient 5xx. Retry once, matching
+    // useSubscriptionQuota. Native balance/coding_plan paths fold network
+    // errors into Ok(success:false), so this primarily covers rejected
+    // transport failures such as Copilot or database errors.
     retry: 1,
     retryDelay: 1500,
-    staleTime, // 使用动态计算的缓存时间
-    gcTime: 10 * 60 * 1000, // 缓存保留 10 分钟（组件卸载后）
+    staleTime, // Dynamically calculated cache freshness
+    gcTime: 10 * 60 * 1000, // Retain cache for 10 minutes after unmount.
   });
 
-  // Keep-last-good：失败时在 10 分钟窗口内继续展示上一次成功值（见 resolveDisplayUsage）。
-  // 每个 hook 实例各持一份 ref（按卡片维度）；ref 写入是幂等的（同份成功重复写无副作用）。
+  // Keep displaying the latest success for failures within the 10-minute
+  // keep-last-good window (see resolveDisplayUsage). Each hook instance owns a
+  // card-scoped ref, and repeated writes of the same success are idempotent.
   const lastGoodRef = useRef<LastGoodUsage | null>(null);
   const { data, lastQueriedAt, lastGood } = resolveDisplayUsage(
     query.data,

@@ -4,13 +4,16 @@ import { useQueryClient } from "@tanstack/react-query";
 import { usageKeys } from "@/lib/query/usage";
 
 /**
- * 监听后端 `usage-log-recorded` 事件，收到后立刻 invalidate 所有
- * UsageDashboard 相关查询，让用户无需等待 30s 轮询周期。
+ * Listens for the backend `usage-log-recorded` event and immediately
+ * invalidates UsageDashboard queries so users do not wait for the 30-second
+ * polling interval.
  *
- * 后端在 `proxy_request_logs` 写入新行时会 emit 该事件（200ms 防抖合并），
- * 来源覆盖代理日志、Claude/Codex/Gemini 会话同步、启动归档。
+ * The backend emits this event, debounced over 200 ms, when a row is written to
+ * `proxy_request_logs`. Sources include routing logs, Claude/Codex/Gemini
+ * session synchronization, and startup archiving.
  *
- * 该 hook 只挂在 UsageDashboard 上，避免在主界面其他位置无意义触发。
+ * This hook is mounted only in UsageDashboard to avoid irrelevant refreshes
+ * elsewhere in the main interface.
  */
 export function useUsageEventBridge() {
   const queryClient = useQueryClient();
@@ -21,8 +24,8 @@ export function useUsageEventBridge() {
 
     (async () => {
       const off = await listen("usage-log-recorded", () => {
-        // invalidate 整个 usage 命名空间：summary / trends / providerStats /
-        // modelStats / logs 全部跟着重拉
+        // Invalidate the entire usage namespace so summary, trends,
+        // providerStats, modelStats, and logs all refetch.
         queryClient.invalidateQueries({ queryKey: usageKeys.all });
       });
 

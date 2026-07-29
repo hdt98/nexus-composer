@@ -32,9 +32,10 @@ import {
 import { formatUsageDataSummary } from "@/utils/usageDisplay";
 
 /**
- * 火山引擎账号级 AccessKey 的密钥管理页（IAM）。
- * 用量查询走控制面 OpenAPI，需要 AK/SK 签名，与推理 API Key 是两套凭据，
- * 直接给用户一个可点击的直达地址，省得在控制台里翻菜单。
+ * Volcengine IAM page for account-level AccessKey management.
+ * Usage queries call the control-plane OpenAPI with AK/SK signatures, which
+ * are separate from inference API keys. Provide a direct link so users do not
+ * have to navigate the console menus.
  */
 const VOLCENGINE_KEY_CONSOLE_URL =
   "https://console.volcengine.com/iam/keymanage";
@@ -47,7 +48,7 @@ interface UsageScriptModalProps {
   onSave: (script: UsageScript) => void;
 }
 
-// 生成预设模板的函数（支持国际化）
+// Generate localized preset templates.
 const generatePresetTemplates = (
   t: (key: string) => string,
 ): Record<string, string> => ({
@@ -111,20 +112,20 @@ const generatePresetTemplates = (
   },
 })`,
 
-  // GitHub Copilot 模板不需要脚本，使用专用 API
+  // The GitHub Copilot template uses a dedicated API and needs no script.
   [TEMPLATE_TYPES.GITHUB_COPILOT]: "",
 
-  // Coding Plan 模板不需要脚本，使用专用 Rust 查询
+  // The Coding Plan template uses a dedicated Rust query and needs no script.
   [TEMPLATE_TYPES.TOKEN_PLAN]: "",
 
-  // 官方余额查询模板不需要脚本，使用专用 Rust 查询
+  // The official balance template uses a dedicated Rust query and needs no script.
   [TEMPLATE_TYPES.BALANCE]: "",
 
-  // 官方订阅额度查询不需要脚本，使用 CLI/OAuth 凭据调用官方 API
+  // Official subscription quotas use CLI/OAuth credentials and the official API.
   [TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION]: "",
 });
 
-// 模板名称国际化键映射
+// Localization keys for template names
 const TEMPLATE_NAME_KEYS: Record<string, string> = {
   [TEMPLATE_TYPES.CUSTOM]: "usageScript.templateCustom",
   [TEMPLATE_TYPES.GENERAL]: "usageScript.templateGeneral",
@@ -136,7 +137,7 @@ const TEMPLATE_NAME_KEYS: Record<string, string> = {
     "usageScript.templateOfficialSubscription",
 };
 
-/** 官方余额查询供应商检测 */
+/** Providers that support official balance queries */
 const BALANCE_PROVIDERS = [
   { id: "deepseek", label: "DeepSeek", pattern: /api\.deepseek\.com/i },
   { id: "stepfun", label: "StepFun", pattern: /api\.stepfun\.(ai|com)/i },
@@ -149,7 +150,7 @@ const BALANCE_PROVIDERS = [
   { id: "novita", label: "Novita AI", pattern: /api\.novita\.ai/i },
 ] as const;
 
-/** 根据 Base URL 自动检测余额查询供应商 */
+/** Detect a balance-query provider from its base URL. */
 function detectBalanceProvider(baseUrl: string | undefined): boolean {
   if (!baseUrl) return false;
   return BALANCE_PROVIDERS.some((bp) => bp.pattern.test(baseUrl));
@@ -207,10 +208,10 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   const [showUsageConfirm, setShowUsageConfirm] = useState(false);
   const isDarkMode = useDarkMode();
 
-  // 生成带国际化的预设模板
+  // Generate localized preset templates.
   const PRESET_TEMPLATES = generatePresetTemplates(t);
 
-  // 从 provider 的 settingsConfig 中提取 API Key 和 Base URL
+  // Extract the API key and base URL from the provider settings.
   const getProviderCredentials = (): {
     apiKey: string | undefined;
     baseUrl: string | undefined;
@@ -225,7 +226,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         const config = provider.settingsConfig;
         if (!config) return { apiKey: undefined, baseUrl: undefined };
 
-        // 处理不同应用的配置格式
+        // Handle each application's configuration format.
         if (appId === "claude" || appId === "claude-desktop") {
           // Claude / Claude Desktop: { env: { ANTHROPIC_AUTH_TOKEN | ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL } }
           // Key fallbacks mirror the backend resolver (Provider::resolve_usage_credentials).
@@ -260,19 +261,19 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
             baseUrl: env.GOOGLE_GEMINI_BASE_URL,
           };
         } else if (appId === "hermes") {
-          // Hermes: settingsConfig 顶层扁平（snake_case，对应 config.yaml）
+          // Hermes: flat top-level snake_case fields matching config.yaml.
           return {
             apiKey: (config as any).api_key,
             baseUrl: (config as any).base_url,
           };
         } else if (appId === "openclaw") {
-          // OpenClaw: settingsConfig 顶层扁平（camelCase，对应 openclaw.json）
+          // OpenClaw: flat top-level camelCase fields matching openclaw.json.
           return {
             apiKey: (config as any).apiKey,
             baseUrl: (config as any).baseUrl,
           };
         } else if (appId === "opencode") {
-          // OpenCode (OMO): 凭据嵌在 options.{baseURL, apiKey}（SDK options 对象）
+          // OpenCode (OMO): credentials live in the SDK options object.
           const options = (config as any).options || {};
           return {
             apiKey: options.apiKey,
@@ -307,7 +308,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
       ) {
         return createUsageScript();
       }
-      // 已有配置：如果是 coding_plan 但没有 codingPlanProvider，自动检测填充
+      // Infer a missing codingPlanProvider in an existing Coding Plan config.
       if (
         normalizedScript.templateType === TEMPLATE_TYPES.TOKEN_PLAN &&
         !normalizedScript.codingPlanProvider
@@ -341,57 +342,47 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
 
   const [testing, setTesting] = useState(false);
 
-  // {{apiKey}}/{{baseUrl}} 实际注入值，镜像后端 resolve_script_credentials 的
-  // 优先级：脚本配置中的显式非空值优先（旧配置可能携带），否则回退供应商凭据。
+  // Effective {{apiKey}}/{{baseUrl}} values mirror the backend
+  // resolve_script_credentials precedence: prefer explicit non-empty script
+  // values from legacy configs, then fall back to provider credentials.
   const effectiveScriptCredentials = {
     apiKey: script.apiKey?.trim() || providerCredentials.apiKey,
     baseUrl:
       script.baseUrl?.trim().replace(/\/+$/, "") || providerCredentials.baseUrl,
   };
 
-  // 🔧 失焦时的验证（严格）- 仅确保有效整数
+  // Validate on blur and normalize to an integer.
   const validateTimeout = (value: string): number => {
     const num = Number(value);
     if (isNaN(num) || value.trim() === "") {
       return 10;
     }
     if (!Number.isInteger(num)) {
-      toast.warning(
-        t("usageScript.timeoutMustBeInteger") || "超时时间必须为整数",
-      );
+      toast.warning(t("usageScript.timeoutMustBeInteger"));
     }
     if (num < 0) {
-      toast.error(
-        t("usageScript.timeoutCannotBeNegative") || "超时时间不能为负数",
-      );
+      toast.error(t("usageScript.timeoutCannotBeNegative"));
       return 10;
     }
     return Math.floor(num);
   };
 
-  // 🔧 失焦时的验证（严格）- 自动查询间隔
+  // Validate and clamp the automatic query interval on blur.
   const validateAndClampInterval = (value: string): number => {
     const num = Number(value);
     if (isNaN(num) || value.trim() === "") {
       return 0;
     }
     if (!Number.isInteger(num)) {
-      toast.warning(
-        t("usageScript.intervalMustBeInteger") || "自动查询间隔必须为整数",
-      );
+      toast.warning(t("usageScript.intervalMustBeInteger"));
     }
     if (num < 0) {
-      toast.error(
-        t("usageScript.intervalCannotBeNegative") || "自动查询间隔不能为负数",
-      );
+      toast.error(t("usageScript.intervalCannotBeNegative"));
       return 0;
     }
     const clamped = Math.max(0, Math.min(1440, Math.floor(num)));
     if (clamped !== num && num > 0) {
-      toast.info(
-        t("usageScript.intervalAdjusted", { value: clamped }) ||
-          `自动查询间隔已调整为 ${clamped} 分钟`,
-      );
+      toast.info(t("usageScript.intervalAdjusted", { value: clamped }));
     }
     return clamped;
   };
@@ -399,11 +390,11 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(
     () => {
       const existingScript = provider.meta?.usage_script;
-      // Copilot 供应商默认使用 Copilot 模板
+      // Copilot providers default to the Copilot template.
       if (provider.meta?.providerType === PROVIDER_TYPES.GITHUB_COPILOT) {
         return TEMPLATE_TYPES.GITHUB_COPILOT;
       }
-      // 优先使用保存的 templateType
+      // Prefer the saved template type.
       if (
         existingScript?.templateType &&
         (!isOfficialSubscription ||
@@ -411,28 +402,29 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
       ) {
         return existingScript.templateType as string;
       }
-      // 官方 CLI/OAuth 供应商默认使用官方订阅额度模板，但开关默认关闭
+      // Official CLI/OAuth providers default to the official subscription
+      // template, while usage querying itself remains disabled by default.
       if (isOfficialSubscription) {
         return TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
       }
-      // 向后兼容：根据字段推断模板类型
-      // 检测 NEW_API 模板（有 accessToken 或 userId）
+      // Infer legacy template types from their credential fields.
+      // NEW_API templates contain accessToken or userId.
       if (existingScript?.accessToken || existingScript?.userId) {
         return TEMPLATE_TYPES.NEW_API;
       }
-      // 检测 GENERAL 模板（有 apiKey 或 baseUrl）
+      // GENERAL templates contain apiKey or baseUrl.
       if (existingScript?.apiKey || existingScript?.baseUrl) {
         return TEMPLATE_TYPES.GENERAL;
       }
-      // 新配置：如果 URL 匹配 Coding Plan 供应商，自动选择 Coding Plan 模板
+      // Select Coding Plan automatically when the URL matches a known provider.
       if (detectCodingPlanProvider(providerCredentials.baseUrl)) {
         return TEMPLATE_TYPES.TOKEN_PLAN;
       }
-      // 新配置：如果 URL 匹配官方余额查询供应商，自动选择 Balance 模板
+      // Select Balance automatically when the URL supports official balance queries.
       if (detectBalanceProvider(providerCredentials.baseUrl)) {
         return TEMPLATE_TYPES.BALANCE;
       }
-      // 默认使用 GENERAL（与默认代码模板一致）
+      // Default to GENERAL to match the initial code template.
       return TEMPLATE_TYPES.GENERAL;
     },
   );
@@ -463,7 +455,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   };
 
   const handleSave = () => {
-    // 专用模板不需要脚本验证
+    // Native templates do not require script validation.
     if (!NATIVE_USAGE_TEMPLATES.has(selectedTemplate || "")) {
       if (script.enabled && !script.code.trim()) {
         toast.error(t("usageScript.scriptEmpty"));
@@ -474,7 +466,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         return;
       }
     }
-    // 保存时记录当前选择的模板类型
+    // Persist the selected template type.
     const scriptWithTemplate = {
       ...script,
       templateType: selectedTemplate as
@@ -494,7 +486,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
   const handleTest = async () => {
     setTesting(true);
     try {
-      // 官方订阅额度模板使用 CLI/OAuth 凭据和官方 API
+      // Official subscription quotas use CLI/OAuth credentials and the official API.
       if (selectedTemplate === TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION) {
         const { subscriptionApi } = await import("@/lib/api/subscription");
         const quota = await subscriptionApi.getQuota(appId);
@@ -516,7 +508,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         return;
       }
 
-      // 官方余额查询模板使用专用 API
+      // Official balance queries use a dedicated API.
       if (selectedTemplate === TEMPLATE_TYPES.BALANCE) {
         const baseUrl = providerCredentials.baseUrl ?? "";
         const apiKey = providerCredentials.apiKey ?? "";
@@ -546,10 +538,11 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         return;
       }
 
-      // Coding Plan 模板使用专用 API
+      // Coding Plan templates use a dedicated API.
       if (selectedTemplate === TEMPLATE_TYPES.TOKEN_PLAN) {
-        // ZenMux 手填 baseUrl/apiKey；火山是 native 供应商，baseUrl 走推理配置，
-        // 另用账号 AK/SK 签名查询控制面用量。
+        // ZenMux accepts manually entered baseUrl/apiKey values. Volcengine is
+        // native: its inference config supplies baseUrl, while account AK/SK
+        // credentials sign control-plane usage queries.
         const isZenMux = script.codingPlanProvider === "zenmux";
         const isVolcengine = script.codingPlanProvider === "volcengine";
         const baseUrl = isZenMux
@@ -573,7 +566,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
             duration: 3000,
             closeButton: true,
           });
-          // 将结果转换为 UsageResult 格式更新缓存
+          // Convert the quota response to UsageResult before updating the cache.
           const usageData = quota.tiers.map((tier) => ({
             planName: tier.name,
             remaining: 100 - tier.utilization,
@@ -594,7 +587,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
         return;
       }
 
-      // Copilot 模板使用专用 API
+      // Copilot templates use a dedicated API.
       if (selectedTemplate === TEMPLATE_TYPES.GITHUB_COPILOT) {
         const accountId = resolveManagedAccountId(
           provider.meta,
@@ -610,7 +603,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           duration: 3000,
           closeButton: true,
         });
-        // 更新缓存
+        // Update the usage cache.
         queryClient.setQueryData(["usage", provider.id, appId], {
           success: true,
           data: [
@@ -652,7 +645,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           closeButton: true,
         });
 
-        // 🔧 测试成功后，更新主界面列表的用量查询缓存
+        // Update the main-page usage cache after a successful test.
         queryClient.setQueryData(["usage", provider.id, appId], result);
       } else {
         toast.error(
@@ -703,9 +696,10 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
     const preset = PRESET_TEMPLATES[presetName];
     if (preset !== undefined) {
       if (presetName === TEMPLATE_TYPES.CUSTOM) {
-        // 自定义模板没有凭证输入框：清空显式覆盖值后，测试与真实查询
-        // 都会在后端回退到供应商配置（Provider::resolve_usage_credentials），
-        // 与下方“支持的变量”区域展示的 {{apiKey}}/{{baseUrl}} 取值一致。
+        // Custom templates have no credential fields. Clear explicit overrides
+        // so tests and real queries both fall back through
+        // Provider::resolve_usage_credentials, matching the {{apiKey}} and
+        // {{baseUrl}} values shown in Supported Variables below.
         setScript({
           ...script,
           code: preset,
@@ -728,7 +722,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           apiKey: undefined,
         });
       } else if (presetName === TEMPLATE_TYPES.GITHUB_COPILOT) {
-        // Copilot 模板不需要脚本和凭证，使用专用 API
+        // Copilot uses a dedicated API and needs no script or credentials here.
         setScript({
           ...script,
           code: "",
@@ -738,12 +732,13 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           userId: undefined,
         });
       } else if (presetName === TEMPLATE_TYPES.TOKEN_PLAN) {
-        // Coding Plan 模板不需要脚本，使用 Rust 原生查询
+        // Coding Plan uses a native Rust query and needs no script.
         const autoDetected = detectCodingPlanProvider(
           providerCredentials.baseUrl,
         );
         const provider = script.codingPlanProvider || autoDetected || "kimi";
-        // ZenMux 保留手填 baseUrl/apiKey；火山保留账号 AK/SK；其余清除。
+        // Keep manual baseUrl/apiKey values for ZenMux and account AK/SK for
+        // Volcengine; clear credentials that do not apply.
         const isZenMux = provider === "zenmux";
         const isVolcengine = provider === "volcengine";
         setScript({
@@ -758,7 +753,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           codingPlanProvider: provider,
         });
       } else if (presetName === TEMPLATE_TYPES.BALANCE) {
-        // 官方余额查询模板不需要脚本，使用 Rust 原生查询
+        // Official balance queries use native Rust and need no script.
         setScript({
           ...script,
           code: "",
@@ -768,7 +763,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
           userId: undefined,
         });
       } else if (presetName === TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION) {
-        // 官方订阅额度查询不需要脚本，使用 CLI/OAuth 凭据
+        // Official subscription queries use CLI/OAuth credentials and need no script.
         setScript({
           ...script,
           code: "",
@@ -854,7 +849,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
 
       {script.enabled && (
         <div className="space-y-6">
-          {/* 预设模板选择 */}
+          {/* Preset template selection */}
           <div className="space-y-4 glass rounded-xl border border-white/10 p-6">
             <Label className="text-base font-medium">
               {t("usageScript.presetTemplate")}
@@ -864,15 +859,15 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                 .filter((name) => {
                   const isCopilotProvider =
                     provider.meta?.providerType === "github_copilot";
-                  // Copilot 供应商只显示 copilot 模板
+                  // Copilot providers expose only the Copilot template.
                   if (isCopilotProvider) {
                     return name === TEMPLATE_TYPES.GITHUB_COPILOT;
                   }
-                  // 官方 CLI/OAuth 供应商只显示官方订阅额度模板
+                  // Official CLI/OAuth providers expose only the official subscription template.
                   if (isOfficialSubscription) {
                     return name === TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION;
                   }
-                  // 非 Copilot 供应商不显示 copilot 模板
+                  // Other providers do not expose the Copilot template.
                   return (
                     name !== TEMPLATE_TYPES.GITHUB_COPILOT &&
                     name !== TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION
@@ -900,7 +895,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                 })}
             </div>
 
-            {/* 自定义模式：变量提示和具体值 */}
+            {/* Custom mode: supported variables and their resolved values */}
             {selectedTemplate === TEMPLATE_TYPES.CUSTOM && (
               <div className="space-y-2 border-t border-white/10 pt-3">
                 <h4 className="text-sm font-medium text-foreground">
@@ -919,7 +914,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                       </code>
                     ) : (
                       <span className="text-muted-foreground/50 italic">
-                        {t("common.notSet") || "未设置"}
+                        {t("common.notSet")}
                       </span>
                     )}
                   </div>
@@ -960,7 +955,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                       </>
                     ) : (
                       <span className="text-muted-foreground/50 italic">
-                        {t("common.notSet") || "未设置"}
+                        {t("common.notSet")}
                       </span>
                     )}
                   </div>
@@ -968,7 +963,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
               </div>
             )}
 
-            {/* Copilot 模式：自动认证提示 */}
+            {/* Copilot mode: automatic authentication guidance */}
             {selectedTemplate === TEMPLATE_TYPES.GITHUB_COPILOT && (
               <div className="space-y-2 border-t border-white/10 pt-3">
                 <p className="text-sm text-muted-foreground">
@@ -977,7 +972,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
               </div>
             )}
 
-            {/* 官方余额查询模式：自动提示 */}
+            {/* Official balance mode guidance */}
             {selectedTemplate === TEMPLATE_TYPES.BALANCE && (
               <div className="space-y-3 border-t border-white/10 pt-3">
                 <p className="text-sm text-muted-foreground">
@@ -998,7 +993,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
               </div>
             )}
 
-            {/* 官方订阅额度模式：自动提示 */}
+            {/* Official subscription quota guidance */}
             {selectedTemplate === TEMPLATE_TYPES.OFFICIAL_SUBSCRIPTION && (
               <div className="space-y-2 border-t border-white/10 pt-3">
                 <p className="text-sm text-muted-foreground">
@@ -1007,7 +1002,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
               </div>
             )}
 
-            {/* Coding Plan 模式：供应商选择 */}
+            {/* Coding Plan mode: provider selection */}
             {selectedTemplate === TEMPLATE_TYPES.TOKEN_PLAN && (
               <div className="space-y-3 border-t border-white/10 pt-3">
                 <p className="text-sm text-muted-foreground">
@@ -1044,7 +1039,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
               </div>
             )}
 
-            {/* 凭证配置 */}
+            {/* Credential configuration */}
             {shouldShowCredentialsConfig && (
               <div className="space-y-4">
                 <div className="flex items-start justify-between">
@@ -1266,7 +1261,8 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
               </div>
             )}
 
-            {/* 火山方舟：控制面用量查询需账号 AK/SK（与推理 Key 是两套凭据） */}
+            {/* Volcengine Ark control-plane usage queries require account AK/SK
+                credentials, separate from the inference key. */}
             {selectedTemplate === TEMPLATE_TYPES.TOKEN_PLAN &&
               script.codingPlanProvider === "volcengine" && (
                 <div className="space-y-4">
@@ -1356,9 +1352,9 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                 </div>
               )}
 
-            {/* 通用配置（始终显示） */}
+            {/* Common configuration, always shown */}
             <div className="grid gap-4 md:grid-cols-2 pt-4 border-t border-white/10">
-              {/* 超时时间 */}
+              {/* Timeout */}
               <div className="space-y-2">
                 <Label htmlFor="usage-timeout">
                   {t("usageScript.timeoutSeconds")}
@@ -1387,7 +1383,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
                 />
               </div>
 
-              {/* 自动查询间隔 */}
+              {/* Automatic query interval */}
               <div className="space-y-2">
                 <Label htmlFor="usage-interval">
                   {t("usageScript.autoIntervalMinutes")}
@@ -1423,7 +1419,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
             </div>
           </div>
 
-          {/* 提取器代码 - 专用模板不需要 */}
+          {/* Extractor code is unnecessary for native templates. */}
           {!NATIVE_USAGE_TEMPLATES.has(selectedTemplate || "") && (
             <div className="space-y-4 glass rounded-xl border border-white/10 p-6">
               <div className="flex items-center justify-between">
@@ -1448,7 +1444,7 @@ const UsageScriptModal: React.FC<UsageScriptModalProps> = ({
             </div>
           )}
 
-          {/* 帮助信息 - 专用模板不需要 */}
+          {/* Help content is unnecessary for native templates. */}
           {!NATIVE_USAGE_TEMPLATES.has(selectedTemplate || "") && (
             <div className="glass rounded-xl border border-white/10 p-6 text-sm text-foreground/90">
               <h4 className="font-medium mb-2">

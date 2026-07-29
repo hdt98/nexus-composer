@@ -61,7 +61,7 @@ export function ProviderAdvancedConfig({
             <FlaskConical className="h-4 w-4 text-muted-foreground" />
             <span className="font-medium">
               {t("providerAdvanced.testConfig", {
-                defaultValue: "连通检测配置",
+                defaultValue: "Model Test Config",
               })}
             </span>
           </div>
@@ -75,7 +75,7 @@ export function ProviderAdvancedConfig({
                 className="text-sm text-muted-foreground"
               >
                 {t("providerAdvanced.useCustomConfig", {
-                  defaultValue: "使用单独配置",
+                  defaultValue: "Use separate config",
                 })}
               </Label>
               <Switch
@@ -106,14 +106,14 @@ export function ProviderAdvancedConfig({
             <p className="text-sm text-muted-foreground">
               {t("providerAdvanced.testConfigDesc", {
                 defaultValue:
-                  "为此供应商配置单独的连通检测参数（超时/阈值/重试），不启用时使用全局配置。",
+                  "Configure separate model testing parameters for this provider. Uses global settings when disabled.",
               })}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="test-timeout">
                   {t("providerAdvanced.timeoutSecs", {
-                    defaultValue: "超时时间（秒）",
+                    defaultValue: "Timeout (seconds)",
                   })}
                 </Label>
                 <Input
@@ -137,7 +137,7 @@ export function ProviderAdvancedConfig({
               <div className="space-y-2">
                 <Label htmlFor="degraded-threshold">
                   {t("providerAdvanced.degradedThreshold", {
-                    defaultValue: "降级阈值（毫秒）",
+                    defaultValue: "Degraded Threshold (ms)",
                   })}
                 </Label>
                 <Input
@@ -161,7 +161,7 @@ export function ProviderAdvancedConfig({
               <div className="space-y-2">
                 <Label htmlFor="max-retries">
                   {t("providerAdvanced.maxRetries", {
-                    defaultValue: "最大重试次数",
+                    defaultValue: "Max Retries",
                   })}
                 </Label>
                 <Input
@@ -187,7 +187,7 @@ export function ProviderAdvancedConfig({
         </div>
       </div>
 
-      {/* 计费配置 */}
+      {/* Pricing configuration */}
       <div className="rounded-lg border border-border/50 bg-muted/20">
         <button
           type="button"
@@ -198,7 +198,7 @@ export function ProviderAdvancedConfig({
             <Coins className="h-4 w-4 text-muted-foreground" />
             <span className="font-medium">
               {t("providerAdvanced.pricingConfig", {
-                defaultValue: "计费配置",
+                defaultValue: "Pricing Config",
               })}
             </span>
           </div>
@@ -212,7 +212,7 @@ export function ProviderAdvancedConfig({
                 className="text-sm text-muted-foreground"
               >
                 {t("providerAdvanced.useCustomPricing", {
-                  defaultValue: "使用单独配置",
+                  defaultValue: "Use separate config",
                 })}
               </Label>
               <Switch
@@ -243,14 +243,14 @@ export function ProviderAdvancedConfig({
             <p className="text-sm text-muted-foreground">
               {t("providerAdvanced.pricingConfigDesc", {
                 defaultValue:
-                  "为此供应商配置单独的计费参数，不启用时使用全局默认配置。",
+                  "Configure separate pricing parameters for this provider. Uses global defaults when disabled.",
               })}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
                 <Label htmlFor="cost-multiplier">
                   {t("providerAdvanced.costMultiplier", {
-                    defaultValue: "成本倍率",
+                    defaultValue: "Cost Multiplier",
                   })}
                 </Label>
                 <Input
@@ -267,20 +267,21 @@ export function ProviderAdvancedConfig({
                     })
                   }
                   placeholder={t("providerAdvanced.costMultiplierPlaceholder", {
-                    defaultValue: "留空使用全局默认（1）",
+                    defaultValue: "Leave empty to use global default (1)",
                   })}
                   disabled={!pricingConfig.enabled}
                 />
                 <p className="text-xs text-muted-foreground">
                   {t("providerAdvanced.costMultiplierHint", {
-                    defaultValue: "实际成本 = 基础成本 × 倍率，支持小数如 1.5",
+                    defaultValue:
+                      "Actual cost = Base cost × Multiplier, supports decimals like 1.5",
                   })}
                 </p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="pricing-model-source">
                   {t("providerAdvanced.pricingModelSourceLabel", {
-                    defaultValue: "计费模式",
+                    defaultValue: "Pricing Mode",
                   })}
                 </Label>
                 <Select
@@ -299,24 +300,25 @@ export function ProviderAdvancedConfig({
                   <SelectContent>
                     <SelectItem value="inherit">
                       {t("providerAdvanced.pricingModelSourceInherit", {
-                        defaultValue: "继承全局默认",
+                        defaultValue: "Inherit global default",
                       })}
                     </SelectItem>
                     <SelectItem value="request">
                       {t("providerAdvanced.pricingModelSourceRequest", {
-                        defaultValue: "请求模型",
+                        defaultValue: "Request model",
                       })}
                     </SelectItem>
                     <SelectItem value="response">
                       {t("providerAdvanced.pricingModelSourceResponse", {
-                        defaultValue: "返回模型",
+                        defaultValue: "Response model",
                       })}
                     </SelectItem>
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">
                   {t("providerAdvanced.pricingModelSourceHint", {
-                    defaultValue: "选择按请求模型还是返回模型进行定价匹配",
+                    defaultValue:
+                      "Choose whether to match pricing by request model or response model",
                   })}
                 </p>
               </div>

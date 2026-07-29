@@ -1,5 +1,5 @@
 /**
- * 代理功能组件导出
+ * Routing component exports.
  */
 
 export { ProxyPanel } from "./ProxyPanel";

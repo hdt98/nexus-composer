@@ -739,8 +739,8 @@ mod tests {
 
     #[test]
     fn preserves_cache_control_when_replacing_image() {
-        // image block 可能承载 prompt cache 断点；替换成标记时必须把
-        // cache_control 迁移到新的 text block，否则会断掉缓存命中。
+        // An image block can carry a prompt-cache breakpoint. Preserve its
+        // cache_control on the replacement text block to retain cache hits.
         let mut body = json!({
             "model": "deepseek-v4-pro",
             "messages": [{
@@ -794,7 +794,8 @@ mod tests {
 
     #[test]
     fn heuristic_disabled_keeps_images_for_listed_text_only_models() {
-        // allow_heuristic = false：内置列表不再预测性剥图，避免误判多模态模型时静默丢图。
+        // Disabling the heuristic prevents the built-in list from stripping
+        // images when a multimodal model is misclassified.
         let provider = provider(json!({}));
         let mut body = json!({
             "model": "deepseek/deepseek-v4-pro",
@@ -814,7 +815,7 @@ mod tests {
 
     #[test]
     fn explicit_text_capability_replaces_even_when_heuristic_disabled() {
-        // 显式声明 text-only 是声明驱动、零误判，即使关掉启发式也应生效。
+        // An explicit text-only declaration still applies with heuristics off.
         let provider = provider(json!({
             "models": [
                 { "id": "deepseek-v4-pro", "input": ["text"] }

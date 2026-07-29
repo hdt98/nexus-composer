@@ -1,4 +1,4 @@
-// 轻量平台检测，避免在 SSR 或无 navigator 的环境报错
+// Lightweight platform detection that is safe during SSR or without navigator.
 export const isMac = (): boolean => {
   try {
     const ua = navigator.userAgent || "";
@@ -21,7 +21,8 @@ export const isWindows = (): boolean => {
 export const isLinux = (): boolean => {
   try {
     const ua = navigator.userAgent || "";
-    // WebKitGTK/Chromium 在 Linux/Wayland/X11 下 UA 通常包含 Linux 或 X11
+    // WebKitGTK and Chromium user agents usually include Linux or X11 on
+    // Linux, Wayland, and X11.
     return (
       /linux|x11/i.test(ua) && !/android/i.test(ua) && !isMac() && !isWindows()
     );
@@ -30,13 +31,14 @@ export const isLinux = (): boolean => {
   }
 };
 
-// Linux 上禁用所有 drag region，规避 Wayland 下 gtk_window_begin_move_drag
-// 相关的窗口事件异常（Tauri #13440）。macOS 上保留原有拖动行为；Windows
-// 项目原本就不依赖这个。
+// Disable all drag regions on Linux to avoid Wayland window-event failures
+// involving gtk_window_begin_move_drag (Tauri #13440). Retain existing drag
+// behavior on macOS; the Windows application does not depend on it.
 //
-// 这些常量设计为通过 JSX 属性 spread 消费（`{...DRAG_REGION_ATTR}`），
-// 因为 `data-tauri-drag-region` 是 wry 侧的 attribute 存在性检测，必须
-// 完全不渲染属性才算禁用；空字符串或 "false" 仍会触发。
+// These constants are designed for JSX attribute spreading with
+// `{...DRAG_REGION_ATTR}`. Wry detects the presence of
+// `data-tauri-drag-region`, so disabling it requires omitting the attribute
+// entirely; an empty string or "false" still activates it.
 export const DRAG_REGION_ENABLED = !isLinux();
 
 export const DRAG_REGION_ATTR: Record<string, unknown> = DRAG_REGION_ENABLED

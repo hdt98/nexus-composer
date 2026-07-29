@@ -1,15 +1,15 @@
-//! MCP (Model Context Protocol) 服务器管理模块
+//! MCP (Model Context Protocol) server-management module.
 //!
-//! 本模块负责 MCP 服务器配置的验证、同步和导入导出。
+//! Validates, synchronizes, imports, and exports MCP server configuration.
 //!
-//! ## 模块结构
+//! ## Module structure
 //!
-//! - `validation` - 服务器配置验证
-//! - `claude` - Claude MCP 同步和导入
-//! - `codex` - Codex MCP 同步和导入（含 TOML 转换）
-//! - `gemini` - Gemini MCP 同步和导入
-//! - `opencode` - OpenCode MCP 同步和导入（含 local/remote 格式转换）
-//! - `hermes` - Hermes MCP 同步和导入
+//! - `validation` - server configuration validation
+//! - `claude` - Claude MCP synchronization and import
+//! - `codex` - Codex MCP synchronization and import, including TOML conversion
+//! - `gemini` - Gemini MCP synchronization and import
+//! - `opencode` - OpenCode MCP synchronization and import, including local/remote conversion
+//! - `hermes` - Hermes MCP synchronization and import
 
 mod claude;
 mod codex;
@@ -18,7 +18,7 @@ mod hermes;
 mod opencode;
 mod validation;
 
-// 重新导出公共 API
+// Re-export the public API.
 pub use claude::{
     import_from_claude, remove_server_from_claude, sync_enabled_to_claude,
     sync_single_server_to_claude,

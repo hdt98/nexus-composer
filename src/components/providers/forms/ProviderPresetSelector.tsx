@@ -88,9 +88,10 @@ export function sortPresetEntries(
   t: PresetTranslator,
 ): PresetEntry[] {
   if (sortMode === PresetSortMode.Original) {
-    // 置顶优先级：官方分类 > 尊享合作伙伴（Kimi）> 其余原顺序。
-    // 用分区拼接而非排序，确保每组内部各自的相对顺序都不变；
-    // 排他条件保证「既是官方又是 prime」的预设只归入官方组、不被重复。
+    // Pinning priority: official category, prime partners such as Kimi, then
+    // all others in their original order. Concatenate partitions instead of
+    // sorting to preserve relative order within each group. Exclusive
+    // conditions keep a preset that is both official and prime in one group.
     const official = entries.filter(
       (entry) => entry.preset.category === "official",
     );
@@ -134,7 +135,7 @@ interface ProviderPresetSelectorProps {
   onPresetChange: (value: string) => void;
   onUniversalPresetSelect?: (preset: UniversalProviderPreset) => void;
   onManageUniversalProviders?: () => void;
-  category?: ProviderCategory; // 当前选中的分类
+  category?: ProviderCategory; // Currently selected category.
 }
 
 export function ProviderPresetSelector({
@@ -155,7 +156,8 @@ export function ProviderPresetSelector({
   const searchContainerRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // 点击搜索区域外时收起并清空,对齐旧 Popover 的「点击外部关闭」行为
+  // Collapse and clear when clicking outside the search area, matching the
+  // previous Popover behavior.
   useEffect(() => {
     if (!searchOpen) return;
 
@@ -173,11 +175,12 @@ export function ProviderPresetSelector({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [searchOpen]);
 
-  // 键盘快捷键: Ctrl/Cmd+F 打开搜索并聚焦输入框。
-  // 使用捕获阶段并阻止冒泡，避免背后 ProviderList 的同名快捷键被意外触发。
-  // 首次打开靠 Input 的 autoFocus 聚焦；若搜索已打开（例如点击 preset 后焦点
-  // 停在按钮上），setSearchOpen(true) 同值不会重渲染、autoFocus 不重触发，
-  // 这里用 rAF 命令式地把焦点移回搜索框（不 select，避免吞掉随后输入的首字符）。
+  // Ctrl/Cmd+F opens search and focuses the input. Capture and stop propagation
+  // so the matching ProviderList shortcut behind this selector is not invoked.
+  // autoFocus handles the initial opening. If search is already open and focus
+  // moved to a preset button, setting the same state does not re-render or
+  // trigger autoFocus, so requestAnimationFrame returns focus without selecting
+  // text and consuming the next typed character.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f") {
@@ -206,32 +209,35 @@ export function ProviderPresetSelector({
     switch (category) {
       case "official":
         return t("providerForm.officialHint", {
-          defaultValue: "💡 官方供应商使用浏览器登录，无需配置 API Key",
+          defaultValue:
+            "💡 Official provider uses browser login, no API Key needed",
         });
       case "cn_official":
         return t("providerForm.cnOfficialApiKeyHint", {
-          defaultValue: "💡 国产官方供应商只需填写 API Key，请求地址已预设",
+          defaultValue: "💡 Only need to fill in API Key, endpoint is preset",
         });
       case "aggregator":
         return t("providerForm.aggregatorApiKeyHint", {
-          defaultValue: "💡 聚合服务供应商只需填写 API Key 即可使用",
+          defaultValue: "💡 Only need to fill in API Key, endpoint is preset",
         });
       case "third_party":
         return t("providerForm.thirdPartyApiKeyHint", {
-          defaultValue: "💡 第三方供应商需要填写 API Key 和请求地址",
+          defaultValue: "💡 Only need to fill in API Key, endpoint is preset",
         });
       case "custom":
         return t("providerForm.customApiKeyHint", {
-          defaultValue: "💡 自定义配置需手动填写所有必要字段",
+          defaultValue:
+            "💡 Custom configuration requires manually filling all necessary fields",
         });
       case "omo":
         return t("providerForm.omoHint", {
           defaultValue:
-            "💡 OMO 配置管理 Agent 模型分配，兼容 oh-my-openagent.jsonc / oh-my-opencode.jsonc",
+            "💡 OMO config manages Agent model assignments and supports both oh-my-openagent.jsonc and oh-my-opencode.jsonc",
         });
       default:
         return t("providerPreset.hint", {
-          defaultValue: "选择预设后可继续调整下方字段。",
+          defaultValue:
+            "You can continue to adjust the fields below after selecting a preset.",
         });
     }
   };
@@ -447,7 +453,8 @@ export function ProviderPresetSelector({
               onClick={() => onUniversalPresetSelect(preset)}
               className="inline-flex items-center justify-start gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-muted-foreground hover:bg-accent/80 relative w-full"
               title={t("universalProvider.hint", {
-                defaultValue: "跨应用统一配置，自动同步到 Claude/Codex/Gemini",
+                defaultValue:
+                  "Cross-app unified config, auto-sync to Claude/Codex/Gemini",
               })}
             >
               <ProviderIcon
@@ -468,13 +475,13 @@ export function ProviderPresetSelector({
               onClick={onManageUniversalProviders}
               className="inline-flex items-center justify-start gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-accent text-muted-foreground hover:bg-accent/80 w-full"
               title={t("universalProvider.manage", {
-                defaultValue: "管理统一供应商",
+                defaultValue: "Manage",
               })}
             >
               <Settings2 className="h-4 w-4 flex-shrink-0" />
               <span className="truncate">
                 {t("universalProvider.manage", {
-                  defaultValue: "管理",
+                  defaultValue: "Manage",
                 })}
               </span>
             </button>

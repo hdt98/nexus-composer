@@ -9,11 +9,11 @@ use std::path::Path;
 
 const MAX_BACKUPS: usize = 10;
 
-/// 配置导入导出相关业务逻辑
+/// Configuration import/export service.
 pub struct ConfigService;
 
 impl ConfigService {
-    /// 为当前 config.json 创建备份，返回备份 ID（若文件不存在则返回空字符串）。
+    /// Backs up the current config.json and returns its backup ID, or an empty string if absent.
     pub fn create_backup(config_path: &Path) -> Result<String, AppError> {
         if !config_path.exists() {
             return Ok(String::new());
@@ -83,7 +83,7 @@ impl ConfigService {
         Ok(())
     }
 
-    /// 同步当前供应商到对应的 live 配置。
+    /// Synchronizes current providers to their corresponding live configurations.
     pub fn sync_current_providers_to_live(config: &mut MultiAppConfig) -> Result<(), AppError> {
         Self::sync_current_provider_for_app(config, &AppType::Claude)?;
         Self::sync_current_provider_for_app(config, &AppType::Codex)?;
@@ -110,7 +110,7 @@ impl ConfigService {
                 Some(provider) => provider.clone(),
                 None => {
                     log::warn!(
-                        "当前应用 {app_type:?} 的供应商 {current_id} 不存在，跳过 live 同步"
+                        "Provider {current_id} for application {app_type:?} does not exist; skipping live synchronization"
                     );
                     return Ok(());
                 }
@@ -147,14 +147,18 @@ impl ConfigService {
         provider: &Provider,
     ) -> Result<(), AppError> {
         let settings = provider.settings_config.as_object().ok_or_else(|| {
-            AppError::Config(format!("供应商 {provider_id} 的 Codex 配置必须是对象"))
+            AppError::Config(format!(
+                "Codex configuration for provider {provider_id} must be an object"
+            ))
         })?;
         let auth = settings.get("auth").ok_or_else(|| {
-            AppError::Config(format!("供应商 {provider_id} 的 Codex 配置缺少 auth 字段"))
+            AppError::Config(format!(
+                "Codex configuration for provider {provider_id} is missing the auth field"
+            ))
         })?;
         if !auth.is_object() {
             return Err(AppError::Config(format!(
-                "供应商 {provider_id} 的 Codex auth 配置必须是 JSON 对象"
+                "Codex auth configuration for provider {provider_id} must be a JSON object"
             )));
         }
         let cfg_text = settings.get("config").and_then(Value::as_str);
@@ -170,9 +174,9 @@ impl ConfigService {
             cfg_text,
             profile,
         )?;
-        // 注意：MCP 同步在 v3.7.0 中已通过 McpService 进行，不再在此调用
-        // sync_enabled_to_codex 使用旧的 config.mcp.codex 结构，在新架构中为空
-        // MCP 的启用/禁用应通过 McpService::toggle_app 进行
+        // MCP synchronization moved to McpService in v3.7.0 and is no longer invoked here.
+        // sync_enabled_to_codex uses the legacy config.mcp.codex structure, which is empty in
+        // the new architecture. Enable or disable MCP through McpService::toggle_app.
 
         let cfg_text_after = crate::codex_config::read_and_validate_codex_config_text()?;
         if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
@@ -192,8 +196,8 @@ impl ConfigService {
                         &provider.settings_config,
                         restore_provider_token,
                     )?;
-                    // 必须同时写回 auth 和 config: backfill 会把 live 的
-                    // experimental_bearer_token 移到 restored.auth.OPENAI_API_KEY。
+                    // Write both auth and config back: backfill moves the live
+                    // experimental_bearer_token into restored.auth.OPENAI_API_KEY.
                     if let Some(restored_obj) = restored.as_object() {
                         if let Some(auth_value) = restored_obj.get("auth") {
                             obj.insert("auth".to_string(), auth_value.clone());
@@ -243,7 +247,7 @@ impl ConfigService {
 
         ProviderService::write_gemini_live(provider)?;
 
-        // 读回实际写入的内容并更新到配置中（包含 settings.json）
+        // Read the written content back and update the configuration, including settings.json.
         let live_after_env = read_gemini_env()?;
         let settings_path = crate::gemini_config::get_gemini_settings_path();
         let live_after_config = if settings_path.exists() {

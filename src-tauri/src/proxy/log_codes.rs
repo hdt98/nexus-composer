@@ -1,16 +1,16 @@
-//! 代理模块日志错误码定义
+//! Log error-code definitions for the proxy module.
 //!
-//! 格式: [模块-编号] 消息
-//! - CB: Circuit Breaker (熔断器)
-//! - SRV: Server (服务器)
-//! - FWD: Forwarder (转发器)
-//! - FO: Failover (故障转移)
-//! - RSP: Response (响应处理)
-//! - USG: Usage (使用量)
+//! Format: [module-number] message
+//! - CB: Circuit Breaker
+//! - SRV: Server
+//! - FWD: Forwarder
+//! - FO: Failover
+//! - RSP: Response processing
+//! - USG: Usage
 
 #![allow(dead_code)]
 
-/// 熔断器日志码
+/// Circuit-breaker log codes.
 pub mod cb {
     pub const OPEN_TO_HALF_OPEN: &str = "CB-001";
     pub const HALF_OPEN_TO_CLOSED: &str = "CB-002";
@@ -20,7 +20,7 @@ pub mod cb {
     pub const MANUAL_RESET: &str = "CB-006";
 }
 
-/// 服务器日志码
+/// Server log codes.
 pub mod srv {
     pub const STARTED: &str = "SRV-001";
     pub const STOPPED: &str = "SRV-002";
@@ -30,14 +30,14 @@ pub mod srv {
     pub const CONN_ERR: &str = "SRV-006";
 }
 
-/// 转发器日志码
+/// Forwarder log codes.
 pub mod fwd {
     pub const PROVIDER_FAILED_RETRY: &str = "FWD-001";
     pub const ALL_PROVIDERS_FAILED: &str = "FWD-002";
     pub const SINGLE_PROVIDER_FAILED: &str = "FWD-003";
 }
 
-/// 故障转移日志码
+/// Failover log codes.
 pub mod fo {
     pub const SWITCH_SUCCESS: &str = "FO-001";
     pub const CONFIG_READ_ERROR: &str = "FO-002";
@@ -46,7 +46,7 @@ pub mod fo {
     pub const NO_PROVIDERS: &str = "FO-005";
 }
 
-/// 响应处理日志码
+/// Response-processing log codes.
 pub mod rsp {
     pub const BUILD_STREAM_ERROR: &str = "RSP-001";
     pub const READ_BODY_ERROR: &str = "RSP-002";
@@ -55,7 +55,7 @@ pub mod rsp {
     pub const STREAM_ERROR: &str = "RSP-005";
 }
 
-/// 使用量日志码
+/// Usage log codes.
 pub mod usg {
     pub const LOG_FAILED: &str = "USG-001";
     pub const PRICING_NOT_FOUND: &str = "USG-002";

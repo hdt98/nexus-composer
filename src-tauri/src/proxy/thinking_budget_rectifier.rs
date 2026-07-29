@@ -1,7 +1,7 @@
-//! Thinking Budget 整流器
+//! Thinking budget rectifier.
 //!
-//! 用于自动修复 Anthropic API 中因 thinking budget 约束导致的请求错误。
-//! 当上游 API 返回 budget_tokens 相关错误时，系统会自动调整 budget 参数并重试。
+//! Automatically repairs Anthropic API requests rejected by thinking-budget constraints.
+//! When upstream returns a `budget_tokens` error, the request is adjusted and retried.
 
 use super::types::RectifierConfig;
 use serde_json::Value;
@@ -9,7 +9,7 @@ use serde_json::Value;
 /// Minimum budget required by the upstream error this rectifier handles.
 const MIN_THINKING_BUDGET: u64 = 1024;
 
-/// Budget 整流结果
+/// Budget rectification snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BudgetRectifySnapshot {
     /// max_tokens
@@ -20,29 +20,29 @@ pub struct BudgetRectifySnapshot {
     pub thinking_budget_tokens: Option<u64>,
 }
 
-/// Budget 整流结果
+/// Budget rectification result.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BudgetRectifyResult {
-    /// 是否应用了整流
+    /// Whether rectification was applied.
     pub applied: bool,
-    /// 整流前快照
+    /// Snapshot before rectification.
     pub before: BudgetRectifySnapshot,
-    /// 整流后快照
+    /// Snapshot after rectification.
     pub after: BudgetRectifySnapshot,
 }
 
-/// 检测是否需要触发 thinking budget 整流器
+/// Returns whether thinking budget rectification should run.
 ///
-/// 检测条件：error message 同时包含 `budget_tokens` + `thinking` 相关约束
+/// The error must contain `budget_tokens`, `thinking`, and the supported 1024 constraint.
 pub fn should_rectify_thinking_budget(
     error_message: Option<&str>,
     config: &RectifierConfig,
 ) -> bool {
-    // 检查总开关
+    // Check the master switch.
     if !config.enabled {
         return false;
     }
-    // 检查子开关
+    // Check the feature switch.
     if !config.request_thinking_budget {
         return false;
     }
@@ -52,7 +52,7 @@ pub fn should_rectify_thinking_budget(
     };
     let lower = msg.to_lowercase();
 
-    // 与 CCH 对齐：仅在包含 budget_tokens + thinking + 1024 约束时触发
+    // Match CCH behavior: require budget_tokens, thinking, and the 1024 constraint.
     let has_budget_tokens_reference =
         lower.contains("budget_tokens") || lower.contains("budget tokens");
     let has_thinking_reference = lower.contains("thinking");
@@ -66,9 +66,9 @@ pub fn should_rectify_thinking_budget(
     false
 }
 
-/// 对请求体执行 budget 整流
+/// Rectifies the request body's thinking budget.
 ///
-/// 整流动作：
+/// Rectification actions:
 /// - Raises an undersized budget to 1024 only when the request already enabled thinking.
 /// - Raises max_tokens only enough to exceed the effective budget.
 pub fn rectify_thinking_budget(body: &mut Value) -> BudgetRectifyResult {
@@ -169,7 +169,7 @@ mod tests {
         }
     }
 
-    // ==================== should_rectify_thinking_budget 测试 ====================
+    // ==================== should_rectify_thinking_budget tests ====================
 
     #[test]
     fn test_detect_budget_tokens_thinking_error() {
@@ -228,7 +228,7 @@ mod tests {
         ));
     }
 
-    // ==================== rectify_thinking_budget 测试 ====================
+    // ==================== rectify_thinking_budget tests ====================
 
     #[test]
     fn test_rectify_budget_basic() {

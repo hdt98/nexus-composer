@@ -1,7 +1,7 @@
-//! OpenClaw 配置文件读写模块
+//! OpenClaw configuration file access
 //!
-//! 处理 `~/.openclaw/openclaw.json` 配置文件的读写操作（JSON5 格式）。
-//! OpenClaw 使用累加式供应商管理，所有供应商配置共存于同一配置文件中。
+//! Reads and writes `~/.openclaw/openclaw.json` in JSON5 format.
+//! OpenClaw uses additive provider management, with all providers in one file.
 
 use crate::config::{atomic_write, get_app_config_dir};
 use crate::error::AppError;
@@ -28,10 +28,10 @@ const OPENCLAW_TOOLS_PROFILES: &[&str] = &["minimal", "coding", "messaging", "fu
 // Path Functions
 // ============================================================================
 
-/// 获取 OpenClaw 配置目录
+/// Return the OpenClaw configuration directory.
 ///
-/// 默认路径: `~/.openclaw/`
-/// 可通过 settings.openclaw_config_dir 覆盖
+/// Defaults to `~/.openclaw/`.
+/// Can be overridden by `settings.openclaw_config_dir`.
 pub fn get_openclaw_dir() -> PathBuf {
     if let Some(override_dir) = get_openclaw_override_dir() {
         return override_dir;
@@ -40,9 +40,9 @@ pub fn get_openclaw_dir() -> PathBuf {
     crate::config::get_home_dir().join(".openclaw")
 }
 
-/// 获取 OpenClaw 配置文件路径
+/// Return the OpenClaw configuration file path.
 ///
-/// 返回 `~/.openclaw/openclaw.json`
+/// Returns `~/.openclaw/openclaw.json`.
 pub fn get_openclaw_config_path() -> PathBuf {
     get_openclaw_dir().join("openclaw.json")
 }
@@ -65,7 +65,7 @@ fn openclaw_write_lock() -> &'static Mutex<()> {
 // Type Definitions
 // ============================================================================
 
-/// OpenClaw 健康检查警告
+/// OpenClaw configuration health warning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenClawHealthWarning {
@@ -75,7 +75,7 @@ pub struct OpenClawHealthWarning {
     pub path: Option<String>,
 }
 
-/// OpenClaw 写入结果
+/// Result of writing the OpenClaw configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenClawWriteOutcome {
@@ -85,7 +85,7 @@ pub struct OpenClawWriteOutcome {
     pub warnings: Vec<OpenClawHealthWarning>,
 }
 
-/// OpenClaw 供应商配置（对应 models.providers 中的条目）
+/// OpenClaw provider configuration from `models.providers`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenClawProviderConfig {
@@ -103,7 +103,7 @@ pub struct OpenClawProviderConfig {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw 模型条目
+/// OpenClaw model entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenClawModelEntry {
@@ -120,7 +120,7 @@ pub struct OpenClawModelEntry {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw 模型成本配置
+/// OpenClaw model cost configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawModelCost {
     pub input: f64,
@@ -129,7 +129,7 @@ pub struct OpenClawModelCost {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw 默认模型配置（agents.defaults.model）
+/// OpenClaw default model configuration from `agents.defaults.model`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawDefaultModel {
     pub primary: String,
@@ -139,7 +139,7 @@ pub struct OpenClawDefaultModel {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw 模型目录条目（agents.defaults.models 中的值）
+/// OpenClaw model catalog entry from `agents.defaults.models`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawModelCatalogEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -148,7 +148,7 @@ pub struct OpenClawModelCatalogEntry {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw agents.defaults 配置
+/// OpenClaw `agents.defaults` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawAgentsDefaults {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -159,7 +159,7 @@ pub struct OpenClawAgentsDefaults {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw agents 顶层配置
+/// OpenClaw top-level `agents` configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct OpenClawAgents {
@@ -169,14 +169,14 @@ pub struct OpenClawAgents {
     pub extra: HashMap<String, Value>,
 }
 
-/// OpenClaw env 配置（openclaw.json 的 env 节点）
+/// OpenClaw `env` configuration from `openclaw.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawEnvConfig {
     #[serde(flatten)]
     pub vars: HashMap<String, Value>,
 }
 
-/// OpenClaw tools 配置（openclaw.json 的 tools 节点）
+/// OpenClaw `tools` configuration from `openclaw.json`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenClawToolsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,9 +193,9 @@ pub struct OpenClawToolsConfig {
 // Core Read/Write Functions
 // ============================================================================
 
-/// 读取 OpenClaw 配置文件
+/// Read the OpenClaw configuration file.
 ///
-/// 支持 JSON5 格式，返回完整的配置 JSON 对象
+/// Supports JSON5 and returns the complete configuration object.
 pub fn read_openclaw_config() -> Result<Value, AppError> {
     let path = get_openclaw_config_path();
     if !path.exists() {
@@ -207,9 +207,9 @@ pub fn read_openclaw_config() -> Result<Value, AppError> {
         .map_err(|e| AppError::Config(format!("Failed to parse OpenClaw config as JSON5: {e}")))
 }
 
-/// 对现有 OpenClaw 配置做健康检查。
+/// Check the current OpenClaw configuration for known issues.
 ///
-/// 解析失败时返回单条 parse 警告，不抛出错误。
+/// Returns one parse warning instead of an error when parsing fails.
 pub fn scan_openclaw_config_health() -> Result<Vec<OpenClawHealthWarning>, AppError> {
     let path = get_openclaw_config_path();
     if !path.exists() {
@@ -635,9 +635,9 @@ fn remove_legacy_timeout(defaults_value: &mut Value) {
 // Provider Functions (Untyped - for raw JSON operations)
 // ============================================================================
 
-/// 获取所有供应商配置（原始 JSON）
+/// Return all provider configurations as raw JSON.
 ///
-/// 从 `models.providers` 读取
+/// Reads from `models.providers`.
 pub fn get_providers() -> Result<Map<String, Value>, AppError> {
     let config = read_openclaw_config()?;
     Ok(config
@@ -648,14 +648,14 @@ pub fn get_providers() -> Result<Map<String, Value>, AppError> {
         .unwrap_or_default())
 }
 
-/// 获取单个供应商配置（原始 JSON）
+/// Return one provider configuration as raw JSON.
 pub fn get_provider(id: &str) -> Result<Option<Value>, AppError> {
     Ok(get_providers()?.get(id).cloned())
 }
 
-/// 设置供应商配置（原始 JSON）
+/// Set one provider configuration from raw JSON.
 ///
-/// 写入到 `models.providers`
+/// Writes to `models.providers`.
 pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOutcome, AppError> {
     let mut full_config = read_openclaw_config()?;
     let root = ensure_object(&mut full_config);
@@ -679,7 +679,7 @@ pub fn set_provider(id: &str, provider_config: Value) -> Result<OpenClawWriteOut
     write_root_section("models", &models_value)
 }
 
-/// 删除供应商配置
+/// Remove a provider configuration.
 pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
     let mut removed = false;
@@ -709,7 +709,7 @@ pub fn remove_provider(id: &str) -> Result<OpenClawWriteOutcome, AppError> {
 // Provider Functions (Typed)
 // ============================================================================
 
-/// 获取所有供应商配置（类型化）
+/// Return all typed provider configurations.
 pub fn get_typed_providers() -> Result<IndexMap<String, OpenClawProviderConfig>, AppError> {
     let providers = get_providers()?;
     let mut result = IndexMap::new();
@@ -728,7 +728,7 @@ pub fn get_typed_providers() -> Result<IndexMap<String, OpenClawProviderConfig>,
     Ok(result)
 }
 
-/// 设置供应商配置（类型化）
+/// Set a typed provider configuration.
 pub fn set_typed_provider(
     id: &str,
     config: &OpenClawProviderConfig,
@@ -741,7 +741,7 @@ pub fn set_typed_provider(
 // Agents Configuration Functions
 // ============================================================================
 
-/// 读取默认模型配置（agents.defaults.model）
+/// Read the default model configuration from `agents.defaults.model`.
 pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
     let config = read_openclaw_config()?;
 
@@ -758,7 +758,7 @@ pub fn get_default_model() -> Result<Option<OpenClawDefaultModel>, AppError> {
     Ok(Some(model))
 }
 
-/// 设置默认模型配置（agents.defaults.model）
+/// Set the default model configuration in `agents.defaults.model`.
 pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOutcome, AppError> {
     let mut config = read_openclaw_config()?;
     let root = ensure_object(&mut config);
@@ -780,7 +780,7 @@ pub fn set_default_model(model: &OpenClawDefaultModel) -> Result<OpenClawWriteOu
     write_root_section("agents", &agents_value)
 }
 
-/// 读取模型目录/允许列表（agents.defaults.models）
+/// Read the model catalog or allowlist from `agents.defaults.models`.
 pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalogEntry>>, AppError> {
     let config = read_openclaw_config()?;
 
@@ -797,7 +797,7 @@ pub fn get_model_catalog() -> Result<Option<HashMap<String, OpenClawModelCatalog
     Ok(Some(catalog))
 }
 
-/// 设置模型目录/允许列表（agents.defaults.models）
+/// Set the model catalog or allowlist in `agents.defaults.models`.
 pub fn set_model_catalog(
     catalog: &HashMap<String, OpenClawModelCatalogEntry>,
 ) -> Result<OpenClawWriteOutcome, AppError> {

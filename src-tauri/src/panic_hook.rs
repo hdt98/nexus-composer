@@ -1,7 +1,7 @@
-//! Panic Hook 模块
+//! Panic hook module
 //!
-//! 在应用崩溃时捕获 panic 信息并记录到 `<app_config_dir>/crash.log` 文件中（默认 `~/.cc-switch/crash.log`）。
-//! 便于用户和开发者诊断闪退问题。
+//! Captures panic details in `<app_config_dir>/crash.log`, which defaults to
+//! `~/.cc-switch/crash.log`, for crash diagnosis.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -9,7 +9,7 @@ use std::panic;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-/// 应用版本号（从 Cargo.toml 读取）
+/// Application version from Cargo.toml.
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 static APP_CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -18,14 +18,14 @@ pub fn init_app_config_dir(dir: PathBuf) {
     let _ = APP_CONFIG_DIR.set(dir);
 }
 
-/// 获取默认应用配置目录（不会 panic）
+/// Return the default application configuration directory without panicking.
 fn default_app_config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".cc-switch")
 }
 
-/// 获取应用配置目录（优先使用初始化时写入的值；不会 panic）
+/// Return the initialized or default application configuration directory without panicking.
 fn get_app_config_dir() -> PathBuf {
     APP_CONFIG_DIR
         .get()
@@ -33,28 +33,28 @@ fn get_app_config_dir() -> PathBuf {
         .unwrap_or_else(default_app_config_dir)
 }
 
-/// 获取崩溃日志文件路径
+/// Return the crash log path.
 fn get_crash_log_path() -> PathBuf {
     get_app_config_dir().join("crash.log")
 }
 
-/// 获取日志目录路径
+/// Return the log directory path.
 pub fn get_log_dir() -> PathBuf {
     get_app_config_dir().join("logs")
 }
 
-/// 安全获取环境信息（不会 panic）
+/// Return environment information without panicking.
 fn get_system_info() -> String {
     let os = std::env::consts::OS;
     let arch = std::env::consts::ARCH;
     let family = std::env::consts::FAMILY;
 
-    // 安全获取当前工作目录
+    // Get the current working directory safely.
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "unknown".to_string());
 
-    // 安全获取当前线程信息
+    // Get current thread information safely.
     let thread = std::thread::current();
     let thread_name = thread.name().unwrap_or("unnamed");
     let thread_id = format!("{:?}", thread.id());
@@ -68,17 +68,16 @@ fn get_system_info() -> String {
     )
 }
 
-/// 设置 panic hook，捕获崩溃信息并写入日志文件
+/// Install a panic hook that writes crash details to the log file.
 ///
-/// 在应用启动时调用此函数，确保任何 panic 都会被记录。
-/// 日志格式包含：
-/// - 时间戳
-/// - 应用版本和系统信息
-/// - Panic 信息
-/// - 发生位置（文件:行号）
-/// - Backtrace（完整调用栈）
+/// Call during startup to record all panics. The log contains:
+/// - Timestamp.
+/// - Application version and system information.
+/// - Panic message.
+/// - Source location.
+/// - Full backtrace.
 pub fn setup_panic_hook() {
-    // 启用 backtrace（确保 release 模式也能捕获）
+    // Enable backtraces in release builds.
     if std::env::var("RUST_BACKTRACE").is_err() {
         std::env::set_var("RUST_BACKTRACE", "1");
     }
@@ -88,40 +87,40 @@ pub fn setup_panic_hook() {
     panic::set_hook(Box::new(move |panic_info| {
         let log_path = get_crash_log_path();
 
-        // 确保目录存在
+        // Ensure the log directory exists.
         if let Some(parent) = log_path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
 
-        // 构建崩溃信息（使用 catch_unwind 保护时间格式化，避免嵌套 panic）
+        // Build crash details while protecting timestamp formatting from nested panics.
         let timestamp = std::panic::catch_unwind(|| {
             chrono::Local::now()
                 .format("%Y-%m-%d %H:%M:%S%.3f")
                 .to_string()
         })
         .unwrap_or_else(|_| {
-            // chrono panic 时回退到 unix timestamp
+            // Fall back to a Unix timestamp if chrono panics.
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| format!("unix:{}.{:03}", d.as_secs(), d.subsec_millis()))
                 .unwrap_or_else(|_| "unknown".to_string())
         });
 
-        // 获取系统信息
+        // Get system information.
         let system_info = std::panic::catch_unwind(get_system_info)
             .unwrap_or_else(|_| "Failed to get system info".to_string());
 
-        // 获取 panic 消息（尝试多种方式提取）
+        // Extract the panic message from supported payload types.
         let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
             s.to_string()
         } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
             s.clone()
         } else {
-            // 尝试使用 Display trait
+            // Fall back to the Display representation.
             format!("{panic_info}")
         };
 
-        // 获取位置信息
+        // Get the source location.
         let location = if let Some(loc) = panic_info.location() {
             format!(
                 "File: {}\n         Line: {}\n         Column: {}",
@@ -133,11 +132,11 @@ pub fn setup_panic_hook() {
             "Unknown location".to_string()
         };
 
-        // 捕获 backtrace（完整调用栈）
+        // Capture the full backtrace.
         let backtrace = std::backtrace::Backtrace::force_capture();
         let backtrace_str = format!("{backtrace}");
 
-        // 格式化日志条目
+        // Format the crash log entry.
         let separator = "=".repeat(80);
         let sub_separator = "-".repeat(40);
         let crash_entry = format!(
@@ -167,22 +166,22 @@ Stack Trace (Backtrace)
 "#
         );
 
-        // 写入文件（追加模式）
+        // Append to the crash log.
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&log_path) {
             let _ = file.write_all(crash_entry.as_bytes());
             let _ = file.flush();
 
-            // 记录日志文件位置到 stderr
+            // Report the crash log path to stderr.
             eprintln!(
                 "\n[Nexus Composer] Crash log saved to: {}",
                 log_path.display()
             );
         }
 
-        // 同时输出到 stderr（便于开发调试）
+        // Also emit the crash report to stderr for debugging.
         eprintln!("{crash_entry}");
 
-        // 调用默认 hook
+        // Invoke the default hook.
         default_hook(panic_info);
     }));
 }

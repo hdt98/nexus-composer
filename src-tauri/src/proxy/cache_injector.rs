@@ -1,11 +1,12 @@
-//! Cache 断点注入器
+//! Cache breakpoint injector.
 //!
-//! 在请求转发前自动注入 cache_control 标记，启用 Bedrock Prompt Caching
+//! Injects `cache_control` markers before forwarding a request to enable
+//! Bedrock prompt caching.
 
 use super::types::OptimizerConfig;
 use serde_json::{json, Value};
 
-/// 在请求体关键位置注入 cache_control 断点
+/// Injects `cache_control` breakpoints at key positions in the request body.
 pub fn inject(body: &mut Value, config: &OptimizerConfig) {
     if !config.cache_injection {
         return;
@@ -13,7 +14,7 @@ pub fn inject(body: &mut Value, config: &OptimizerConfig) {
 
     let existing = count_existing(body);
 
-    // 升级已有断点的 TTL
+    // Upgrade the TTL of existing breakpoints.
     upgrade_existing_ttl(body, &config.cache_ttl);
 
     let mut budget = 4_usize.saturating_sub(existing);
@@ -31,7 +32,7 @@ pub fn inject(body: &mut Value, config: &OptimizerConfig) {
 
     let mut injected = Vec::new();
 
-    // (a) tools 末尾
+    // (a) End of the tools list.
     if budget > 0 {
         if let Some(tools) = body.get_mut("tools").and_then(|t| t.as_array_mut()) {
             if let Some(last) = tools.last_mut() {
@@ -49,9 +50,9 @@ pub fn inject(body: &mut Value, config: &OptimizerConfig) {
         }
     }
 
-    // (b) system 末尾
+    // (b) End of the system prompt.
     if budget > 0 {
-        // 字符串 system → 转为数组
+        // Convert a string-valued system prompt into an array.
         if let Some(text) = body
             .get("system")
             .and_then(|s| s.as_str())
@@ -76,7 +77,7 @@ pub fn inject(body: &mut Value, config: &OptimizerConfig) {
         }
     }
 
-    // (c) 最后一条 assistant 消息的最后一个非 thinking block
+    // (c) Last non-thinking block of the final assistant message.
     if budget > 0 {
         if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
             if let Some(assistant_msg) = messages
@@ -88,7 +89,8 @@ pub fn inject(body: &mut Value, config: &OptimizerConfig) {
                     .get_mut("content")
                     .and_then(|c| c.as_array_mut())
                 {
-                    // 逆序找最后一个非 thinking/redacted_thinking block
+                    // Search backward for the final block that is not thinking or
+                    // redacted_thinking.
                     if let Some(block) = content.iter_mut().rev().find(|b| {
                         let bt = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         bt != "thinking" && bt != "redacted_thinking"

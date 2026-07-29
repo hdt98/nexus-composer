@@ -104,7 +104,7 @@ export interface HermesProviderPreset {
   settingsConfig: HermesProviderSettingsConfig;
   isOfficial?: boolean;
   isPartner?: boolean;
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
+  primePartner?: boolean; // Top-tier featured partner, shown with a heart badge.
   partnerPromotionKey?: string;
   category?: ProviderCategory;
   templateValues?: Record<string, TemplateValueConfig>;
@@ -589,11 +589,12 @@ export const hermesProviderPresets: HermesProviderPreset[] = [
     },
   },
 
-  // ===== 以下为从 Claude 应用预设同步而来的供应商 =====
-  // 字段映射：env.ANTHROPIC_BASE_URL → base_url；env.ANTHROPIC_AUTH_TOKEN → api_key；
-  // apiFormat "anthropic"(默认) → api_mode "anthropic_messages"；
+  // ===== Providers synchronized from Claude application presets =====
+  // Field mapping: env.ANTHROPIC_BASE_URL → base_url;
+  // env.ANTHROPIC_AUTH_TOKEN → api_key; default apiFormat "anthropic" →
+  // api_mode "anthropic_messages";
   // apiFormat "openai_chat" → api_mode "chat_completions"；
-  // ANTHROPIC_MODEL / DEFAULT_HAIKU / SONNET / OPUS_MODEL 去重后塞进 models[]。
+  // Deduplicate ANTHROPIC_MODEL and DEFAULT_HAIKU/SONNET/OPUS_MODEL into models[].
   {
     name: "Zhipu GLM",
     websiteUrl: "https://open.bigmodel.cn",

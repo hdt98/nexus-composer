@@ -22,16 +22,11 @@ jobs:
           # --- Stale label ---
           stale-issue-label: 'stale'
 
-          # --- Messages (bilingual) ---
+          # --- Messages ---
           stale-issue-message: |
-            此 issue 已超过 60 天没有活动，已被标记为 `stale`。
-            如果此问题仍然存在，请回复以保持 issue 打开状态，否则将在 14 天后自动关闭。
-
             This issue has been automatically marked as `stale` because it has not had activity for 60 days.
             Please reply to keep it open, otherwise it will be automatically closed in 14 days.
           close-issue-message: |
-            此 issue 因长时间无活动已被自动关闭。如果问题仍然存在，欢迎重新打开。
-
             This issue has been automatically closed due to inactivity. If the problem persists, feel free to reopen it.
 
           # --- Exemptions ---

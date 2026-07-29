@@ -44,9 +44,10 @@ const CODEX_WEB_SEARCH_DISABLED: &str = "disabled";
 ///
 /// Verified 2026-06-28 doc audit — reject: MiMo (hard 400), LongCat (official
 /// config ships `web_search = "disabled"`), MiniMax (tool-type enum `['function']`
-/// only), and Qwen3-Coder models (百炼 marks built-in tools unsupported for
-/// the coder series). Deliberately NOT listed by host: 火山方舟豆包, general
-/// 阿里百炼 Qwen models that support built-in web_search, and GPT-native relays.
+/// only), and Qwen3-Coder models (Alibaba Model Studio marks built-in tools
+/// unsupported for the coder series). Deliberately NOT listed by host: Volcengine
+/// Ark Doubao, general Alibaba Model Studio Qwen models that support built-in
+/// web_search, and GPT-native relays.
 const CODEX_WEB_SEARCH_REJECT_HOSTS: &[&str] = &[
     "xiaomimimo.com", // Xiaomi MiMo (api.xiaomimimo.com, token-plan-cn.xiaomimimo.com)
     "longcat.chat",   // Meituan LongCat (api.longcat.chat)
@@ -143,7 +144,7 @@ const CODEX_RESERVED_MODEL_PROVIDER_IDS: &[&str] = &[
     "ollama-chat",
 ];
 
-/// 获取 Codex 配置目录路径
+/// Returns the Codex configuration-directory path.
 pub fn get_codex_config_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_codex_override_dir() {
         return custom;
@@ -152,12 +153,12 @@ pub fn get_codex_config_dir() -> PathBuf {
     get_home_dir().join(".codex")
 }
 
-/// 获取 Codex auth.json 路径
+/// Returns the Codex auth.json path.
 pub fn get_codex_auth_path() -> PathBuf {
     get_codex_config_dir().join("auth.json")
 }
 
-/// 获取 Codex config.toml 路径
+/// Returns the Codex config.toml path.
 pub fn get_codex_config_path() -> PathBuf {
     get_codex_config_dir().join("config.toml")
 }
@@ -320,7 +321,7 @@ pub(crate) fn restore_codex_official_auth_snapshot() -> Result<bool, AppError> {
     Ok(true)
 }
 
-/// 获取 Codex 供应商配置文件路径
+/// Returns a Codex provider configuration-file path.
 #[allow(dead_code)]
 pub fn get_codex_provider_paths(
     provider_id: &str,
@@ -336,7 +337,7 @@ pub fn get_codex_provider_paths(
     (auth_path, config_path)
 }
 
-/// 删除 Codex 供应商配置文件
+/// Deletes a Codex provider configuration file.
 #[allow(dead_code)]
 pub fn delete_codex_provider_config(
     provider_id: &str,
@@ -350,7 +351,8 @@ pub fn delete_codex_provider_config(
     Ok(())
 }
 
-/// 原子写 Codex 的 `auth.json` 与 `config.toml`，在第二步失败时回滚第一步
+/// Atomically writes Codex `auth.json` and `config.toml`, rolling back the first write if the
+/// second fails.
 pub fn write_codex_live_atomic(
     auth: &Value,
     config_text_opt: Option<&str>,
@@ -362,7 +364,7 @@ pub fn write_codex_live_atomic(
         std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
     }
 
-    // 读取旧内容用于回滚
+    // Read previous contents for rollback.
     let old_auth = if auth_path.exists() {
         Some(fs::read(&auth_path).map_err(|e| AppError::io(&auth_path, e))?)
     } else {
@@ -374,7 +376,7 @@ pub fn write_codex_live_atomic(
         None
     };
 
-    // 准备写入内容
+    // Prepare the new contents.
     let cfg_text = match config_text_opt {
         Some(s) => s.to_string(),
         None => String::new(),
@@ -383,12 +385,12 @@ pub fn write_codex_live_atomic(
         toml::from_str::<toml::Table>(&cfg_text).map_err(|e| AppError::toml(&config_path, e))?;
     }
 
-    // 第一步：写 auth.json
+    // Step 1: write auth.json.
     write_json_file(&auth_path, auth)?;
 
-    // 第二步：写 config.toml（失败则回滚 auth.json）
+    // Step 2: write config.toml, rolling back auth.json on failure.
     if let Err(e) = write_text_file(&config_path, &cfg_text) {
-        // 回滚 auth.json
+        // Roll back auth.json.
         if let Some(bytes) = old_auth {
             let _ = atomic_write(&auth_path, &bytes);
         } else {
@@ -400,7 +402,7 @@ pub fn write_codex_live_atomic(
     Ok(())
 }
 
-/// 读取 `~/.codex/config.toml`，若不存在返回空字符串
+/// Reads `~/.codex/config.toml`, returning an empty string when absent.
 pub fn read_codex_config_text() -> Result<String, AppError> {
     let path = get_codex_config_path();
     if path.exists() {
@@ -410,7 +412,7 @@ pub fn read_codex_config_text() -> Result<String, AppError> {
     }
 }
 
-/// 对非空的 TOML 文本进行语法校验
+/// Validates the syntax of non-empty TOML text.
 pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
     if text.trim().is_empty() {
         return Ok(());
@@ -420,7 +422,7 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
         .map_err(|e| AppError::toml(Path::new("config.toml"), e))
 }
 
-/// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
+/// Reads and validates `~/.codex/config.toml`, returning text that may be empty.
 pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     let s = read_codex_config_text()?;
     validate_config_toml(&s)?;
@@ -501,10 +503,11 @@ pub fn extract_codex_base_url(config_text: &str) -> Option<String> {
         .map(ToString::to_string)
 }
 
-/// ChatGPT 登录的新鲜度指纹：`(account_id, last_refresh)`。
+/// Freshness fingerprint for a ChatGPT login: `(account_id, last_refresh)`.
 ///
-/// 仅当 auth 真的携带 ChatGPT 登录（`tokens.access_token` 非空）时返回
-/// `Some`；API key 形态的 auth 返回 `None`，避免把普通密钥切换误判成登录回退。
+/// Returns `Some` only when auth contains an actual ChatGPT login with a non-empty
+/// `tokens.access_token`. API-key auth returns `None`, so ordinary key switching is not mistaken
+/// for a login rollback.
 fn codex_chatgpt_login_stamp(auth: &Value) -> Option<(Option<String>, Option<String>)> {
     let tokens = auth.get("tokens")?.as_object()?;
     let has_access_token = tokens
@@ -531,17 +534,20 @@ fn codex_chatgpt_login_stamp(auth: &Value) -> Option<(Option<String>, Option<Str
     Some((account_id, last_refresh))
 }
 
-/// 判断把 `stored` 官方登录快照写回 live `auth.json` 是否会造成凭据回退。
+/// Returns whether writing the stored official-login snapshot to live `auth.json` would roll back
+/// credentials.
 ///
-/// `preserveCodexOfficialAuthOnSwitch` 会在切回官方供应商时用数据库里的
-/// 快照覆盖 live `auth.json`。快照是**切走那一刻**抓取的，可能已经过期数天：
-/// 用户重新订阅 / 换 workspace 后重新登录，live 里是新凭据，而快照仍指向
-/// 旧（可能已停用）的 workspace。直接覆盖会把 Codex 打回旧账号，官方端返回
-/// `402 deactivated_workspace`，Codex 加载不到 workspace 托管策略而白屏。
+/// `preserveCodexOfficialAuthOnSwitch` normally restores the database snapshot over live
+/// `auth.json` when switching back to the official provider. The snapshot was captured **when
+/// switching away** and may be days old. After the user resubscribes or changes workspace and logs
+/// in again, live contains new credentials while the snapshot still references an old, possibly
+/// deactivated workspace. Overwriting live would move Codex back to that account, cause the official
+/// service to return `402 deactivated_workspace`, and leave Codex unable to load managed workspace
+/// policy.
 ///
-/// 只在“双方都是 ChatGPT 登录”时介入，两种情况判为回退：
-/// - 账号不同：快照属于另一个账号，覆盖等于把用户踢回旧账号；
-/// - live 的 `last_refresh` 比快照更新：快照是旧的。
+/// Applies only when both sides are ChatGPT logins. Two cases constitute rollback:
+/// - Different accounts: the snapshot belongs to another account and would move the user back.
+/// - Live `last_refresh` is newer than the snapshot.
 fn codex_stored_auth_regresses_live(stored: &Value, live: &Value) -> bool {
     let (Some((live_account, live_refresh)), Some((stored_account, stored_refresh))) = (
         codex_chatgpt_login_stamp(live),
@@ -563,19 +569,20 @@ fn codex_stored_auth_regresses_live(stored: &Value, live: &Value) -> bool {
                 chrono::DateTime::parse_from_rfc3339(&stored_refresh),
             ) {
                 (Ok(live_at), Ok(stored_at)) => live_at > stored_at,
-                // 时间戳解析不了就退回字符串比较：两边都是 Codex 写的
-                // RFC3339 UTC 串，字典序与时序一致。
+                // Fall back to string comparison when timestamps cannot be parsed. Both values are
+                // Codex-written RFC 3339 UTC strings whose lexical and chronological order match.
                 _ => live_refresh > stored_refresh,
             }
         }
-        // live 有时间戳而快照没有：快照形态更旧，保守保留 live。
+        // Live has a timestamp while the snapshot does not, so conservatively keep the newer shape.
         (Some(_), None) => true,
         _ => false,
     }
 }
 
-/// 读取磁盘上的 live `auth.json` 并判断快照回写是否会造成登录回退。
-/// 读不到 live（首次写入 / 文件损坏）时放行，保持原有行为。
+/// Reads live `auth.json` from disk and checks whether restoring the snapshot would roll back the login.
+/// If live cannot be read during a first write or because the file is damaged, allow the restore to
+/// preserve existing behavior.
 pub(crate) fn codex_stored_auth_regresses_live_on_disk(stored: &Value) -> bool {
     let auth_path = get_codex_auth_path();
     if !auth_path.exists() {
@@ -1673,7 +1680,7 @@ fn set_codex_experimental_bearer_token(config_text: &str, token: &str) -> Result
     if config_text.trim().is_empty() {
         return Err(AppError::localized(
             "provider.codex.config.missing",
-            "Codex 第三方供应商缺少 config.toml 配置，无法写入 bearer token",
+            "The third-party Codex provider has no config.toml configuration; cannot write the bearer token",
             "Codex third-party provider is missing config.toml, cannot write bearer token",
         ));
     }
@@ -1772,7 +1779,7 @@ pub fn read_codex_live_settings() -> Result<Value, AppError> {
     if !auth_present && cfg_text.trim().is_empty() {
         return Err(AppError::localized(
             "codex.live.missing",
-            "Codex 配置文件不存在",
+            "The Codex configuration file does not exist",
             "Codex configuration is missing",
         ));
     }
@@ -1841,7 +1848,7 @@ pub fn inject_codex_unified_session_bucket(config_text: &str) -> Result<String, 
         .is_some_and(|table| !table_matches_codex_unified_official_provider(table));
     if existing_custom_conflicts {
         log::warn!(
-            "官方 Codex 配置已存在自定义 [model_providers.custom]，跳过统一会话路由注入以避免激活未知路由"
+            "Official Codex configuration already contains custom [model_providers.custom]; skipping unified-session route injection to avoid activating an unknown route"
         );
         return Ok(config_text.to_string());
     }
@@ -1956,10 +1963,11 @@ pub fn apply_codex_unified_session_bucket_to_config(
     }
 }
 
-/// `inject_codex_unified_session_bucket` 的反向操作：从配置文本里剥掉注入的
-/// 统一会话路由，保证切换回填不会把它带进数据库的存储配置（关闭开关后
-/// 切换即可完全还原）。仅当形态与注入产物完全一致时才剥离；第三方模板和
-/// 用户自定义的 `custom` 条目（带 base_url 等差异字段）原样保留。
+/// Reverses `inject_codex_unified_session_bucket` by removing the injected unified-session route
+/// from configuration text. Provider-switch backfill cannot then copy it into stored database
+/// configuration, allowing a switch after disabling the feature to restore the original state.
+/// Removal occurs only when the shape exactly matches injected output; third-party templates and
+/// user-defined `custom` entries with base_url or other differing fields remain unchanged.
 pub fn strip_codex_unified_session_bucket(config_text: &str) -> Result<String, AppError> {
     if !config_text.contains("model_provider") {
         return Ok(config_text.to_string());
@@ -2373,7 +2381,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// 构造一个 ChatGPT 登录形态的 auth。
+    /// Builds auth in ChatGPT-login form.
     fn chatgpt_auth(account_id: &str, last_refresh: &str) -> Value {
         json!({
             "auth_mode": "chatgpt",
@@ -2390,8 +2398,8 @@ mod tests {
 
     #[test]
     fn stale_official_snapshot_does_not_overwrite_newer_live_login() {
-        // 复现线上事故：快照是 7/17 抓的（workspace 已停用），
-        // 用户当天重新订阅并登录，live 是 7/24 的新凭据。
+        // Reproduce the production incident: the snapshot was captured on 7/17 for a workspace that
+        // was later deactivated, while live has credentials from a new subscription and login on 7/24.
         let stored = chatgpt_auth("acct-old", "2026-07-17T11:31:13.290203Z");
         let live = chatgpt_auth("acct-old", "2026-07-24T02:10:00.000000Z");
 
@@ -2403,7 +2411,8 @@ mod tests {
 
     #[test]
     fn snapshot_from_another_account_does_not_overwrite_live_login() {
-        // 换订阅通常同时换 workspace/账号：即使时间戳更新也不能覆盖。
+        // A subscription change often also changes workspace or account; do not overwrite even with
+        // a newer snapshot timestamp.
         let stored = chatgpt_auth("acct-old", "2026-07-30T00:00:00.000000Z");
         let live = chatgpt_auth("acct-new", "2026-07-24T02:10:00.000000Z");
 
@@ -2415,7 +2424,7 @@ mod tests {
 
     #[test]
     fn fresh_official_snapshot_still_restores_over_older_live_login() {
-        // 正常路径不能被破坏：快照更新时仍要恢复官方登录。
+        // Preserve the normal path: restore the official login when the snapshot is newer.
         let stored = chatgpt_auth("acct-same", "2026-07-24T09:00:00.000000Z");
         let live = chatgpt_auth("acct-same", "2026-07-24T02:10:00.000000Z");
 
@@ -2427,7 +2436,7 @@ mod tests {
 
     #[test]
     fn api_key_auth_is_not_treated_as_login_regression() {
-        // live 是 API key 形态（第三方供应商接管中）时不介入。
+        // Do not intervene when live uses API-key form under third-party provider takeover.
         let stored = chatgpt_auth("acct-same", "2026-07-17T11:31:13.290203Z");
         let live = json!({ "auth_mode": "apikey", "OPENAI_API_KEY": "sk-live", "tokens": null });
 
@@ -2443,10 +2452,11 @@ mod tests {
         let mut live = chatgpt_auth("acct-same", "2026-07-24T02:10:00.000000Z");
         live.as_object_mut().unwrap().remove("last_refresh");
 
-        // live 无时间戳、快照有：无法证明 live 更旧，保持既有恢复行为。
+        // Live has no timestamp while the snapshot does. Without proof that live is newer, preserve
+        // the existing restore behavior.
         assert!(!codex_stored_auth_regresses_live(&stored, &live));
 
-        // 反过来 live 有、快照没有：快照形态更旧，保留 live。
+        // Conversely, live has a timestamp and the snapshot does not, so keep live.
         let mut stored_no_stamp = chatgpt_auth("acct-same", "2026-07-17T11:31:13.290203Z");
         stored_no_stamp
             .as_object_mut()
@@ -2511,8 +2521,8 @@ mod tests {
 
     #[test]
     fn unified_session_bucket_skips_conflicting_custom_table() {
-        // 残留的非注入形态 custom 表：设置 model_provider 会把官方流量
-        // 路由到表里的第三方端点，必须整体拒绝注入。
+        // A residual custom table not shaped like injected output would route official traffic to
+        // its third-party endpoint if model_provider were set, so reject injection entirely.
         let stale = r#"[model_providers.custom]
 name = "Relay"
 base_url = "https://relay.example/v1"
@@ -2520,7 +2530,8 @@ base_url = "https://relay.example/v1"
         let unchanged = inject_codex_unified_session_bucket(stale).expect("inject");
         assert_eq!(unchanged, stale);
 
-        // 已是注入形态的 custom 表（如重复注入）则照常补上 model_provider
+        // If the custom table already matches injected form, such as after repeated injection, add
+        // model_provider normally.
         let injected_once = inject_codex_unified_session_bucket("").expect("inject");
         let reinjected = inject_codex_unified_session_bucket(&injected_once).expect("re-inject");
         assert_eq!(reinjected, injected_once);
@@ -2619,8 +2630,8 @@ wire_api = "responses"
 
     #[test]
     fn unified_session_bucket_strip_keeps_third_party_custom_entry() {
-        // 第三方模板同样用 custom 路由，但条目带 base_url 等差异字段，
-        // 形态不等于注入产物，必须原样保留。
+        // Third-party templates also use the custom route, but fields such as base_url make their
+        // shape differ from injected output, so preserve them unchanged.
         let third_party = r#"model_provider = "custom"
 
 [model_providers.custom]

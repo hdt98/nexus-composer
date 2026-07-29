@@ -1,12 +1,14 @@
 /**
- * 自定义 User-Agent 合法性校验。
+ * Validates a custom User-Agent.
  *
- * 与后端 `parse_custom_user_agent`（基于 `http::HeaderValue::from_str`）口径严格一致：
- * HeaderValue 按**字节**判定合法性，规则为 `b >= 32 && b != 127 || b == '\t'`。也就是说：
- * - 制表符（\t）、可见 ASCII（0x20–0x7E）、以及任意非 ASCII 字符（UTF-8 字节均 ≥ 0x80）都合法；
- * - 仅控制字符非法：除 \t 外的 0x00–0x1F（含换行）与 0x7F（DEL）。
+ * Matches backend `parse_custom_user_agent`, based on
+ * `http::HeaderValue::from_str`, exactly. HeaderValue validates bytes using
+ * `b >= 32 && b != 127 || b == '\t'`, so tabs, visible ASCII (0x20–0x7E), and
+ * all non-ASCII characters whose UTF-8 bytes are at least 0x80 are valid. Only
+ * control characters are invalid: 0x00–0x1F except tab, including newlines,
+ * and 0x7F (DEL).
  *
- * 空串（trim 后为空）视为"未设置"，合法。
+ * A string empty after trimming is treated as unset and is valid.
  */
 export function isValidUserAgentHeader(value: string): boolean {
   const trimmed = value.trim();

@@ -90,7 +90,8 @@ const UnifiedSkillsPanel = React.forwardRef<
   const toggleAppMutation = useToggleSkillApp();
   const uninstallMutation = useUninstallSkill();
   const restoreBackupMutation = useRestoreSkillBackup();
-  // enabled: true —— 进入 Skill 页面时自动静默扫描一次（绿点提示来源）
+  // enabled: true performs one silent scan when entering Skills and supplies
+  // the green indicator.
   const { data: unmanagedSkills, refetch: scanUnmanaged } =
     useScanUnmanagedSkills({ enabled: true });
   const importMutation = useImportSkillsFromApps();
@@ -147,7 +148,7 @@ const UnifiedSkillsPanel = React.forwardRef<
       message: t("skills.uninstallConfirm", { name: skill.name }),
       onConfirm: async () => {
         try {
-          // 构建 skillKey 用于更新 discoverable 缓存
+          // Build skillKey for updating the discoverable cache.
           const installName =
             skill.directory.split(/[/\\]/).pop()?.toLowerCase() ||
             skill.directory.toLowerCase();

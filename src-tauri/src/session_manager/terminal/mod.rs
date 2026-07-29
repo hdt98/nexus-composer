@@ -116,7 +116,7 @@ fn launch_ghostty(command: &str, cwd: Option<&str>) -> Result<(), String> {
 fn launch_kitty(command: &str, cwd: Option<&str>) -> Result<(), String> {
     let full_command = build_shell_command(command, cwd);
 
-    // 获取用户默认 shell
+    // Get the user's default shell.
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
 
     let status = Command::new("open")

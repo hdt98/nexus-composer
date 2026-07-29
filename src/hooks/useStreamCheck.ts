@@ -8,11 +8,14 @@ import {
 import type { AppId } from "@/lib/api";
 
 /**
- * 供应商连通性检查。
+ * Provider connectivity check.
  *
- * 只探测 base_url 是否可达（任何 HTTP 响应都算可达），不发真实大模型请求。
- * 刻意 **不** 重置故障转移熔断器——可达 ≠ 配置正确，一个端口通但鉴权废的供应商
- * 不应被误判为"健康"而切回线上。熔断器只由真实转发流量驱动（见 proxy/forwarder.rs）。
+ * Probes only whether base_url is reachable; any HTTP response counts, and no
+ * real model request is sent. It intentionally does not reset failover circuit
+ * breakers: reachable does not mean correctly configured, and a provider with
+ * an open port but invalid authentication must not be treated as healthy and
+ * restored to service. Only real forwarded traffic drives circuit breakers;
+ * see proxy/forwarder.rs.
  */
 export function useStreamCheck(appId: AppId) {
   const { t } = useTranslation();
@@ -33,7 +36,8 @@ export function useStreamCheck(appId: AppId) {
             t("streamCheck.reachable", {
               providerName: providerName,
               responseTimeMs: result.responseTimeMs,
-              defaultValue: `${providerName} 连通正常 (${result.responseTimeMs}ms)`,
+              defaultValue:
+                "{{providerName}} is reachable ({{responseTimeMs}}ms)",
             }),
             { closeButton: true },
           );
@@ -42,21 +46,23 @@ export function useStreamCheck(appId: AppId) {
             t("streamCheck.reachableSlow", {
               providerName: providerName,
               responseTimeMs: result.responseTimeMs,
-              defaultValue: `${providerName} 连通但较慢 (${result.responseTimeMs}ms)`,
+              defaultValue:
+                "{{providerName}} reachable but slow ({{responseTimeMs}}ms)",
             }),
           );
         } else {
-          // 仅当无法建立连接（DNS / 连接被拒 / TLS / 超时）才会到这里
+          // This path is reserved for connection failures such as DNS,
+          // connection refusal, TLS, or timeout.
           toast.error(
             t("streamCheck.unreachable", {
               providerName: providerName,
               message: result.message,
-              defaultValue: `${providerName} 无法连通: ${result.message}`,
+              defaultValue: "{{providerName}} unreachable: {{message}}",
             }),
             {
               description: t("streamCheck.unreachableHint", {
                 defaultValue:
-                  "无法建立连接（DNS / 连接 / TLS / 超时）。请检查 base_url 与网络。",
+                  "Could not establish a connection (DNS / connect / TLS / timeout). Check the base_url and your network.",
               }),
               duration: 8000,
               closeButton: true,
@@ -70,7 +76,7 @@ export function useStreamCheck(appId: AppId) {
           t("streamCheck.error", {
             providerName: providerName,
             error: String(e),
-            defaultValue: `${providerName} 检查出错: ${String(e)}`,
+            defaultValue: "{{providerName}} check error: {{error}}",
           }),
         );
         return null;

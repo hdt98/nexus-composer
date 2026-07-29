@@ -16,7 +16,7 @@ use crate::store::AppState;
 
 // ─── File import/export ──────────────────────────────────────
 
-/// 导出数据库为 SQL 备份
+/// Exports the database as an SQL backup.
 #[tauri::command]
 pub async fn export_config_to_file(
     #[allow(non_snake_case)] filePath: String,
@@ -33,11 +33,11 @@ pub async fn export_config_to_file(
         }))
     })
     .await
-    .map_err(|e| format!("导出配置失败: {e}"))?
+    .map_err(|e| format!("Failed to export configuration: {e}"))?
     .map_err(|e: AppError| e.to_string())
 }
 
-/// 从 SQL 备份导入数据库
+/// Imports the database from an SQL backup.
 #[tauri::command]
 pub async fn import_config_from_file(
     #[allow(non_snake_case)] filePath: String,
@@ -55,7 +55,7 @@ pub async fn import_config_from_file(
         Ok::<_, AppError>(success_payload_with_warning(backup_id, warning))
     })
     .await
-    .map_err(|e| format!("导入配置失败: {e}"))?
+    .map_err(|e| format!("Failed to import configuration: {e}"))?
     .map_err(|e: AppError| e.to_string())
 }
 
@@ -71,13 +71,13 @@ pub async fn sync_current_providers_live(state: State<'_, AppState>) -> Result<V
         }))
     })
     .await
-    .map_err(|e| format!("同步当前供应商失败: {e}"))?
+    .map_err(|e| format!("Failed to synchronize current providers: {e}"))?
     .map_err(|e: AppError| e.to_string())
 }
 
 // ─── File dialogs ────────────────────────────────────────────
 
-/// 保存文件对话框
+/// Shows a save-file dialog.
 #[tauri::command]
 pub async fn save_file_dialog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -93,7 +93,7 @@ pub async fn save_file_dialog<R: tauri::Runtime>(
     Ok(result.map(|p| p.to_string()))
 }
 
-/// 打开文件对话框
+/// Shows an open-file dialog.
 #[tauri::command]
 pub async fn open_file_dialog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -107,7 +107,7 @@ pub async fn open_file_dialog<R: tauri::Runtime>(
     Ok(result.map(|p| p.to_string()))
 }
 
-/// 打开 ZIP 文件选择对话框
+/// Shows a ZIP-file picker.
 #[tauri::command]
 pub async fn open_zip_file_dialog<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,

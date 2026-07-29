@@ -1,7 +1,7 @@
-//! 官方订阅额度查询服务
+//! Official subscription-quota query service.
 //!
-//! 读取 CLI 工具的已有 OAuth 凭据，查询官方订阅额度。
-//! 第一层：仅读取凭据，不实现登录/刷新。
+//! Reads existing OAuth credentials from CLI tools and queries official subscription quotas.
+//! The first layer only reads credentials and does not implement login or refresh.
 
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,9 +10,9 @@ use std::collections::HashMap;
 
 use crate::config;
 
-// ── 数据类型 ──────────────────────────────────────────────
+// ── Data types ─────────────────────────────────────────────
 
-/// 凭据状态
+/// Credential status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialStatus {
@@ -22,25 +22,25 @@ pub enum CredentialStatus {
     ParseError,
 }
 
-/// 单个限速窗口（如 5小时会话、7天周期）
+/// One rate-limit window, such as a five-hour session or seven-day period.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuotaTier {
-    /// 窗口标识：five_hour, seven_day, seven_day_opus, seven_day_sonnet 等
+    /// Window identifier such as five_hour, seven_day, seven_day_opus, or seven_day_sonnet.
     pub name: String,
-    /// 使用百分比 0–100
+    /// Utilization percentage from 0 to 100.
     pub utilization: f64,
-    /// ISO 8601 重置时间
+    /// ISO 8601 reset time.
     pub resets_at: Option<String>,
-    /// ZenMux: 已用额度（USD）
+    /// ZenMux: used quota in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub used_value_usd: Option<f64>,
-    /// ZenMux: 窗口上限（USD）
+    /// ZenMux: window limit in USD.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_value_usd: Option<f64>,
 }
 
-/// 超额使用信息
+/// Extra-usage information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtraUsage {
@@ -51,7 +51,7 @@ pub struct ExtraUsage {
     pub currency: Option<String>,
 }
 
-/// 订阅额度查询结果
+/// Subscription-quota query result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubscriptionQuota {
@@ -93,9 +93,9 @@ impl SubscriptionQuota {
     }
 }
 
-// ── Claude 凭据读取 ──────────────────────────────────────
+// ── Claude credential loading ──────────────────────────────
 
-/// Claude OAuth 凭据文件中的嵌套结构
+/// Nested structure in a Claude OAuth credential file.
 #[derive(Deserialize)]
 struct ClaudeOAuthEntry {
     #[serde(rename = "accessToken")]
@@ -104,17 +104,17 @@ struct ClaudeOAuthEntry {
     expires_at: Option<serde_json::Value>,
 }
 
-/// 读取 Claude OAuth 凭据
+/// Reads Claude OAuth credentials.
 ///
-/// 按优先级尝试以下来源：
+/// Tries these sources in priority order:
 /// 1. macOS Keychain (service: "Claude Code-credentials")
-/// 2. 凭据文件 ~/.claude/.credentials.json
+/// 2. Credential file at ~/.claude/.credentials.json.
 ///
-/// JSON 格式（两种 key 都兼容）：
+/// JSON format, accepting both key variants:
 /// {"claudeAiOauth": {"accessToken": "...", "expiresAt": ...}}
 /// {"claude.ai_oauth": {"accessToken": "...", "expiresAt": ...}}
 fn read_claude_credentials() -> (Option<String>, CredentialStatus, Option<String>) {
-    // 来源 1: macOS Keychain
+    // Source 1: macOS Keychain.
     #[cfg(target_os = "macos")]
     {
         if let Some(result) = read_claude_credentials_from_keychain() {
@@ -122,11 +122,11 @@ fn read_claude_credentials() -> (Option<String>, CredentialStatus, Option<String
         }
     }
 
-    // 来源 2: 凭据文件
+    // Source 2: credential file.
     read_claude_credentials_from_file()
 }
 
-/// 从 macOS Keychain 读取 Claude 凭据
+/// Reads Claude credentials from macOS Keychain.
 #[cfg(target_os = "macos")]
 fn read_claude_credentials_from_keychain(
 ) -> Option<(Option<String>, CredentialStatus, Option<String>)> {
@@ -141,7 +141,7 @@ fn read_claude_credentials_from_keychain(
         .ok()?;
 
     if !output.status.success() {
-        return None; // Keychain 中无此条目，回退到文件
+        return None; // No Keychain entry; fall back to the file.
     }
 
     let json_str = String::from_utf8(output.stdout).ok()?;
@@ -153,7 +153,7 @@ fn read_claude_credentials_from_keychain(
     Some(parse_claude_credentials_json(json_str))
 }
 
-/// 从文件读取 Claude 凭据
+/// Reads Claude credentials from a file.
 fn read_claude_credentials_from_file() -> (Option<String>, CredentialStatus, Option<String>) {
     let cred_path = config::get_claude_config_dir().join(".credentials.json");
 
@@ -175,7 +175,7 @@ fn read_claude_credentials_from_file() -> (Option<String>, CredentialStatus, Opt
     parse_claude_credentials_json(&content)
 }
 
-/// 解析 Claude 凭据 JSON（Keychain 和文件共用）
+/// Parses Claude credential JSON from either Keychain or a file.
 fn parse_claude_credentials_json(
     content: &str,
 ) -> (Option<String>, CredentialStatus, Option<String>) {
@@ -190,7 +190,7 @@ fn parse_claude_credentials_json(
         }
     };
 
-    // 兼容两种 key 名
+    // Accept both key names.
     let entry_value = parsed
         .get("claudeAiOauth")
         .or_else(|| parsed.get("claude.ai_oauth"));
@@ -228,7 +228,7 @@ fn parse_claude_credentials_json(
         }
     };
 
-    // 检查 token 是否过期
+    // Check whether the token is expired.
     if let Some(expires_at) = entry.expires_at {
         if is_token_expired(&expires_at) {
             return (
@@ -242,7 +242,8 @@ fn parse_claude_credentials_json(
     (Some(access_token), CredentialStatus::Valid, None)
 }
 
-/// 判断 token 是否过期，兼容 Unix 时间戳（秒/毫秒）和 ISO 字符串
+/// Returns whether a token is expired, accepting Unix timestamps in seconds or milliseconds
+/// and ISO-formatted strings.
 fn is_token_expired(expires_at: &serde_json::Value) -> bool {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -252,7 +253,7 @@ fn is_token_expired(expires_at: &serde_json::Value) -> bool {
     match expires_at {
         serde_json::Value::Number(n) => {
             if let Some(ts) = n.as_u64() {
-                // 区分秒和毫秒（毫秒级时间戳大于 1e12）
+                // Distinguish seconds from milliseconds; millisecond timestamps exceed 1e12.
                 let ts_secs = if ts > 1_000_000_000_000 {
                     ts / 1000
                 } else {
@@ -264,30 +265,30 @@ fn is_token_expired(expires_at: &serde_json::Value) -> bool {
             }
         }
         serde_json::Value::String(s) => {
-            // 尝试解析 ISO 8601 格式
+            // Try parsing ISO 8601.
             if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
                 (dt.timestamp() as u64) < now_secs
             } else if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
             {
                 (dt.and_utc().timestamp() as u64) < now_secs
             } else {
-                false // 无法解析时不视为过期
+                false // Do not treat an unparseable value as expired.
             }
         }
         _ => false,
     }
 }
 
-// ── Claude API 查询 ──────────────────────────────────────
+// ── Claude API queries ─────────────────────────────────────
 
-/// Claude OAuth 用量 API 响应中的单个窗口
+/// One window in a Claude OAuth usage API response.
 #[derive(Deserialize)]
 struct ApiUsageWindow {
     utilization: Option<f64>,
     resets_at: Option<String>,
 }
 
-/// Claude OAuth 用量 API 响应中的超额用量
+/// Extra usage in a Claude OAuth usage API response.
 #[derive(Deserialize)]
 struct ApiExtraUsage {
     is_enabled: Option<bool>,
@@ -297,28 +298,29 @@ struct ApiExtraUsage {
     currency: Option<String>,
 }
 
-/// 已知的 Claude 用量窗口名称。`QuotaTier::name` 会是其中之一。
+/// Known Claude usage-window names. `QuotaTier::name` uses one of these values.
 pub const TIER_FIVE_HOUR: &str = "five_hour";
 pub const TIER_SEVEN_DAY: &str = "seven_day";
 pub const TIER_SEVEN_DAY_OPUS: &str = "seven_day_opus";
 pub const TIER_SEVEN_DAY_SONNET: &str = "seven_day_sonnet";
 
-/// Coding Plan（Kimi / MiniMax）的周窗口 tier 名。与 `coding_plan::query_*`
-/// 写入、tray 渲染、commands::provider 扁平化三处共用同一标识。
+/// Weekly-window tier name for the Kimi and MiniMax Coding Plans. This identifier is shared by
+/// `coding_plan::query_*` writes, tray rendering, and commands::provider flattening.
 pub const TIER_WEEKLY_LIMIT: &str = "weekly_limit";
 
-/// 月窗口 tier 名。火山方舟 Agent Plan / Coding Plan 有 5h / 周 / 月 三个展示
-/// 窗口（Kimi / MiniMax 只有 5h + 周），月窗口共用此标识；前端 `TIER_I18N_KEYS`
-/// 映射到 `subscription.monthly`。
+/// Monthly-window tier name. Volcengine Ark Agent Plan and Coding Plan display five-hour, weekly,
+/// and monthly windows, while Kimi and MiniMax expose only five-hour and weekly windows. Monthly
+/// windows share this identifier, which renderer `TIER_I18N_KEYS` maps to `subscription.monthly`.
 pub const TIER_MONTHLY: &str = "monthly";
 
-/// Codex 免费方案的 30 天（月）滚动窗口 tier 名。付费方案的次要窗口是 7 天
-/// (`seven_day`)，免费方案则是 30 天。由 `window_seconds_to_tier_name` 产出、
-/// tray 的月分组渲染、前端 `TIER_I18N_KEYS` 映射到 `subscription.thirtyDay`
-/// 三处共用同一标识。见 #3651。
+/// Tier name for the Codex free plan's rolling 30-day monthly window. Paid plans use a seven-day
+/// secondary window (`seven_day`), while the free plan uses 30 days. This identifier is shared by
+/// `window_seconds_to_tier_name`, the tray's monthly grouping, and renderer `TIER_I18N_KEYS`, which
+/// maps it to `subscription.thirtyDay`. See #3651.
 pub const TIER_THIRTY_DAY: &str = "30_day";
 
-/// Gemini 用量分组名称（按模型而非时间窗口）。`classify_gemini_model` 输出。
+/// Gemini usage-group names, organized by model rather than time window and produced by
+/// `classify_gemini_model`.
 pub const TIER_GEMINI_PRO: &str = "gemini_pro";
 pub const TIER_GEMINI_FLASH: &str = "gemini_flash";
 pub const TIER_GEMINI_FLASH_LITE: &str = "gemini_flash_lite";
@@ -330,7 +332,7 @@ const KNOWN_TIERS: &[&str] = &[
     TIER_SEVEN_DAY_SONNET,
 ];
 
-/// 查询 Claude 官方订阅额度
+/// Queries the official Claude subscription quota.
 async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
@@ -384,7 +386,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         }
     };
 
-    // 解析已知的 tier 窗口
+    // Parse known tier windows.
     let mut tiers = Vec::new();
     for &tier_name in KNOWN_TIERS {
         if let Some(window) = body.get(tier_name) {
@@ -402,7 +404,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         }
     }
 
-    // 也解析未知窗口（API 可能返回新的窗口类型）
+    // Also parse unknown windows because the API may introduce new types.
     if let Some(obj) = body.as_object() {
         for (key, value) in obj {
             if key == "extra_usage" || KNOWN_TIERS.contains(&key.as_str()) {
@@ -422,7 +424,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
         }
     }
 
-    // 解析超额使用
+    // Parse extra usage.
     let extra_usage = body.get("extra_usage").and_then(|v| {
         serde_json::from_value::<ApiExtraUsage>(v.clone())
             .ok()
@@ -447,7 +449,7 @@ async fn query_claude_quota(access_token: &str) -> SubscriptionQuota {
     }
 }
 
-// ── Codex 凭据读取 ──────────────────────────────────────
+// ── Codex credential loading ───────────────────────────────
 
 #[derive(Deserialize)]
 struct CodexAuthJson {
@@ -470,13 +472,13 @@ type CodexCredentials = (
     Option<String>,
 );
 
-/// 读取 Codex OAuth 凭据
+/// Reads Codex OAuth credentials.
 ///
-/// 按优先级尝试以下来源：
+/// Tries these sources in priority order:
 /// 1. macOS Keychain (service: "Codex Auth")
-/// 2. 凭据文件 ~/.codex/auth.json
+/// 2. Credential file at ~/.codex/auth.json.
 ///
-/// 仅 auth_mode == "chatgpt" (OAuth) 时有效，API key 模式不支持用量查询。
+/// Valid only when auth_mode == "chatgpt" (OAuth); API-key mode cannot query usage.
 fn read_codex_credentials() -> CodexCredentials {
     #[cfg(target_os = "macos")]
     {
@@ -488,7 +490,7 @@ fn read_codex_credentials() -> CodexCredentials {
     read_codex_credentials_from_file()
 }
 
-/// 从 macOS Keychain 读取 Codex 凭据
+/// Reads Codex credentials from macOS Keychain.
 #[cfg(target_os = "macos")]
 fn read_codex_credentials_from_keychain() -> Option<CodexCredentials> {
     let output = std::process::Command::new("security")
@@ -509,7 +511,7 @@ fn read_codex_credentials_from_keychain() -> Option<CodexCredentials> {
     Some(parse_codex_credentials_json(json_str))
 }
 
-/// 从文件读取 Codex 凭据
+/// Reads Codex credentials from a file.
 fn read_codex_credentials_from_file() -> CodexCredentials {
     let auth_path = crate::codex_config::get_codex_auth_path();
 
@@ -532,7 +534,7 @@ fn read_codex_credentials_from_file() -> CodexCredentials {
     parse_codex_credentials_json(&content)
 }
 
-/// 解析 Codex 凭据 JSON（Keychain 和文件共用）
+/// Parses Codex credential JSON from either Keychain or a file.
 fn parse_codex_credentials_json(content: &str) -> CodexCredentials {
     let auth: CodexAuthJson = match serde_json::from_str(content) {
         Ok(a) => a,
@@ -546,7 +548,7 @@ fn parse_codex_credentials_json(content: &str) -> CodexCredentials {
         }
     };
 
-    // 仅 OAuth 模式有用量数据
+    // Usage data is available only in OAuth mode.
     if auth.auth_mode.as_deref() != Some("chatgpt") {
         return (
             None,
@@ -580,7 +582,7 @@ fn parse_codex_credentials_json(content: &str) -> CodexCredentials {
         }
     };
 
-    // 检查 token 是否可能过期（距上次刷新 > 8 天）
+    // Check whether the token may be expired: more than eight days since the last refresh.
     if let Some(ref last_refresh) = auth.last_refresh {
         if is_codex_token_stale(last_refresh) {
             return (
@@ -600,7 +602,7 @@ fn parse_codex_credentials_json(content: &str) -> CodexCredentials {
     )
 }
 
-/// 判断 Codex token 是否可能过期（Codex CLI 在 >8 天时自动刷新）
+/// Returns whether a Codex token may be expired. Codex CLI refreshes automatically after eight days.
 fn is_codex_token_stale(last_refresh: &str) -> bool {
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -615,7 +617,7 @@ fn is_codex_token_stale(last_refresh: &str) -> bool {
     }
 }
 
-// ── Codex API 查询 ──────────────────────────────────────
+// ── Codex API queries ──────────────────────────────────────
 
 #[derive(Deserialize)]
 struct CodexRateLimitWindow {
@@ -635,14 +637,15 @@ struct CodexUsageResponse {
     rate_limit: Option<CodexRateLimit>,
 }
 
-/// 根据窗口秒数映射到 tier 名称（与 Claude 的命名兼容以复用前端 i18n）
+/// Maps a window duration in seconds to a tier name compatible with Claude naming so renderer
+/// localization can be reused.
 fn window_seconds_to_tier_name(secs: i64) -> String {
     match secs {
         18000 => TIER_FIVE_HOUR.to_string(),
         604800 => TIER_SEVEN_DAY.to_string(),
-        // Codex 免费方案的 30 天窗口。显式映射到常量，与 tray 月分组、前端
-        // TIER_I18N_KEYS 保持同一标识（否则动态回退虽也得到 "30_day"，但字符串
-        // 分散在多处、易和托盘/前端白名单脱节）。见 #3651。
+        // Codex free-plan 30-day window. Map explicitly to the shared constant used by the tray's
+        // monthly grouping and renderer TIER_I18N_KEYS. A dynamic fallback would also produce
+        // "30_day" but would duplicate the string and risk drifting from those allowlists. See #3651.
         2_592_000 => TIER_THIRTY_DAY.to_string(),
         s => {
             let hours = s / 3600;
@@ -655,16 +658,16 @@ fn window_seconds_to_tier_name(secs: i64) -> String {
     }
 }
 
-/// Unix 时间戳（秒）转 ISO 8601 字符串
+/// Converts a Unix timestamp in seconds to an ISO 8601 string.
 fn unix_ts_to_iso(ts: i64) -> Option<String> {
     chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.to_rfc3339())
 }
 
-/// 查询 Codex / ChatGPT 反代订阅额度
+/// Queries subscription quota through the Codex/ChatGPT gateway.
 ///
-/// 参数化 `tool_label` 和 `expired_message` 让该函数可被两个调用点共用：
-/// - `"codex"` + "Please re-login with Codex CLI."（CLI 凭据路径）
-/// - `"codex_oauth"` + "Please re-login via Nexus Composer."（Nexus Composer 自管 OAuth 路径）
+/// Parameterized `tool_label` and `expired_message` let two callers share this function:
+/// - `"codex"` + "Please re-login with Codex CLI." for CLI credentials.
+/// - `"codex_oauth"` + "Please re-login via Nexus Composer." for OAuth managed by Nexus Composer.
 pub(crate) async fn query_codex_quota(
     access_token: &str,
     account_id: Option<&str>,
@@ -758,14 +761,14 @@ pub(crate) async fn query_codex_quota(
     }
 }
 
-// ── Gemini 凭据读取 ──────────────────────────────────────
+// ── Gemini credential loading ──────────────────────────────
 
-/// Gemini OAuth 凭据文件格式（~/.gemini/oauth_creds.json）
+/// Gemini OAuth credential-file format at ~/.gemini/oauth_creds.json.
 #[derive(Deserialize)]
 struct GeminiOAuthCredsFile {
     access_token: Option<String>,
     refresh_token: Option<String>,
-    expiry_date: Option<i64>, // 毫秒时间戳
+    expiry_date: Option<i64>, // Millisecond timestamp.
 }
 
 /// (access_token, refresh_token, status, message)
@@ -776,13 +779,13 @@ type GeminiCredentials = (
     Option<String>,
 );
 
-/// 读取 Gemini OAuth 凭据
+/// Reads Gemini OAuth credentials.
 ///
-/// 按优先级尝试以下来源：
+/// Tries these sources in priority order:
 /// 1. macOS Keychain (service: "gemini-cli-oauth", account: "main-account")
-/// 2. 凭据文件 ~/.gemini/oauth_creds.json（遗留格式）
+/// 2. Legacy credential file at ~/.gemini/oauth_creds.json.
 ///
-/// 仅 OAuth 认证模式（`oauth-personal`）有效；API key 模式无法查询官方用量。
+/// Valid only in OAuth authentication mode (`oauth-personal`); API-key mode cannot query official usage.
 fn read_gemini_credentials() -> GeminiCredentials {
     #[cfg(target_os = "macos")]
     {
@@ -794,7 +797,7 @@ fn read_gemini_credentials() -> GeminiCredentials {
     read_gemini_credentials_from_file()
 }
 
-/// 从 macOS Keychain 读取 Gemini 凭据
+/// Reads Gemini credentials from macOS Keychain.
 #[cfg(target_os = "macos")]
 fn read_gemini_credentials_from_keychain() -> Option<GeminiCredentials> {
     let output = std::process::Command::new("security")
@@ -822,9 +825,9 @@ fn read_gemini_credentials_from_keychain() -> Option<GeminiCredentials> {
     Some(parse_gemini_keychain_json(json_str))
 }
 
-/// 解析 Keychain 格式的 Gemini 凭据
+/// Parses Gemini credentials in Keychain format.
 ///
-/// Keychain 格式（keytar）：
+/// Keychain format used by keytar:
 /// ```json
 /// { "token": { "accessToken": "...", "refreshToken": "...", "expiresAt": 1234 }, "updatedAt": ... }
 /// ```
@@ -845,7 +848,7 @@ fn parse_gemini_keychain_json(content: &str) -> GeminiCredentials {
     let token = match parsed.get("token") {
         Some(t) => t,
         None => {
-            // Keychain 中可能是扁平格式，尝试文件格式解析
+            // Keychain may contain the flat format; try parsing it as the file format.
             return parse_gemini_file_json(content);
         }
     };
@@ -862,7 +865,7 @@ fn parse_gemini_keychain_json(content: &str) -> GeminiCredentials {
 
     match access_token {
         Some(at) if !at.is_empty() => {
-            // expiresAt 是毫秒时间戳
+            // expiresAt is a millisecond timestamp.
             if let Some(exp_ms) = expires_at {
                 if exp_ms < now_millis() {
                     return (
@@ -884,7 +887,7 @@ fn parse_gemini_keychain_json(content: &str) -> GeminiCredentials {
     }
 }
 
-/// 从文件读取 Gemini 凭据
+/// Reads Gemini credentials from a file.
 fn read_gemini_credentials_from_file() -> GeminiCredentials {
     let cred_path = crate::gemini_config::get_gemini_dir().join("oauth_creds.json");
     if !cred_path.exists() {
@@ -906,9 +909,9 @@ fn read_gemini_credentials_from_file() -> GeminiCredentials {
     parse_gemini_file_json(&content)
 }
 
-/// 解析文件格式的 Gemini 凭据
+/// Parses Gemini credentials in file format.
 ///
-/// 文件格式（oauth_creds.json）：
+/// File format in oauth_creds.json:
 /// ```json
 /// { "access_token": "...", "refresh_token": "...", "expiry_date": 1234 }
 /// ```
@@ -937,7 +940,7 @@ fn parse_gemini_file_json(content: &str) -> GeminiCredentials {
         }
     };
 
-    // expiry_date 是毫秒时间戳
+    // expiry_date is a millisecond timestamp.
     if let Some(exp_ms) = creds.expiry_date {
         if exp_ms < now_millis() {
             return (
@@ -957,17 +960,17 @@ fn parse_gemini_file_json(content: &str) -> GeminiCredentials {
     )
 }
 
-// ── Gemini Token 刷新 ──────────────────────────────────────
+// ── Gemini token refresh ───────────────────────────────────
 
-/// Gemini OAuth Client 凭据（公开值，来自 Gemini CLI 源码 google-gemini/gemini-cli）
+/// Public Gemini OAuth client credentials from the google-gemini/gemini-cli source.
 const GEMINI_OAUTH_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
 const GEMINI_OAUTH_CLIENT_SECRET: &str = "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";
 
-/// 使用 refresh_token 刷新 Gemini access token
+/// Refreshes a Gemini access token with refresh_token.
 ///
-/// Google OAuth access_token 仅有 ~1h 有效期，需要定期用 refresh_token 刷新。
-/// refresh_token 本身不过期（除非用户撤销授权）。
+/// A Google OAuth access_token is valid for about one hour and requires periodic refresh with
+/// refresh_token. The refresh_token does not expire unless the user revokes authorization.
 async fn refresh_gemini_token(refresh_token: &str) -> Option<String> {
     let client = crate::proxy::http_client::get();
 
@@ -992,16 +995,16 @@ async fn refresh_gemini_token(refresh_token: &str) -> Option<String> {
     body.get("access_token")?.as_str().map(String::from)
 }
 
-// ── Gemini API 查询 ──────────────────────────────────────
+// ── Gemini API queries ─────────────────────────────────────
 
-/// loadCodeAssist 响应
+/// loadCodeAssist response.
 #[derive(Deserialize)]
 struct GeminiLoadCodeAssistResponse {
     #[serde(rename = "cloudaicompanionProject")]
     cloudaicompanion_project: Option<serde_json::Value>,
 }
 
-/// 配额 bucket
+/// Quota bucket.
 #[derive(Deserialize)]
 struct GeminiBucketInfo {
     #[serde(rename = "remainingFraction")]
@@ -1012,13 +1015,13 @@ struct GeminiBucketInfo {
     model_id: Option<String>,
 }
 
-/// retrieveUserQuota 响应
+/// retrieveUserQuota response.
 #[derive(Deserialize)]
 struct GeminiQuotaResponse {
     buckets: Option<Vec<GeminiBucketInfo>>,
 }
 
-/// 从 loadCodeAssist 响应中提取项目 ID
+/// Extracts the project ID from a loadCodeAssist response.
 fn extract_project_id(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -1031,7 +1034,7 @@ fn extract_project_id(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// 将 Gemini 模型 ID 分类为 Pro / Flash / Flash Lite
+/// Classifies a Gemini model ID as Pro, Flash, or Flash Lite.
 fn classify_gemini_model(model_id: &str) -> &str {
     if model_id.contains("flash-lite") {
         TIER_GEMINI_FLASH_LITE
@@ -1044,15 +1047,15 @@ fn classify_gemini_model(model_id: &str) -> &str {
     }
 }
 
-/// 查询 Gemini 官方订阅额度
+/// Queries the official Gemini subscription quota.
 ///
-/// 两步 API 调用：
-/// 1. loadCodeAssist → 获取 cloudaicompanionProject
-/// 2. retrieveUserQuota → 获取按模型分桶的配额数据
+/// Two-step API call:
+/// 1. loadCodeAssist → obtain cloudaicompanionProject.
+/// 2. retrieveUserQuota → obtain quota data bucketed by model.
 async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
     let client = crate::proxy::http_client::get();
 
-    // ── Step 1: loadCodeAssist 获取项目 ID ──
+    // ── Step 1: get the project ID from loadCodeAssist ──
     let load_resp = client
         .post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
         .header("Authorization", format!("Bearer {access_token}"))
@@ -1113,7 +1116,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         .as_ref()
         .and_then(extract_project_id);
 
-    // ── Step 2: retrieveUserQuota 获取配额 ──
+    // ── Step 2: get quota data from retrieveUserQuota ──
     let mut quota_body = serde_json::json!({});
     if let Some(ref pid) = project_id {
         quota_body["project"] = serde_json::Value::String(pid.clone());
@@ -1169,7 +1172,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         }
     };
 
-    // ── 按模型分类汇总，每类取最低 remainingFraction ──
+    // ── Aggregate by model category, taking the lowest remainingFraction per category ──
     let mut category_map: HashMap<String, (f64, Option<String>)> = HashMap::new();
 
     if let Some(buckets) = quota_data.buckets {
@@ -1190,7 +1193,7 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
         }
     }
 
-    // 转换为 tiers（remainingFraction → utilization: 已用百分比）
+    // Convert to tiers: remainingFraction → utilization percentage used.
     let sort_order = |name: &str| -> usize {
         match name {
             TIER_GEMINI_PRO => 0,
@@ -1225,9 +1228,9 @@ async fn query_gemini_quota(access_token: &str) -> SubscriptionQuota {
     }
 }
 
-// ── 入口函数 ──────────────────────────────────────────────
+// ── Entry point ────────────────────────────────────────────
 
-/// 查询指定 CLI 工具的官方订阅额度
+/// Queries the official subscription quota for a specified CLI tool.
 pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, String> {
     match tool {
         "claude" => {
@@ -1241,7 +1244,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                     message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
                 )),
                 CredentialStatus::Expired => {
-                    // 即使过期也尝试调用 API（token 可能实际上仍有效）
+                    // Try the API even when marked expired because the token may still be valid.
                     if let Some(token) = token {
                         let result = query_claude_quota(&token).await;
                         if result.success {
@@ -1271,7 +1274,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                     message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
                 )),
                 CredentialStatus::Expired => {
-                    // 即使可能过期也尝试调用 API
+                    // Try the API even when the token may be expired.
                     if let Some(token) = token {
                         let result = query_codex_quota(
                             &token,
@@ -1313,13 +1316,13 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
                     message.unwrap_or_else(|| "Failed to parse credentials".to_string()),
                 )),
                 CredentialStatus::Expired => {
-                    // Gemini access_token 仅 ~1h 有效，尝试用 refresh_token 刷新
+                    // Gemini access_token lasts about one hour; refresh it with refresh_token.
                     if let Some(ref rt) = refresh_token {
                         if let Some(new_token) = refresh_gemini_token(rt).await {
                             return Ok(query_gemini_quota(&new_token).await);
                         }
                     }
-                    // 刷新失败，尝试用旧 token
+                    // If refresh fails, try the old token.
                     if let Some(ref token) = token {
                         let result = query_gemini_quota(token).await;
                         if result.success {
@@ -1342,7 +1345,7 @@ pub async fn get_subscription_quota(tool: &str) -> Result<SubscriptionQuota, Str
     }
 }
 
-// ── 辅助函数 ──────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────
 
 fn now_millis() -> i64 {
     SystemTime::now()
@@ -1357,13 +1360,13 @@ mod tests {
 
     #[test]
     fn window_seconds_map_to_expected_tier_names() {
-        // 官方特例窗口
+        // Official special-case windows.
         assert_eq!(window_seconds_to_tier_name(18000), TIER_FIVE_HOUR);
         assert_eq!(window_seconds_to_tier_name(604800), TIER_SEVEN_DAY);
-        // Codex 免费方案的次要窗口是 30 天（30 * 24 * 3600 = 2_592_000 秒）。
-        // 前端 TIER_I18N_KEYS 与 tray 月分组都需要认得 "30_day"，见 #3651。
+        // The Codex free plan's secondary window is 30 days (30 * 24 * 3600 = 2_592_000 seconds).
+        // Renderer TIER_I18N_KEYS and the tray's monthly grouping both recognize "30_day". See #3651.
         assert_eq!(window_seconds_to_tier_name(2_592_000), TIER_THIRTY_DAY);
-        // 其他窗口按小时/天回退命名
+        // Name other windows by their duration in hours or days.
         assert_eq!(window_seconds_to_tier_name(3600), "1_hour");
         assert_eq!(window_seconds_to_tier_name(86400), "1_day");
     }

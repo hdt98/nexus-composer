@@ -1,9 +1,9 @@
-//! Skills 服务层
+//! Skills service layer.
 //!
-//! v3.10.0+ 统一管理架构：
-//! - SSOT（单一事实源）：`~/.cc-switch/skills/`
-//! - 安装时下载到 SSOT，按需同步到各应用目录
-//! - 数据库存储安装记录和启用状态
+//! Unified management architecture in v3.10.0 and later:
+//! - Single source of truth (SSOT): `~/.cc-switch/skills/`.
+//! - Installations download to the SSOT and synchronize to application directories as needed.
+//! - The database stores installation records and enablement state.
 
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -20,113 +20,113 @@ use crate::config::get_app_config_dir;
 use crate::database::Database;
 use crate::error::format_skill_error;
 
-// ========== 数据结构 ==========
+// ========== Data structures ==========
 
-/// Skill 同步方式
+/// Skill synchronization mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum SyncMethod {
-    /// 自动选择：优先 symlink，失败时回退到 copy
+    /// Automatic: prefer symlinks and fall back to copying on failure.
     #[default]
     Auto,
-    /// 符号链接（推荐，节省磁盘空间）
+    /// Symbolic link, recommended to save disk space.
     Symlink,
-    /// 文件复制（兼容模式）
+    /// File copy for compatibility.
     Copy,
 }
 
-/// Skill 存储位置（SSOT 目录选择）
+/// Skill storage location, selecting the SSOT directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStorageLocation {
-    /// Nexus Composer 管理目录 (~/.cc-switch/skills/)
+    /// Nexus Composer-managed directory: ~/.cc-switch/skills/.
     #[default]
     CcSwitch,
-    /// Agent Skills 统一标准目录 (~/.agents/skills/)
+    /// Standard Agent Skills directory: ~/.agents/skills/.
     Unified,
 }
 
-/// 可发现的技能（来自仓库）
+/// Discoverable Skill from a repository.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoverableSkill {
-    /// 唯一标识: "owner/name:directory"
+    /// Unique identifier: "owner/name:directory".
     pub key: String,
-    /// 显示名称 (从 SKILL.md 解析)
+    /// Display name parsed from SKILL.md.
     pub name: String,
-    /// 技能描述
+    /// Skill description.
     pub description: String,
-    /// 目录名称 (安装路径的最后一段)
+    /// Directory name, the final component of the installation path.
     pub directory: String,
     /// GitHub README URL
     #[serde(rename = "readmeUrl")]
     pub readme_url: Option<String>,
-    /// 仓库所有者
+    /// Repository owner.
     #[serde(rename = "repoOwner")]
     pub repo_owner: String,
-    /// 仓库名称
+    /// Repository name.
     #[serde(rename = "repoName")]
     pub repo_name: String,
-    /// 分支名称
+    /// Branch name.
     #[serde(rename = "repoBranch")]
     pub repo_branch: String,
 }
 
-/// 技能对象（兼容旧 API，内部使用 DiscoverableSkill）
+/// Skill object retained for the legacy API; internal code uses DiscoverableSkill.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
-    /// 唯一标识: "owner/name:directory" 或 "local:directory"
+    /// Unique identifier: "owner/name:directory" or "local:directory".
     pub key: String,
-    /// 显示名称 (从 SKILL.md 解析)
+    /// Display name parsed from SKILL.md.
     pub name: String,
-    /// 技能描述
+    /// Skill description.
     pub description: String,
-    /// 目录名称 (安装路径的最后一段)
+    /// Directory name, the final component of the installation path.
     pub directory: String,
     /// GitHub README URL
     #[serde(rename = "readmeUrl")]
     pub readme_url: Option<String>,
-    /// 是否已安装
+    /// Whether the Skill is installed.
     pub installed: bool,
-    /// 仓库所有者
+    /// Repository owner.
     #[serde(rename = "repoOwner")]
     pub repo_owner: Option<String>,
-    /// 仓库名称
+    /// Repository name.
     #[serde(rename = "repoName")]
     pub repo_name: Option<String>,
-    /// 分支名称
+    /// Branch name.
     #[serde(rename = "repoBranch")]
     pub repo_branch: Option<String>,
 }
 
-/// 仓库配置
+/// Repository configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillRepo {
-    /// GitHub 用户/组织名
+    /// GitHub user or organization name.
     pub owner: String,
-    /// 仓库名称
+    /// Repository name.
     pub name: String,
-    /// 分支 (默认 "main")
+    /// Branch, defaulting to "main".
     pub branch: String,
-    /// 是否启用
+    /// Whether the repository is enabled.
     pub enabled: bool,
 }
 
-/// 技能安装状态（旧版兼容）
+/// Skill installation state retained for backward compatibility.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillState {
-    /// 是否已安装
+    /// Whether the Skill is installed.
     pub installed: bool,
-    /// 安装时间
+    /// Installation time.
     #[serde(rename = "installedAt")]
     pub installed_at: DateTime<Utc>,
 }
 
-/// 持久化存储结构（仓库配置）
+/// Persistent repository-configuration structure.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillStore {
-    /// directory -> 安装状态（旧版兼容，新版不使用）
+    /// directory -> installation state, retained for compatibility and unused by the new format.
     pub skills: HashMap<String, SkillState>,
-    /// 仓库列表
+    /// Repository list.
     pub repos: Vec<SkillRepo>,
 }
 
@@ -164,7 +164,7 @@ impl Default for SkillStore {
     }
 }
 
-/// Skill 卸载结果
+/// Skill uninstallation result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillUninstallResult {
@@ -172,21 +172,21 @@ pub struct SkillUninstallResult {
     pub backup_path: Option<String>,
 }
 
-/// Skill 更新检测结果
+/// Skill update-check result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillUpdateInfo {
     /// Skill ID
     pub id: String,
-    /// Skill 名称
+    /// Skill name.
     pub name: String,
-    /// 当前本地哈希
+    /// Current local hash.
     pub current_hash: Option<String>,
-    /// 远程最新哈希
+    /// Latest remote hash.
     pub remote_hash: String,
 }
 
-/// Skill 存储位置迁移结果
+/// Skill storage-location migration result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationResult {
@@ -195,12 +195,12 @@ pub struct MigrationResult {
     pub errors: Vec<String>,
 }
 
-// ========== skills.sh API 类型 ==========
+// ========== skills.sh API types ==========
 
-/// skills.sh API 原始响应
+/// Raw skills.sh API response.
 ///
-/// 注意：API 命名不一致（searchType 是 camelCase，duration_ms 是 snake_case），
-/// 因此不能用 rename_all，需要逐字段指定。
+/// The API mixes naming conventions: searchType is camelCase while duration_ms is snake_case.
+/// Each field therefore needs an explicit name instead of rename_all.
 #[derive(Debug, Clone, Deserialize)]
 struct SkillsShApiResponse {
     pub query: String,
@@ -213,7 +213,7 @@ struct SkillsShApiResponse {
     pub duration_ms: u64,
 }
 
-/// skills.sh API 原始技能条目
+/// Raw Skill entry from the skills.sh API.
 #[derive(Debug, Clone, Deserialize)]
 struct SkillsShApiSkill {
     pub id: String,
@@ -224,7 +224,7 @@ struct SkillsShApiSkill {
     pub source: String,
 }
 
-/// skills.sh 搜索结果（返回给前端）
+/// skills.sh search result returned to the renderer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsShSearchResult {
@@ -233,7 +233,7 @@ pub struct SkillsShSearchResult {
     pub query: String,
 }
 
-/// skills.sh 可安装技能（返回给前端）
+/// Installable Skill from skills.sh returned to the renderer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsShDiscoverableSkill {
@@ -266,14 +266,14 @@ struct SkillBackupMetadata {
 
 const SKILL_BACKUP_RETAIN_COUNT: usize = 20;
 
-/// 技能元数据 (从 SKILL.md 解析)
+/// Skill metadata parsed from SKILL.md.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SkillMetadata {
     pub name: Option<String>,
     pub description: Option<String>,
 }
 
-/// 导入已有 Skill 时，前端显式提交的启用应用选择
+/// Explicit application enablement choices submitted when importing an existing Skill.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportSkillSelection {
@@ -288,15 +288,15 @@ struct LegacySkillMigrationRow {
     app_type: String,
 }
 
-// ========== ~/.agents/ lock 文件解析 ==========
+// ========== ~/.agents/ lock-file parsing ==========
 
-/// `~/.agents/.skill-lock.json` 文件结构
+/// Structure of `~/.agents/.skill-lock.json`.
 #[derive(Deserialize)]
 struct AgentsLockFile {
     skills: HashMap<String, AgentsLockSkill>,
 }
 
-/// lock 文件中单个 skill 的信息
+/// Information for one Skill in the lock file.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentsLockSkill {
@@ -334,7 +334,7 @@ fn parse_branch_from_source_url(source_url: Option<&str>) -> Option<String> {
         return None;
     }
 
-    // 支持 https://github.com/owner/repo/tree/<branch>/...
+    // Support https://github.com/owner/repo/tree/<branch>/...
     if let Some((_, after_tree)) = source_url.split_once("/tree/") {
         let branch = after_tree
             .split('/')
@@ -344,7 +344,7 @@ fn parse_branch_from_source_url(source_url: Option<&str>) -> Option<String> {
         return Some(branch.to_string());
     }
 
-    // 支持 URL fragment: ...git#branch
+    // Support URL fragments such as ...git#branch.
     if let Some((_, fragment)) = source_url.split_once('#') {
         let branch = fragment
             .split('&')
@@ -354,7 +354,7 @@ fn parse_branch_from_source_url(source_url: Option<&str>) -> Option<String> {
         return Some(branch.to_string());
     }
 
-    // 支持 query: ...?branch=xxx / ?ref=xxx
+    // Support query parameters such as ...?branch=xxx or ...?ref=xxx.
     if let Some((_, query)) = source_url.split_once('?') {
         for pair in query.split('&') {
             let Some((key, value)) = pair.split_once('=') else {
@@ -372,19 +372,19 @@ fn parse_branch_from_source_url(source_url: Option<&str>) -> Option<String> {
     None
 }
 
-/// 获取 `~/.agents/skills/` 目录（存在时返回）
+/// Returns the `~/.agents/skills/` directory when it exists.
 fn get_agents_skills_dir() -> Option<PathBuf> {
     dirs::home_dir()
         .map(|h| h.join(".agents").join("skills"))
         .filter(|p| p.exists())
 }
 
-/// 解析 `~/.agents/.skill-lock.json`，返回 skill_name -> 仓库信息
+/// Parses `~/.agents/.skill-lock.json` and returns skill_name -> repository information.
 fn parse_agents_lock() -> HashMap<String, LockRepoInfo> {
     let path = match dirs::home_dir() {
         Some(h) => h.join(".agents").join(".skill-lock.json"),
         None => {
-            log::warn!("无法获取 HOME 目录，跳过解析 agents lock 文件");
+            log::warn!("Cannot locate HOME; skipping the agents lock file");
             return HashMap::new();
         }
     };
@@ -392,9 +392,13 @@ fn parse_agents_lock() -> HashMap<String, LockRepoInfo> {
         Ok(c) => c,
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
-                log::debug!("未找到 agents lock 文件: {}", path.display());
+                log::debug!("Agents lock file was not found: {}", path.display());
             } else {
-                log::warn!("读取 agents lock 文件失败 ({}): {}", path.display(), e);
+                log::warn!(
+                    "Failed to read the agents lock file ({}): {}",
+                    path.display(),
+                    e
+                );
             }
             return HashMap::new();
         }
@@ -402,7 +406,11 @@ fn parse_agents_lock() -> HashMap<String, LockRepoInfo> {
     let lock: AgentsLockFile = match serde_json::from_str(&content) {
         Ok(l) => l,
         Err(e) => {
-            log::warn!("解析 agents lock 文件失败 ({}): {}", path.display(), e);
+            log::warn!(
+                "Failed to parse the agents lock file ({}): {}",
+                path.display(),
+                e
+            );
             return HashMap::new();
         }
     };
@@ -430,7 +438,7 @@ fn parse_agents_lock() -> HashMap<String, LockRepoInfo> {
         })
         .collect();
     log::info!(
-        "agents lock 文件解析完成，共识别 {} 个 github skill",
+        "Finished parsing the agents lock file; recognized {} GitHub Skills",
         parsed.len()
     );
     parsed
@@ -451,12 +459,13 @@ impl SkillService {
         Self
     }
 
-    /// 构建 Skill 文档 URL（指向仓库中的 SKILL.md 文件）
+    /// Builds a Skill documentation URL pointing to SKILL.md in the repository.
     fn build_skill_doc_url(owner: &str, repo: &str, branch: &str, doc_path: &str) -> String {
         format!("https://github.com/{owner}/{repo}/blob/{branch}/{doc_path}")
     }
 
-    /// 从旧 readme_url 中提取仓库内文档路径，兼容 `blob`/`tree` 两种格式
+    /// Extracts the in-repository documentation path from a legacy readme_url,
+    /// accepting both `blob` and `tree` formats.
     fn extract_doc_path_from_url(url: &str) -> Option<String> {
         let marker = if url.contains("/blob/") {
             "/blob/"
@@ -474,9 +483,9 @@ impl SkillService {
         Some(path.to_string())
     }
 
-    // ========== 路径管理 ==========
+    // ========== Path management ==========
 
-    /// 获取 SSOT 目录（根据设置返回 ~/.cc-switch/skills/ 或 ~/.agents/skills/）
+    /// Returns the configured SSOT directory: ~/.cc-switch/skills/ or ~/.agents/skills/.
     pub fn get_ssot_dir() -> Result<PathBuf> {
         let location = crate::settings::get_skill_storage_location();
         let dir = match location {
@@ -494,16 +503,16 @@ impl SkillService {
         Ok(dir)
     }
 
-    /// 获取 Skill 卸载备份目录（~/.cc-switch/skill-backups/）
+    /// Returns the Skill uninstallation backup directory: ~/.cc-switch/skill-backups/.
     fn get_backup_dir() -> Result<PathBuf> {
         let dir = get_app_config_dir().join("skill-backups");
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
 
-    /// 获取应用的 skills 目录
+    /// Returns an application's Skills directory.
     pub fn get_app_skills_dir(app: &AppType) -> Result<PathBuf> {
-        // 目录覆盖：优先使用用户在 settings.json 中配置的 override 目录
+        // Prefer a directory override configured by the user in settings.json.
         match app {
             AppType::Claude => {
                 if let Some(custom) = crate::settings::get_claude_override_dir() {
@@ -538,7 +547,7 @@ impl SkillService {
             }
         }
 
-        // 默认路径：回退到用户主目录下的标准位置
+        // Fall back to the standard location under the user's home directory.
         let home = dirs::home_dir().context(format_skill_error(
             "GET_HOME_DIR_FAILED",
             &[],
@@ -556,20 +565,20 @@ impl SkillService {
         })
     }
 
-    // ========== 统一管理方法 ==========
+    // ========== Unified management ==========
 
-    /// 获取所有已安装的 Skills
+    /// Returns all installed Skills.
     pub fn get_all_installed(db: &Arc<Database>) -> Result<Vec<InstalledSkill>> {
         let skills = db.get_all_installed_skills()?;
         Ok(skills.into_values().collect())
     }
 
-    /// 安装 Skill
+    /// Installs a Skill.
     ///
-    /// 流程：
-    /// 1. 下载到 SSOT 目录
-    /// 2. 保存到数据库
-    /// 3. 同步到启用的应用目录
+    /// Process:
+    /// 1. Download into the SSOT directory.
+    /// 2. Save the database record.
+    /// 3. Synchronize to enabled application directories.
     pub async fn install(
         &self,
         db: &Arc<Database>,
@@ -578,7 +587,7 @@ impl SkillService {
     ) -> Result<InstalledSkill> {
         let ssot_dir = Self::get_ssot_dir()?;
 
-        // 允许多级目录（如 a/b/c），但必须是安全的相对路径。
+        // Allow nested directories such as a/b/c, but require a safe relative path.
         let source_rel = Self::sanitize_skill_source_path(&skill.directory).ok_or_else(|| {
             anyhow!(format_skill_error(
                 "INVALID_SKILL_DIRECTORY",
@@ -586,7 +595,7 @@ impl SkillService {
                 Some("checkZipContent"),
             ))
         })?;
-        // 安装目录名始终使用最后一段，避免在 SSOT 中创建多级目录。
+        // Always use the final component as the installation directory to avoid nesting in the SSOT.
         let install_name = source_rel
             .file_name()
             .and_then(|name| Self::sanitize_install_name(&name.to_string_lossy()))
@@ -598,27 +607,28 @@ impl SkillService {
                 ))
             })?;
 
-        // 检查数据库中是否已有同名 directory 的 skill（来自其他仓库）
+        // Check whether the database already contains a same-directory Skill from any repository.
         let existing_skills = db.get_all_installed_skills()?;
         for existing in existing_skills.values() {
             if existing.directory.eq_ignore_ascii_case(&install_name) {
-                // 检查是否来自同一仓库
+                // Check whether it comes from the same repository.
                 let same_repo = existing.repo_owner.as_deref() == Some(&skill.repo_owner)
                     && existing.repo_name.as_deref() == Some(&skill.repo_name);
                 if same_repo {
-                    // 同一仓库的同名 skill，返回现有记录（可能需要更新启用状态）
+                    // For the same Skill in the same repository, return the existing record after
+                    // updating its enablement state if needed.
                     let mut updated = existing.clone();
                     updated.apps.set_enabled_for(current_app, true);
                     db.save_skill(&updated)?;
                     Self::sync_to_app_dir(&updated.directory, current_app)?;
                     log::info!(
-                        "Skill {} 已存在，更新 {:?} 启用状态",
+                        "Skill {} already exists; updating {:?} enablement",
                         updated.name,
                         current_app
                     );
                     return Ok(updated);
                 } else {
-                    // 不同仓库的同名 skill，报错
+                    // Reject a same-directory Skill from a different repository.
                     return Err(anyhow!(format_skill_error(
                         "SKILL_DIRECTORY_CONFLICT",
                         &[
@@ -646,7 +656,7 @@ impl SkillService {
 
         let mut repo_branch = skill.repo_branch.clone();
 
-        // 如果已存在则跳过下载
+        // Skip the download if the Skill already exists.
         if !dest.exists() {
             let repo = SkillRepo {
                 owner: skill.repo_owner.clone(),
@@ -655,7 +665,7 @@ impl SkillService {
                 enabled: true,
             };
 
-            // 下载仓库
+            // Download the repository.
             let (temp_dir, used_branch) = timeout(
                 std::time::Duration::from_secs(60),
                 self.download_repo(&repo),
@@ -674,7 +684,7 @@ impl SkillService {
             })??;
             repo_branch = used_branch;
 
-            // 复制到 SSOT
+            // Copy into the SSOT.
             let source =
                 Self::resolve_skill_source_dir(&temp_dir, &skill.directory).ok_or_else(|| {
                     let missing = temp_dir.join(&source_rel).display().to_string();
@@ -706,10 +716,10 @@ impl SkillService {
             Self::copy_dir_recursive(&canonical_source, &dest)?;
             let _ = fs::remove_dir_all(&temp_dir);
 
-            // 使用实际下载成功的分支，避免 readme_url / repo_branch 与真实分支不一致。
+            // Record the branch that actually downloaded so readme_url and repo_branch match reality.
             if repo_branch != skill.repo_branch {
                 log::info!(
-                    "Skill {}/{} 分支自动回退: {} -> {}",
+                    "Skill {}/{} automatically fell back from branch {} to {}",
                     skill.repo_owner,
                     skill.repo_name,
                     skill.repo_branch,
@@ -738,8 +748,8 @@ impl SkillService {
             &doc_path,
         ));
 
-        // 创建 InstalledSkill 记录
-        // 计算内容哈希
+        // Create the InstalledSkill record.
+        // Compute the content hash.
         let content_hash = Self::compute_dir_hash(&dest).map(Some).unwrap_or_else(|e| {
             log::warn!("Failed to compute content hash for {}: {e}", install_name);
             None
@@ -764,14 +774,14 @@ impl SkillService {
             updated_at: 0,
         };
 
-        // 保存到数据库
+        // Save it to the database.
         db.save_skill(&installed_skill)?;
 
-        // 同步到当前应用目录
+        // Synchronize it to the current application's directory.
         Self::sync_to_app_dir(&install_name, current_app)?;
 
         log::info!(
-            "Skill {} 安装成功，已启用 {:?}",
+            "Installed Skill {}; enabled for {:?}",
             installed_skill.name,
             current_app
         );
@@ -779,14 +789,14 @@ impl SkillService {
         Ok(installed_skill)
     }
 
-    /// 卸载 Skill
+    /// Uninstalls a Skill.
     ///
-    /// 流程：
-    /// 1. 从所有应用目录删除
-    /// 2. 从 SSOT 删除
-    /// 3. 从数据库删除
+    /// Process:
+    /// 1. Remove it from every application directory.
+    /// 2. Remove it from the SSOT.
+    /// 3. Delete its database record.
     pub fn uninstall(db: &Arc<Database>, id: &str) -> Result<SkillUninstallResult> {
-        // 获取 skill 信息
+        // Load the Skill record.
         let skill = db
             .get_installed_skill(id)?
             .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
@@ -794,23 +804,23 @@ impl SkillService {
         let backup_path =
             Self::create_uninstall_backup(&skill)?.map(|path| path.to_string_lossy().to_string());
 
-        // 从所有应用目录删除
+        // Remove it from every application directory.
         for app in AppType::all() {
             let _ = Self::remove_from_app(&skill.directory, &app);
         }
 
-        // 从 SSOT 删除
+        // Remove it from the SSOT.
         let ssot_dir = Self::get_ssot_dir()?;
         let skill_path = ssot_dir.join(&skill.directory);
         if skill_path.exists() {
             fs::remove_dir_all(&skill_path)?;
         }
 
-        // 从数据库删除
+        // Delete it from the database.
         db.delete_skill(id)?;
 
         log::info!(
-            "Skill {} 卸载成功{}",
+            "Uninstalled Skill {}{}",
             skill.name,
             backup_path
                 .as_deref()
@@ -821,12 +831,12 @@ impl SkillService {
         Ok(SkillUninstallResult { backup_path })
     }
 
-    // ========== 更新检测 ==========
+    // ========== Update detection ==========
 
-    /// 计算目录内容的 SHA-256 哈希
+    /// Computes the SHA-256 hash of a directory's contents.
     ///
-    /// 递归遍历目录下所有非隐藏文件，按相对路径字典序排列，
-    /// 将 "相对路径\0内容\0" 逐文件 feed 给同一个 hasher。
+    /// Recursively visits every non-hidden file in relative-path lexicographic order and feeds
+    /// "relative-path\0contents\0" for each file into one hasher.
     pub fn compute_dir_hash(dir: &Path) -> Result<String> {
         use sha2::{Digest, Sha256};
 
@@ -841,7 +851,7 @@ impl SkillService {
             hasher.update(rel_str.as_bytes());
             hasher.update(b"\0");
             let content = fs::read(file_path)
-                .with_context(|| format!("读取文件失败: {}", file_path.display()))?;
+                .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
             hasher.update(&content);
             hasher.update(b"\0");
         }
@@ -849,11 +859,11 @@ impl SkillService {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
-    /// 递归收集目录下所有非隐藏文件
+    /// Recursively collects all non-hidden files under a directory.
     #[allow(clippy::only_used_in_recursion)]
     fn collect_files_for_hash(base: &Path, current: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         let entries = fs::read_dir(current)
-            .with_context(|| format!("读取目录失败: {}", current.display()))?;
+            .with_context(|| format!("Failed to read directory: {}", current.display()))?;
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().to_string();
@@ -870,15 +880,15 @@ impl SkillService {
         Ok(())
     }
 
-    /// 检查所有已安装 Skill 的更新
+    /// Checks every installed Skill for updates.
     ///
-    /// 仅检查有 repo_owner 的 Skill（本地 Skill 跳过），
-    /// 按仓库分组下载，避免重复下载同一仓库。
+    /// Checks only Skills with a repo_owner, skipping local Skills. Downloads are grouped by
+    /// repository to avoid downloading the same repository repeatedly.
     pub async fn check_updates(&self, db: &Arc<Database>) -> Result<Vec<SkillUpdateInfo>> {
         let skills = db.get_all_installed_skills()?;
         let mut updates = Vec::new();
 
-        // 按 (owner, name, branch) 分组
+        // Group by (owner, name, branch).
         let mut repo_groups: HashMap<(String, String, String), Vec<InstalledSkill>> =
             HashMap::new();
 
@@ -905,7 +915,7 @@ impl SkillService {
                 enabled: true,
             };
 
-            // 下载仓库 ZIP
+            // Download the repository ZIP.
             let (temp_dir, _used_branch) = match timeout(
                 std::time::Duration::from_secs(60),
                 self.download_repo(&repo),
@@ -914,23 +924,31 @@ impl SkillService {
             {
                 Ok(Ok(result)) => result,
                 Ok(Err(e)) => {
-                    log::warn!("检查更新时下载 {}/{} 失败: {e}", owner, name);
+                    log::warn!(
+                        "Failed to download {}/{} while checking for updates: {e}",
+                        owner,
+                        name
+                    );
                     continue;
                 }
                 Err(_) => {
-                    log::warn!("检查更新时下载 {}/{} 超时", owner, name);
+                    log::warn!(
+                        "Timed out downloading {}/{} while checking for updates",
+                        owner,
+                        name
+                    );
                     continue;
                 }
             };
 
-            // 扫描仓库中的所有 Skill 目录
+            // Scan every Skill directory in the repository.
             let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
             let _ = self.scan_dir_recursive(&temp_dir, &temp_dir, &repo, &mut remote_skills);
 
             for skill in group_skills {
-                // 在远程仓库中找到匹配的 Skill 目录
+                // Find the matching Skill directory in the remote repository.
                 let remote_match = remote_skills.iter().find(|rs| {
-                    // 匹配方式：安装名称的最后一段
+                    // Match by the final component of the installation name.
                     let remote_install_name =
                         rs.directory.rsplit('/').next().unwrap_or(&rs.directory);
                     remote_install_name.eq_ignore_ascii_case(&skill.directory)
@@ -947,12 +965,12 @@ impl SkillService {
                 let remote_hash = match Self::compute_dir_hash(&remote_skill_dir) {
                     Ok(h) => h,
                     Err(e) => {
-                        log::warn!("计算远程哈希失败 {}: {e}", skill.id);
+                        log::warn!("Failed to compute the remote hash for {}: {e}", skill.id);
                         continue;
                     }
                 };
 
-                // 本地哈希：优先数据库，否则实时计算
+                // Prefer the local hash from the database; compute it on demand when absent.
                 let local_hash = match &skill.content_hash {
                     Some(h) => Some(h.clone()),
                     None => {
@@ -987,7 +1005,7 @@ impl SkillService {
         Ok(updates)
     }
 
-    /// 更新单个 Skill（重新下载并替换本地文件）
+    /// Updates one Skill by downloading it again and replacing local files.
     pub async fn update_skill(&self, db: &Arc<Database>, skill_id: &str) -> Result<InstalledSkill> {
         let skill = db
             .get_installed_skill(skill_id)?
@@ -1014,7 +1032,7 @@ impl SkillService {
 
         let ssot_dir = Self::get_ssot_dir()?;
 
-        // 下载仓库
+        // Download the repository.
         let (temp_dir, used_branch) = timeout(
             std::time::Duration::from_secs(60),
             self.download_repo(&repo),
@@ -1028,7 +1046,7 @@ impl SkillService {
             ))
         })??;
 
-        // 在解压的仓库中查找 Skill 源目录
+        // Find the Skill source directory in the extracted repository.
         let mut remote_skills: Vec<DiscoverableSkill> = Vec::new();
         let _ = self.scan_dir_recursive(&temp_dir, &temp_dir, &repo, &mut remote_skills);
 
@@ -1058,10 +1076,10 @@ impl SkillService {
                 ))
             })?;
 
-        // 备份旧文件
+        // Back up the old files.
         let _ = Self::create_uninstall_backup(&skill);
 
-        // 删除旧 SSOT 目录并复制新文件
+        // Remove the old SSOT directory and copy the new files.
         let dest = ssot_dir.join(&skill.directory);
         if dest.exists() {
             fs::remove_dir_all(&dest)?;
@@ -1069,12 +1087,12 @@ impl SkillService {
         Self::copy_dir_recursive(&source, &dest)?;
         let _ = fs::remove_dir_all(&temp_dir);
 
-        // 计算新哈希 + 解析新元数据
+        // Compute the new hash and parse the new metadata.
         let new_hash = Self::compute_dir_hash(&dest).ok();
         let skill_md = dest.join("SKILL.md");
         let (new_name, new_description) = Self::read_skill_name_desc(&skill_md, &skill.directory);
 
-        // 更新 readme_url
+        // Update readme_url.
         let doc_path = skill
             .readme_url
             .as_deref()
@@ -1104,18 +1122,18 @@ impl SkillService {
 
         db.save_skill(&updated_skill)?;
 
-        // 同步到所有已启用的应用目录
+        // Synchronize to every enabled application directory.
         for app in updated_skill.apps.enabled_apps() {
             if let Err(e) = Self::sync_to_app_dir(&updated_skill.directory, &app) {
-                log::warn!("同步更新后的 skill 到 {:?} 失败: {e}", app);
+                log::warn!("Failed to synchronize the updated Skill to {:?}: {e}", app);
             }
         }
 
-        log::info!("Skill {} 更新成功", updated_skill.name);
+        log::info!("Updated Skill {}", updated_skill.name);
         Ok(updated_skill)
     }
 
-    /// 为缺少 content_hash 的已安装 Skill 补算哈希
+    /// Backfills hashes for installed Skills missing content_hash.
     pub fn backfill_content_hashes(db: &Arc<Database>) -> Result<usize> {
         let skills = db.get_all_installed_skills()?;
         let ssot_dir = Self::get_ssot_dir()?;
@@ -1135,20 +1153,21 @@ impl SkillService {
                     count += 1;
                 }
                 Err(e) => {
-                    log::warn!("补算哈希失败 {}: {e}", skill.id);
+                    log::warn!("Failed to backfill the hash for {}: {e}", skill.id);
                 }
             }
         }
 
         if count > 0 {
-            log::info!("已为 {count} 个 Skill 补算内容哈希");
+            log::info!("Backfilled content hashes for {count} Skills");
         }
         Ok(count)
     }
 
-    /// 迁移 Skill 存储位置（在两个 SSOT 目录间移动文件）
+    /// Migrates Skill storage by moving files between the two SSOT directories.
     ///
-    /// 安全策略：先移文件，后改设置。中途崩溃时设置仍指向旧目录。
+    /// Safety strategy: move files before updating settings, so a crash leaves settings pointing
+    /// to the old directory.
     pub fn migrate_storage(
         db: &Arc<Database>,
         target: SkillStorageLocation,
@@ -1162,7 +1181,7 @@ impl SkillService {
             });
         }
 
-        // 1. 解析旧目录和新目录（不改设置）
+        // 1. Resolve the old and new directories without changing settings.
         let old_dir = Self::get_ssot_dir()?;
         let new_dir = match target {
             SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
@@ -1173,7 +1192,7 @@ impl SkillService {
         };
         fs::create_dir_all(&new_dir)?;
 
-        // 2. 逐个移动 skill 目录
+        // 2. Move each Skill directory.
         let skills = db.get_all_installed_skills()?;
         let mut result = MigrationResult {
             migrated_count: 0,
@@ -1194,7 +1213,7 @@ impl SkillService {
                 continue;
             }
 
-            // 优先 rename（同文件系统原子操作），失败则 copy+delete
+            // Prefer an atomic same-filesystem rename; fall back to copy and delete.
             match fs::rename(&src, &dst) {
                 Ok(()) => result.migrated_count += 1,
                 Err(_) => match Self::copy_dir_recursive(&src, &dst) {
@@ -1209,16 +1228,16 @@ impl SkillService {
             }
         }
 
-        // 3. 文件移动完成后才持久化设置
+        // 3. Persist settings only after all file moves complete.
         crate::settings::set_skill_storage_location(target)?;
 
-        // 4. 刷新所有应用目录的 symlink（指向新 SSOT）
+        // 4. Refresh symlinks in every application directory to target the new SSOT.
         for app in AppType::all() {
             let _ = Self::sync_to_app(db, &app);
         }
 
         log::info!(
-            "Skill 存储迁移完成: {} 迁移, {} 跳过, {} 错误",
+            "Skill storage migration complete: {} migrated, {} skipped, {} errors",
             result.migrated_count,
             result.skipped_count,
             result.errors.len()
@@ -1235,7 +1254,7 @@ impl SkillService {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    log::warn!("读取 Skill 备份目录项失败: {err}");
+                    log::warn!("Failed to read a Skill backup-directory entry: {err}");
                     continue;
                 }
             };
@@ -1252,7 +1271,7 @@ impl SkillService {
                     skill: metadata.skill,
                 }),
                 Err(err) => {
-                    log::warn!("解析 Skill 备份失败 {}: {err:#}", path.display());
+                    log::warn!("Failed to parse Skill backup {}: {err:#}", path.display());
                 }
             }
         }
@@ -1276,7 +1295,7 @@ impl SkillService {
         fs::remove_dir_all(&backup_path)
             .with_context(|| format!("failed to delete {}", backup_path.display()))?;
 
-        log::info!("Skill 备份已删除: {}", backup_path.display());
+        log::info!("Deleted Skill backup: {}", backup_path.display());
         Ok(())
     }
 
@@ -1325,7 +1344,7 @@ impl SkillService {
 
         Self::copy_dir_recursive(&backup_skill_dir, &restore_path)?;
 
-        // 重新计算内容哈希
+        // Recompute the content hash.
         restored_skill.content_hash = Self::compute_dir_hash(&restore_path).ok();
 
         if let Err(err) = db.save_skill(&restored_skill) {
@@ -1342,7 +1361,7 @@ impl SkillService {
         }
 
         log::info!(
-            "Skill {} 已从备份恢复到 {}",
+            "Restored Skill {} from backup to {}",
             restored_skill.name,
             restore_path.display()
         );
@@ -1350,37 +1369,42 @@ impl SkillService {
         Ok(restored_skill)
     }
 
-    /// 切换应用启用状态
+    /// Toggles application enablement.
     ///
-    /// 启用：复制到应用目录
-    /// 禁用：从应用目录删除
+    /// Enabling copies the Skill to the application directory.
+    /// Disabling removes it from the application directory.
     pub fn toggle_app(db: &Arc<Database>, id: &str, app: &AppType, enabled: bool) -> Result<()> {
-        // 获取当前 skill
+        // Load the current Skill.
         let mut skill = db
             .get_installed_skill(id)?
             .ok_or_else(|| anyhow!("Skill not found: {id}"))?;
 
-        // 更新状态
+        // Update its state.
         skill.apps.set_enabled_for(app, enabled);
 
-        // 同步文件
+        // Synchronize files.
         if enabled {
             Self::sync_to_app_dir(&skill.directory, app)?;
         } else {
             Self::remove_from_app(&skill.directory, app)?;
         }
 
-        // 更新数据库
+        // Update the database.
         db.update_skill_apps(id, &skill.apps)?;
 
-        log::info!("Skill {} 的 {:?} 状态已更新为 {}", skill.name, app, enabled);
+        log::info!(
+            "Updated {:?} enablement for Skill {} to {}",
+            app,
+            skill.name,
+            enabled
+        );
 
         Ok(())
     }
 
-    /// 扫描未管理的 Skills
+    /// Scans for unmanaged Skills.
     ///
-    /// 扫描各应用目录，找出未被 Nexus Composer 管理的 Skills
+    /// Scans application directories for Skills not managed by Nexus Composer.
     pub fn scan_unmanaged(db: &Arc<Database>) -> Result<Vec<UnmanagedSkill>> {
         let managed_skills = db.get_all_installed_skills()?;
         let managed_dirs: HashSet<String> = managed_skills
@@ -1388,7 +1412,7 @@ impl SkillService {
             .map(|s| s.directory.clone())
             .collect();
 
-        // 收集所有待扫描的目录及其来源标签
+        // Collect directories to scan and their source labels.
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
         for app in AppType::all() {
             if let Ok(d) = Self::get_app_skills_dir(&app) {
@@ -1441,9 +1465,9 @@ impl SkillService {
         Ok(unmanaged.into_values().collect())
     }
 
-    /// 从应用目录导入 Skills
+    /// Imports Skills from application directories.
     ///
-    /// 将未管理的 Skills 导入到 Nexus Composer 统一管理
+    /// Imports unmanaged Skills into Nexus Composer's unified management.
     pub fn import_from_apps(
         db: &Arc<Database>,
         imports: Vec<ImportSkillSelection>,
@@ -1452,14 +1476,14 @@ impl SkillService {
         let agents_lock = parse_agents_lock();
         let mut imported = Vec::new();
 
-        // 将 lock 文件中发现的仓库保存到 skill_repos
+        // Save repositories discovered in the lock file to skill_repos.
         save_repos_from_lock(
             db,
             &agents_lock,
             imports.iter().map(|selection| selection.directory.as_str()),
         );
 
-        // 收集所有候选搜索目录
+        // Collect every candidate search directory.
         let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
         for app in AppType::all() {
             if let Ok(d) = Self::get_app_skills_dir(&app) {
@@ -1473,7 +1497,7 @@ impl SkillService {
 
         for selection in imports {
             let dir_name = selection.directory;
-            // 在所有候选目录中查找
+            // Search every candidate directory.
             let mut source_path: Option<PathBuf> = None;
 
             for (base, label) in &search_sources {
@@ -1499,28 +1523,29 @@ impl SkillService {
                 continue;
             }
 
-            // 复制到 SSOT
+            // Copy into the SSOT.
             let dest = ssot_dir.join(&dir_name);
             if !dest.exists() {
                 Self::copy_dir_recursive(&source, &dest)?;
             }
 
-            // 解析元数据
+            // Parse metadata.
             let skill_md = dest.join("SKILL.md");
             let (name, description) = Self::read_skill_name_desc(&skill_md, &dir_name);
 
-            // 启用状态仅信任用户本次显式选择，不再根据“在哪些位置找到”自动推断。
+            // Trust only the user's explicit enablement choices for this import. Do not infer
+            // enablement from the locations where the Skill was found.
             let apps = selection.apps;
 
-            // 从 lock 文件提取仓库信息
+            // Extract repository information from the lock file.
             let (id, repo_owner, repo_name, repo_branch, readme_url) =
                 build_repo_info_from_lock(&agents_lock, &dir_name);
 
-            // 计算内容哈希
+            // Compute the content hash.
             let ssot_skill_dir = ssot_dir.join(&dir_name);
             let content_hash = Self::compute_dir_hash(&ssot_skill_dir).ok();
 
-            // 创建记录
+            // Create the record.
             let skill = InstalledSkill {
                 id,
                 name,
@@ -1536,53 +1561,63 @@ impl SkillService {
                 updated_at: 0,
             };
 
-            // 保存到数据库
+            // Save it to the database.
             db.save_skill(&skill)?;
 
             imported.push(skill);
         }
 
-        log::info!("成功导入 {} 个 Skills", imported.len());
+        log::info!("Imported {} Skills", imported.len());
 
         Ok(imported)
     }
 
-    // ========== 文件同步方法 ==========
+    // ========== File synchronization ==========
 
-    /// 创建符号链接（跨平台）
+    /// Creates a symbolic link across platforms.
     ///
-    /// - Unix: 使用 std::os::unix::fs::symlink
-    /// - Windows: 使用 std::os::windows::fs::symlink_dir
+    /// - Unix: uses std::os::unix::fs::symlink.
+    /// - Windows: uses std::os::windows::fs::symlink_dir.
     #[cfg(unix)]
     fn create_symlink(src: &Path, dest: &Path) -> Result<()> {
-        std::os::unix::fs::symlink(src, dest)
-            .with_context(|| format!("创建符号链接失败: {} -> {}", src.display(), dest.display()))
+        std::os::unix::fs::symlink(src, dest).with_context(|| {
+            format!(
+                "Failed to create symbolic link: {} -> {}",
+                src.display(),
+                dest.display()
+            )
+        })
     }
 
     #[cfg(windows)]
     fn create_symlink(src: &Path, dest: &Path) -> Result<()> {
-        std::os::windows::fs::symlink_dir(src, dest)
-            .with_context(|| format!("创建符号链接失败: {} -> {}", src.display(), dest.display()))
+        std::os::windows::fs::symlink_dir(src, dest).with_context(|| {
+            format!(
+                "Failed to create symbolic link: {} -> {}",
+                src.display(),
+                dest.display()
+            )
+        })
     }
 
-    /// 检查路径是否为符号链接
+    /// Checks whether a path is a symbolic link.
     fn is_symlink(path: &Path) -> bool {
         path.symlink_metadata()
             .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
     }
 
-    /// 获取当前同步方式配置
+    /// Returns the configured synchronization mode.
     fn get_sync_method() -> SyncMethod {
         crate::settings::get_skill_sync_method()
     }
 
-    /// 同步 Skill 到应用目录（使用 symlink 或 copy）
+    /// Synchronizes a Skill to an application directory by symlink or copy.
     ///
-    /// 根据配置和平台选择最佳同步方式：
-    /// - Auto: 优先尝试 symlink，失败时回退到 copy
-    /// - Symlink: 仅使用 symlink
-    /// - Copy: 仅使用文件复制
+    /// Chooses the synchronization mode from settings and the platform:
+    /// - Auto: try symlink first and fall back to copy.
+    /// - Symlink: use only a symlink.
+    /// - Copy: use only a file copy.
     pub fn sync_to_app_dir(directory: &str, app: &AppType) -> Result<()> {
         if matches!(app, AppType::ClaudeDesktop) {
             return Ok(());
@@ -1604,7 +1639,7 @@ impl SkillService {
             SyncMethod::Auto => {
                 if dest.exists() && !Self::is_symlink(&dest) {
                     Self::replace_dest_with_copy(&source, &dest, directory)?;
-                    log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
+                    log::debug!("Synchronized Skill {directory} to {app:?} by copying");
                     return Ok(());
                 }
 
@@ -1612,59 +1647,59 @@ impl SkillService {
                     Self::remove_path(&dest)?;
                 }
 
-                // 优先尝试 symlink
+                // Prefer a symlink.
                 match Self::create_symlink(&source, &dest) {
                     Ok(()) => {
-                        log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
+                        log::debug!("Synchronized Skill {directory} to {app:?} by symlink");
                         return Ok(());
                     }
                     Err(err) => {
                         log::warn!(
-                            "Symlink 创建失败，将回退到文件复制: {} -> {}. 错误: {err:#}",
+                            "Failed to create symlink; falling back to file copy: {} -> {}. Error: {err:#}",
                             source.display(),
                             dest.display()
                         );
                     }
                 }
-                // Fallback 到 copy
+                // Fall back to copying.
                 Self::replace_dest_with_copy(&source, &dest, directory)?;
-                log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
+                log::debug!("Synchronized Skill {directory} to {app:?} by copying");
             }
             SyncMethod::Symlink => {
                 if dest.exists() || Self::is_symlink(&dest) {
                     Self::remove_path(&dest)?;
                 }
                 Self::create_symlink(&source, &dest)?;
-                log::debug!("Skill {directory} 已通过 symlink 同步到 {app:?}");
+                log::debug!("Synchronized Skill {directory} to {app:?} by symlink");
             }
             SyncMethod::Copy => {
                 Self::replace_dest_with_copy(&source, &dest, directory)?;
-                log::debug!("Skill {directory} 已通过复制同步到 {app:?}");
+                log::debug!("Synchronized Skill {directory} to {app:?} by copying");
             }
         }
 
         Ok(())
     }
 
-    /// 复制 Skill 到应用目录（保留用于向后兼容）
-    #[deprecated(note = "请使用 sync_to_app_dir() 代替")]
+    /// Copies a Skill to an application directory. Retained for backward compatibility.
+    #[deprecated(note = "Use sync_to_app_dir() instead")]
     pub fn copy_to_app(directory: &str, app: &AppType) -> Result<()> {
         Self::sync_to_app_dir(directory, app)
     }
 
-    /// 删除路径（支持 symlink 和真实目录）
+    /// Removes a path, supporting symlinks and real directories.
     fn remove_path(path: &Path) -> Result<()> {
         if Self::is_symlink(path) {
-            // 符号链接：仅删除链接本身，不影响源文件
+            // Symlink: remove only the link without affecting source files.
             #[cfg(unix)]
             fs::remove_file(path)?;
             #[cfg(windows)]
-            fs::remove_dir(path)?; // Windows 的目录 symlink 需要用 remove_dir
+            fs::remove_dir(path)?; // Windows directory symlinks require remove_dir.
         } else if path.is_dir() {
-            // 真实目录：递归删除
+            // Real directory: remove it recursively.
             fs::remove_dir_all(path)?;
         } else if path.exists() {
-            // 普通文件
+            // Regular file.
             fs::remove_file(path)?;
         }
         Ok(())
@@ -1672,13 +1707,13 @@ impl SkillService {
 
     fn validate_sync_source_dir(source: &Path, directory: &str) -> Result<()> {
         if !source.is_dir() {
-            return Err(anyhow!("Skill 不存在于 SSOT: {directory}"));
+            return Err(anyhow!("Skill does not exist in the SSOT: {directory}"));
         }
 
         let manifest = source.join("SKILL.md");
         if !manifest.is_file() {
             return Err(anyhow!(
-                "Skill 源目录缺少 SKILL.md，拒绝同步以避免覆盖目标目录: {}",
+                "Skill source directory is missing SKILL.md; refusing to synchronize to avoid overwriting the target: {}",
                 source.display()
             ));
         }
@@ -1718,7 +1753,7 @@ impl SkillService {
         fs::rename(&tmp, dest).with_context(|| {
             let _ = Self::remove_path(&tmp);
             format!(
-                "替换 Skill 目录失败: {} -> {}",
+                "Failed to replace Skill directory: {} -> {}",
                 tmp.display(),
                 dest.display()
             )
@@ -1727,7 +1762,7 @@ impl SkillService {
         Ok(())
     }
 
-    /// 判断路径是否为指向 SSOT 目录内的符号链接。
+    /// Returns whether a path is a symlink whose target is inside the SSOT directory.
     fn is_symlink_to_ssot(path: &Path, ssot_dir: &Path) -> bool {
         if !Self::is_symlink(path) {
             return false;
@@ -1754,7 +1789,7 @@ impl SkillService {
         canonical_target.starts_with(&canonical_ssot)
     }
 
-    /// 从应用目录删除 Skill（支持 symlink 和真实目录）
+    /// Removes a Skill from an application directory, supporting symlinks and real directories.
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<()> {
         if matches!(app, AppType::ClaudeDesktop) {
             return Ok(());
@@ -1765,13 +1800,13 @@ impl SkillService {
 
         if skill_path.exists() || Self::is_symlink(&skill_path) {
             Self::remove_path(&skill_path)?;
-            log::debug!("Skill {directory} 已从 {app:?} 删除");
+            log::debug!("Removed Skill {directory} from {app:?}");
         }
 
         Ok(())
     }
 
-    /// 同步所有已启用的 Skills 到指定应用
+    /// Synchronizes every enabled Skill to the specified application.
     pub fn sync_to_app(db: &Arc<Database>, app: &AppType) -> Result<()> {
         if matches!(app, AppType::ClaudeDesktop) {
             return Ok(());
@@ -1818,16 +1853,16 @@ impl SkillService {
         Ok(())
     }
 
-    // ========== 发现功能（保留原有逻辑）==========
+    // ========== Discovery (legacy behavior retained) ==========
 
-    /// 列出所有可发现的技能（从仓库获取）
+    /// Lists all discoverable Skills from repositories.
     pub async fn discover_available(
         &self,
         repos: Vec<SkillRepo>,
     ) -> Result<Vec<DiscoverableSkill>> {
         let mut skills = Vec::new();
 
-        // 仅使用启用的仓库
+        // Use only enabled repositories.
         let enabled_repos: Vec<SkillRepo> = repos.into_iter().filter(|repo| repo.enabled).collect();
 
         let fetch_tasks = enabled_repos
@@ -1840,32 +1875,37 @@ impl SkillService {
         for (repo, result) in enabled_repos.into_iter().zip(results) {
             match result {
                 Ok(repo_skills) => skills.extend(repo_skills),
-                Err(e) => log::warn!("获取仓库 {}/{} 技能失败: {}", repo.owner, repo.name, e),
+                Err(e) => log::warn!(
+                    "Failed to get Skills from repository {}/{}: {}",
+                    repo.owner,
+                    repo.name,
+                    e
+                ),
             }
         }
 
-        // 去重并排序
+        // Deduplicate and sort.
         Self::deduplicate_discoverable_skills(&mut skills);
         skills.sort_by_key(|skill| skill.name.to_lowercase());
 
         Ok(skills)
     }
 
-    /// 列出所有技能（兼容旧 API）
+    /// Lists all Skills for the legacy API.
     pub async fn list_skills(
         &self,
         repos: Vec<SkillRepo>,
         db: &Arc<Database>,
     ) -> Result<Vec<Skill>> {
-        // 获取可发现的技能
+        // Load discoverable Skills.
         let discoverable = self.discover_available(repos).await?;
 
-        // 获取已安装的技能
+        // Load installed Skills.
         let installed = db.get_all_installed_skills()?;
         let installed_dirs: HashSet<String> =
             installed.values().map(|s| s.directory.clone()).collect();
 
-        // 转换为 Skill 格式
+        // Convert to the Skill format.
         let mut skills: Vec<Skill> = discoverable
             .into_iter()
             .map(|d| {
@@ -1888,7 +1928,7 @@ impl SkillService {
             })
             .collect();
 
-        // 添加本地已安装但不在仓库中的技能
+        // Add locally installed Skills that are not present in repositories.
         for skill in installed.values() {
             let already_in_list = skills.iter().any(|s| {
                 let s_install_name = Path::new(&s.directory)
@@ -1918,7 +1958,7 @@ impl SkillService {
         Ok(skills)
     }
 
-    /// 从仓库获取技能列表
+    /// Returns the Skill list from a repository.
     async fn fetch_repo_skills(&self, repo: &SkillRepo) -> Result<Vec<DiscoverableSkill>> {
         let (temp_dir, resolved_branch) =
             timeout(std::time::Duration::from_secs(60), self.download_repo(repo))
@@ -1946,7 +1986,7 @@ impl SkillService {
         Ok(skills)
     }
 
-    /// 递归扫描目录查找 SKILL.md
+    /// Recursively scans directories for SKILL.md.
     fn scan_dir_recursive(
         &self,
         current_dir: &Path,
@@ -1994,7 +2034,7 @@ impl SkillService {
         Ok(())
     }
 
-    /// 从 SKILL.md 构建技能对象
+    /// Builds a Skill object from SKILL.md.
     fn build_skill_from_metadata(
         &self,
         skill_md: &Path,
@@ -2021,12 +2061,12 @@ impl SkillService {
         })
     }
 
-    /// 解析技能元数据
+    /// Parses Skill metadata.
     fn parse_skill_metadata(&self, path: &Path) -> Result<SkillMetadata> {
         Self::parse_skill_metadata_static(path)
     }
 
-    /// 静态方法：解析技能元数据
+    /// Static method that parses Skill metadata.
     fn parse_skill_metadata_static(path: &Path) -> Result<SkillMetadata> {
         let content = fs::read_to_string(path)?;
         let content = content.trim_start_matches('\u{feff}');
@@ -2048,7 +2088,7 @@ impl SkillService {
         Ok(meta)
     }
 
-    /// 从 SKILL.md 读取名称和描述，不存在则用目录名兜底
+    /// Reads the name and description from SKILL.md, falling back to the directory name.
     fn read_skill_name_desc(skill_md: &Path, fallback_name: &str) -> (String, Option<String>) {
         if skill_md.exists() {
             match Self::parse_skill_metadata_static(skill_md) {
@@ -2063,7 +2103,7 @@ impl SkillService {
         }
     }
 
-    /// 校验并规范化技能源路径（允许多级目录），拒绝路径穿越和绝对路径
+    /// Validates and normalizes a possibly nested Skill source path, rejecting traversal and absolute paths.
     fn sanitize_skill_source_path(raw: &str) -> Option<PathBuf> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -2095,7 +2135,7 @@ impl SkillService {
         has_component.then_some(normalized)
     }
 
-    /// 校验并规范化安装目录名（最终落盘目录名，仅单段）
+    /// Validates and normalizes the single-component installation directory name.
     fn sanitize_install_name(raw: &str) -> Option<String> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -2121,10 +2161,10 @@ impl SkillService {
         }
     }
 
-    /// 在目录树中查找名称匹配且包含 SKILL.md 的子目录
+    /// Finds a matching subdirectory containing SKILL.md within a directory tree.
     ///
-    /// 用于 skills.sh 安装回退：API 只返回 skillId（如 "find-skills"），
-    /// 但实际文件可能在仓库子目录中（如 "skills/find-skills"）。
+    /// Used as a skills.sh installation fallback: the API returns only a skillId such as
+    /// "find-skills", while files may live in a repository subdirectory such as "skills/find-skills".
     fn find_skill_dir_by_name(root: &Path, target_name: &str) -> Option<PathBuf> {
         fn walk(dir: &Path, target: &str, depth: usize) -> Option<PathBuf> {
             if depth > 3 {
@@ -2153,12 +2193,12 @@ impl SkillService {
         walk(root, target_name, 0)
     }
 
-    /// 将 discoverable skill 的目录信息重新解析为解压目录中的真实源目录。
+    /// Resolves a discoverable Skill's directory information to its actual source in extracted files.
     ///
-    /// 兼容三种情况：
-    /// 1. `skills/foo` 这类直接相对路径；
-    /// 2. 仅持有安装名 `foo`，需要在仓库中递归查找真实目录；
-    /// 3. 仓库根目录本身就是 skill，此时回退到解压根目录。
+    /// Supports three cases:
+    /// 1. A direct relative path such as `skills/foo`.
+    /// 2. Only an installation name such as `foo`, requiring a recursive repository search.
+    /// 3. The repository root is the Skill, so the extracted root is used.
     fn resolve_skill_source_dir(root: &Path, raw_directory: &str) -> Option<PathBuf> {
         let source_rel = Self::sanitize_skill_source_path(raw_directory)?;
         let direct = root.join(&source_rel);
@@ -2187,12 +2227,12 @@ impl SkillService {
         None
     }
 
-    /// 去重技能列表（基于完整 key，不同仓库的同名 skill 分开显示）
+    /// Deduplicates Skills by full key, preserving same-name Skills from different repositories.
     fn deduplicate_discoverable_skills(skills: &mut Vec<DiscoverableSkill>) {
         let mut seen = HashMap::new();
         skills.retain(|skill| {
-            // 使用完整 key（owner/repo:directory）作为唯一标识
-            // 这样不同仓库的同名 skill 会分开显示
+            // Use the full key (owner/repo:directory) as the unique identifier so same-name
+            // Skills from different repositories remain separate.
             let unique_key = skill.key.to_lowercase();
             if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(unique_key) {
                 e.insert(true);
@@ -2203,7 +2243,7 @@ impl SkillService {
         });
     }
 
-    /// 下载仓库
+    /// Downloads a repository.
     async fn download_repo(&self, repo: &SkillRepo) -> Result<(PathBuf, String)> {
         let temp_dir = tempfile::tempdir()?;
         let temp_path = temp_dir.path().to_path_buf();
@@ -2238,10 +2278,11 @@ impl SkillService {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("所有分支下载失败")))
+        Err(last_error
+            .unwrap_or_else(|| anyhow::anyhow!("Failed to download every candidate branch")))
     }
 
-    /// 下载并解压 ZIP
+    /// Downloads and extracts a ZIP archive.
     async fn download_and_extract(&self, url: &str, dest: &Path) -> Result<()> {
         let client = crate::proxy::http_client::get();
         let response = client.get(url).send().await?;
@@ -2275,7 +2316,7 @@ impl SkillService {
             )));
         };
 
-        // 第一遍：解压普通文件和目录，收集 symlink 条目
+        // First pass: extract regular files and directories, collecting symlink entries.
         let mut symlinks: Vec<(PathBuf, String)> = Vec::new();
 
         for i in 0..archive.len() {
@@ -2296,7 +2337,7 @@ impl SkillService {
             let outpath = dest.join(relative_path);
 
             if file.is_symlink() {
-                // 读取 symlink 目标路径
+                // Read the symlink target path.
                 let mut target = String::new();
                 std::io::Read::read_to_string(&mut file, &mut target)?;
                 symlinks.push((outpath, target.trim().to_string()));
@@ -2311,13 +2352,13 @@ impl SkillService {
             }
         }
 
-        // 第二遍：解析 symlink，将目标内容复制到 symlink 位置
+        // Second pass: resolve symlinks by copying target contents to each symlink location.
         Self::resolve_symlinks_in_dir(dest, &symlinks)?;
 
         Ok(())
     }
 
-    /// 递归复制目录
+    /// Recursively copies a directory.
     fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<()> {
         fs::create_dir_all(dest)?;
 
@@ -2423,7 +2464,7 @@ impl SkillService {
     fn create_uninstall_backup(skill: &InstalledSkill) -> Result<Option<PathBuf>> {
         let Some(source_path) = Self::resolve_uninstall_backup_source(skill)? else {
             log::warn!(
-                "Skill {} 卸载前未找到可备份的目录，将跳过备份",
+                "No directory was available to back up before uninstalling Skill {}; skipping backup",
                 skill.directory
             );
             return Ok(None);
@@ -2462,11 +2503,11 @@ impl SkillService {
         }
 
         if let Err(err) = Self::cleanup_old_skill_backups(&backup_root) {
-            log::warn!("清理旧 Skill 备份失败: {err:#}");
+            log::warn!("Failed to clean up old Skill backups: {err:#}");
         }
 
         log::info!(
-            "Skill {} 已在卸载前备份到 {}",
+            "Backed up Skill {} to {} before uninstalling",
             skill.name,
             backup_path.display()
         );
@@ -2474,28 +2515,28 @@ impl SkillService {
         Ok(Some(backup_path))
     }
 
-    /// 解析 ZIP 中的符号链接：将目标内容复制到 symlink 位置
+    /// Resolves ZIP symlinks by copying target contents to each symlink location.
     ///
-    /// GitHub ZIP 归档保留了 symlink 元数据，解压时可通过 `is_symlink()` 检测。
-    /// 此方法将 symlink 解析为实际文件/目录内容（而非创建真实 symlink），
-    /// 以确保跨平台兼容且 skill 内容自包含。
+    /// GitHub ZIP archives preserve symlink metadata that extraction can detect through
+    /// `is_symlink()`. This method materializes each target's file or directory contents instead
+    /// of creating a real symlink, preserving cross-platform compatibility and self-contained Skills.
     fn resolve_symlinks_in_dir(base_dir: &Path, symlinks: &[(PathBuf, String)]) -> Result<()> {
-        // 规范化 base_dir（macOS 上 /tmp → /private/tmp，需保持一致）
+        // Canonicalize base_dir so macOS /tmp → /private/tmp remains consistent.
         let canonical_base = base_dir
             .canonicalize()
             .unwrap_or_else(|_| base_dir.to_path_buf());
 
         for (link_path, target) in symlinks {
-            // 计算 symlink 的父目录，然后拼接目标的相对路径
+            // Resolve the target path relative to the symlink's parent directory.
             let parent = link_path.parent().unwrap_or(base_dir);
             let resolved = parent.join(target);
 
-            // 规范化路径（解析 .. 等）
+            // Canonicalize the path, resolving `..` and similar components.
             let resolved = match resolved.canonicalize() {
                 Ok(p) => p,
                 Err(_) => {
                     log::warn!(
-                        "Symlink 目标不存在，跳过: {} -> {}",
+                        "Symlink target does not exist; skipping: {} -> {}",
                         link_path.display(),
                         target
                     );
@@ -2503,17 +2544,17 @@ impl SkillService {
                 }
             };
 
-            // 安全检查：确保目标在 base_dir 内（防止路径穿越）
+            // Ensure the target stays inside base_dir to prevent path traversal.
             if !resolved.starts_with(&canonical_base) {
                 log::warn!(
-                    "Symlink 目标超出仓库范围，跳过: {} -> {}",
+                    "Symlink target is outside the repository; skipping: {} -> {}",
                     link_path.display(),
                     resolved.display()
                 );
                 continue;
             }
 
-            // 复制目标内容到 symlink 位置
+            // Copy the target contents to the symlink location.
             if resolved.is_dir() {
                 Self::copy_dir_recursive(&resolved, link_path)?;
             } else if resolved.is_file() {
@@ -2526,24 +2567,24 @@ impl SkillService {
         Ok(())
     }
 
-    // ========== 从 ZIP 文件安装 ==========
+    // ========== Installation from ZIP ==========
 
-    /// 从本地 ZIP 文件安装 Skills
+    /// Installs Skills from a local ZIP file.
     ///
-    /// 流程：
-    /// 1. 解压 ZIP 到临时目录
-    /// 2. 扫描目录查找包含 SKILL.md 的技能
-    /// 3. 复制到 SSOT 并保存到数据库
-    /// 4. 同步到当前应用目录
+    /// Process:
+    /// 1. Extract the ZIP to a temporary directory.
+    /// 2. Scan for Skills containing SKILL.md.
+    /// 3. Copy them to the SSOT and save database records.
+    /// 4. Synchronize them to the current application directory.
     pub fn install_from_zip(
         db: &Arc<Database>,
         zip_path: &Path,
         current_app: &AppType,
     ) -> Result<Vec<InstalledSkill>> {
-        // 解压到临时目录
+        // Extract to a temporary directory.
         let temp_dir = Self::extract_local_zip(zip_path)?;
 
-        // 扫描所有包含 SKILL.md 的目录
+        // Scan every directory containing SKILL.md.
         let skill_dirs = Self::scan_skills_in_dir(&temp_dir)?;
 
         if skill_dirs.is_empty() {
@@ -2564,7 +2605,7 @@ impl SkillService {
             .map(|s| s.to_string());
 
         for skill_dir in skill_dirs {
-            // 解析元数据（提前解析，用于确定安装名）
+            // Parse metadata early to determine the installation name.
             let skill_md = skill_dir.join("SKILL.md");
             let meta = if skill_md.exists() {
                 Self::parse_skill_metadata_static(&skill_md).ok()
@@ -2572,9 +2613,9 @@ impl SkillService {
                 None
             };
 
-            // 获取目录名称作为安装名
-            // 当 SKILL.md 在 ZIP 根目录时，skill_dir == temp_dir，
-            // file_name() 会返回临时目录名（如 .tmpDZKGpF），需要回退到其他来源
+            // Use the directory name as the installation name. When SKILL.md is at the ZIP root,
+            // skill_dir == temp_dir and file_name() returns a temporary name such as .tmpDZKGpF,
+            // so another source must provide the name.
             let install_name = {
                 let dir_name = skill_dir
                     .file_name()
@@ -2582,7 +2623,7 @@ impl SkillService {
                     .unwrap_or_default();
 
                 if skill_dir == temp_dir || dir_name.is_empty() || dir_name.starts_with('.') {
-                    // SKILL.md 在根目录：优先用元数据 name，否则用 ZIP 文件名
+                    // For root-level SKILL.md, prefer the metadata name and fall back to the ZIP filename.
                     meta.as_ref()
                         .and_then(|m| m.name.as_deref())
                         .and_then(Self::sanitize_install_name)
@@ -2609,7 +2650,7 @@ impl SkillService {
                 }
             };
 
-            // 检查是否已有同名 directory 的 skill
+            // Check for an existing Skill with the same directory name.
             let conflict = existing_skills
                 .values()
                 .find(|s| s.directory.eq_ignore_ascii_case(&install_name));
@@ -2631,17 +2672,17 @@ impl SkillService {
                 None => (install_name.clone(), None),
             };
 
-            // 复制到 SSOT
+            // Copy into the SSOT.
             let dest = ssot_dir.join(&install_name);
             if dest.exists() {
                 let _ = fs::remove_dir_all(&dest);
             }
             Self::copy_dir_recursive(&skill_dir, &dest)?;
 
-            // 计算内容哈希
+            // Compute the content hash.
             let content_hash = Self::compute_dir_hash(&dest).ok();
 
-            // 创建 InstalledSkill 记录
+            // Create the InstalledSkill record.
             let skill = InstalledSkill {
                 id: format!("local:{install_name}"),
                 name,
@@ -2657,10 +2698,10 @@ impl SkillService {
                 updated_at: 0,
             };
 
-            // 保存到数据库
+            // Save it to the database.
             db.save_skill(&skill)?;
 
-            // 同步到当前应用目录
+            // Synchronize it to the current application directory.
             Self::sync_to_app_dir(&install_name, current_app)?;
 
             log::info!(
@@ -2671,13 +2712,13 @@ impl SkillService {
             installed.push(skill);
         }
 
-        // 清理临时目录
+        // Clean up the temporary directory.
         let _ = fs::remove_dir_all(&temp_dir);
 
         Ok(installed)
     }
 
-    /// 解压本地 ZIP 文件到临时目录
+    /// Extracts a local ZIP file to a temporary directory.
     fn extract_local_zip(zip_path: &Path) -> Result<PathBuf> {
         let file = fs::File::open(zip_path)
             .with_context(|| format!("Failed to open ZIP file: {}", zip_path.display()))?;
@@ -2723,35 +2764,35 @@ impl SkillService {
             }
         }
 
-        // 解析 symlink
+        // Resolve symlinks.
         Self::resolve_symlinks_in_dir(&temp_path, &symlinks)?;
 
         Ok(temp_path)
     }
 
-    /// 递归扫描目录查找包含 SKILL.md 的技能目录
+    /// Recursively scans for Skill directories containing SKILL.md.
     fn scan_skills_in_dir(dir: &Path) -> Result<Vec<PathBuf>> {
         let mut skill_dirs = Vec::new();
         Self::scan_skills_recursive(dir, &mut skill_dirs)?;
         Ok(skill_dirs)
     }
 
-    /// 递归扫描辅助函数
+    /// Recursive scan helper.
     fn scan_skills_recursive(current: &Path, results: &mut Vec<PathBuf>) -> Result<()> {
-        // 检查当前目录是否包含 SKILL.md
+        // Check whether the current directory contains SKILL.md.
         let skill_md = current.join("SKILL.md");
         if skill_md.exists() {
             results.push(current.to_path_buf());
-            // 找到后不再递归子目录（一个 skill 目录）
+            // Stop recursing after finding one Skill directory.
             return Ok(());
         }
 
-        // 递归子目录
+        // Recurse into subdirectories.
         if let Ok(entries) = fs::read_dir(current) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    // 跳过隐藏目录
+                    // Skip hidden directories.
                     let dir_name = entry.file_name().to_string_lossy().to_string();
                     if dir_name.starts_with('.') {
                         continue;
@@ -2764,14 +2805,14 @@ impl SkillService {
         Ok(())
     }
 
-    // ========== 仓库管理（保留原有逻辑）==========
+    // ========== Repository management (legacy behavior retained) ==========
 
-    /// 列出仓库
+    /// Lists repositories.
     pub fn list_repos(&self, store: &SkillStore) -> Vec<SkillRepo> {
         store.repos.clone()
     }
 
-    /// 添加仓库
+    /// Adds a repository.
     pub fn add_repo(&self, store: &mut SkillStore, repo: SkillRepo) -> Result<()> {
         if let Some(pos) = store
             .repos
@@ -2786,7 +2827,7 @@ impl SkillService {
         Ok(())
     }
 
-    /// 删除仓库
+    /// Deletes a repository.
     pub fn remove_repo(&self, store: &mut SkillStore, owner: String, name: String) -> Result<()> {
         store
             .repos
@@ -2795,9 +2836,9 @@ impl SkillService {
         Ok(())
     }
 
-    // ========== skills.sh 搜索 ==========
+    // ========== skills.sh search ==========
 
-    /// 搜索 skills.sh 公共目录
+    /// Searches the public skills.sh catalog.
     pub async fn search_skills_sh(
         query: &str,
         limit: usize,
@@ -2832,7 +2873,7 @@ impl SkillService {
                     return None;
                 }
                 let (owner, repo) = (parts[0].to_string(), parts[1].to_string());
-                // 过滤非 GitHub 来源（如 "skills.volces.com"、"mcp-hub.momenta.works"）
+                // Exclude non-GitHub sources such as "skills.volces.com" and "mcp-hub.momenta.works".
                 if owner.contains('.') || repo.contains('.') {
                     return None;
                 }
@@ -2857,11 +2898,11 @@ impl SkillService {
     }
 }
 
-// ========== 迁移支持 ==========
+// ========== Migration support ==========
 
-/// 从 lock 文件信息构建 skill 的 ID、仓库字段和 readme URL
+/// Builds a Skill ID, repository fields, and readme URL from lock-file information.
 ///
-/// 返回 (id, repo_owner, repo_name, repo_branch, readme_url)
+/// Returns (id, repo_owner, repo_name, repo_branch, readme_url).
 fn build_repo_info_from_lock(
     lock: &HashMap<String, LockRepoInfo>,
     dir_name: &str,
@@ -2876,7 +2917,7 @@ fn build_repo_info_from_lock(
         Some(info) => {
             let branch = info.branch.clone();
             let url_branch = branch.clone().unwrap_or_else(|| "HEAD".to_string());
-            // 优先使用 lock 文件中的 skillPath，否则回退到 dir_name/SKILL.md
+            // Prefer skillPath from the lock file; otherwise use dir_name/SKILL.md.
             let fallback = format!("{dir_name}/SKILL.md");
             let doc_path = info.skill_path.as_deref().unwrap_or(&fallback);
             let url = Some(SkillService::build_skill_doc_url(
@@ -2897,7 +2938,7 @@ fn build_repo_info_from_lock(
     }
 }
 
-/// 将 lock 文件中发现的仓库保存到 skill_repos（去重）
+/// Deduplicates and saves repositories discovered in the lock file to skill_repos.
 fn save_repos_from_lock(
     db: &Arc<Database>,
     lock: &HashMap<String, LockRepoInfo>,
@@ -2918,15 +2959,20 @@ fn save_repos_from_lock(
                 let skill_repo = SkillRepo {
                     owner: info.owner.clone(),
                     name: info.repo.clone(),
-                    // 未知分支时使用 HEAD 语义，后续下载会回退到 main/master。
+                    // Use HEAD semantics for an unknown branch; downloads later fall back to main/master.
                     branch: info.branch.clone().unwrap_or_else(|| "HEAD".to_string()),
                     enabled: true,
                 };
                 if let Err(e) = db.save_skill_repo(&skill_repo) {
-                    log::warn!("保存 skill 仓库 {}/{} 失败: {}", info.owner, info.repo, e);
+                    log::warn!(
+                        "Failed to save Skill repository {}/{}: {}",
+                        info.owner,
+                        info.repo,
+                        e
+                    );
                 } else {
                     log::info!(
-                        "从 agents lock 文件发现并添加仓库: {}/{} ({})",
+                        "Discovered and added repository from the agents lock file: {}/{} ({})",
                         info.owner,
                         info.repo,
                         skill_repo.branch
@@ -2937,21 +2983,22 @@ fn save_repos_from_lock(
     }
 }
 
-/// 首次启动迁移：扫描应用目录，重建数据库
+/// First-start migration that scans application directories and rebuilds the database.
 pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
     let ssot_dir = SkillService::get_ssot_dir()?;
     let agents_lock = parse_agents_lock();
-    let snapshot: Vec<LegacySkillMigrationRow> =
-        match db.get_setting("skills_ssot_migration_snapshot")? {
-            Some(value) if !value.trim().is_empty() => match serde_json::from_str(&value) {
-                Ok(rows) => rows,
-                Err(err) => {
-                    log::warn!("解析 skills 迁移快照失败，将回退到文件系统扫描: {err}");
-                    Vec::new()
-                }
-            },
-            _ => Vec::new(),
-        };
+    let snapshot: Vec<LegacySkillMigrationRow> = match db
+        .get_setting("skills_ssot_migration_snapshot")?
+    {
+        Some(value) if !value.trim().is_empty() => match serde_json::from_str(&value) {
+            Ok(rows) => rows,
+            Err(err) => {
+                log::warn!("Failed to parse the Skills migration snapshot; falling back to a filesystem scan: {err}");
+                Vec::new()
+            }
+        },
+        _ => Vec::new(),
+    };
 
     let has_snapshot = !snapshot.is_empty();
     let mut discovered: HashMap<String, SkillApps> = HashMap::new();
@@ -2967,7 +3014,7 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
         }
     }
 
-    // 扫描各应用目录
+    // Scan each application directory.
     for app in AppType::all() {
         let app_dir = match SkillService::get_app_skills_dir(&app) {
             Ok(d) => d,
@@ -2996,7 +3043,7 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
                 continue;
             }
 
-            // 复制到 SSOT（如果不存在）
+            // Copy into the SSOT when absent.
             let ssot_path = ssot_dir.join(&dir_name);
             if !ssot_path.exists() {
                 SkillService::copy_dir_recursive(&path, &ssot_path)?;
@@ -3011,10 +3058,10 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
         }
     }
 
-    // 重建数据库
+    // Rebuild the database.
     db.clear_skills()?;
 
-    // 将 lock 文件中发现的仓库保存到 skill_repos
+    // Save repositories discovered in the lock file to skill_repos.
     save_repos_from_lock(db, &agents_lock, discovered.keys());
 
     let mut count = 0;
@@ -3050,7 +3097,7 @@ pub fn migrate_skills_to_ssot(db: &Arc<Database>) -> Result<usize> {
 
     let _ = db.set_setting("skills_ssot_migration_snapshot", "");
 
-    log::info!("Skills 迁移完成，共 {count} 个");
+    log::info!("Skills migration complete; {count} total");
 
     Ok(count)
 }

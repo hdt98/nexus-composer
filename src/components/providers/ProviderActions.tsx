@@ -43,9 +43,10 @@ interface ProviderActionsProps {
   onSetAsDefault?: () => void;
 }
 
-// 主按钮的呈现状态。title 用于 disabled 态向用户解释为何不可点击；
-// 因 Button 基类带 disabled:pointer-events-none，title 必须挂在外层非禁用
-// 的 wrapper 上才会在 hover 时显示（见下方 <span> 包裹）。
+// Presentation state for the main button. The title explains why a disabled
+// button cannot be clicked. Because the Button base class applies
+// disabled:pointer-events-none, attach the title to an enabled wrapper so it
+// appears on hover.
 interface MainButtonState {
   disabled: boolean;
   variant: "default" | "secondary";
@@ -82,13 +83,13 @@ export function ProviderActions({
   const { t } = useTranslation();
   const iconButtonClass = "h-8 w-8 p-1";
 
-  // 累加模式应用（OpenCode 非 OMO / OpenClaw / Hermes）
+  // Additive-mode applications: OpenCode without OMO, OpenClaw, and Hermes.
   const isAdditiveMode =
     (appId === "opencode" && !isOmo) ||
     appId === "openclaw" ||
     appId === "hermes";
 
-  // 故障转移模式下的按钮逻辑（累加模式和 OMO 应用不支持故障转移）
+  // Additive-mode and OMO applications do not support failover mode.
   const isFailoverMode =
     !isAdditiveMode && !isOmo && isAutoFailoverEnabled && onToggleFailover;
 
@@ -100,7 +101,7 @@ export function ProviderActions({
         onSwitch();
       }
     } else if (isAdditiveMode) {
-      // 累加模式：切换配置状态（添加/移除）
+      // Toggle membership in additive-mode configuration.
       if (isInConfig) {
         if (onRemoveFromConfig) {
           onRemoveFromConfig();
@@ -108,7 +109,7 @@ export function ProviderActions({
           onDelete();
         }
       } else {
-        onSwitch(); // 添加到配置
+        onSwitch(); // Add to configuration.
       }
     } else if (isFailoverMode) {
       onToggleFailover(!isInFailoverQueue);
@@ -138,7 +139,7 @@ export function ProviderActions({
       };
     }
 
-    // 累加模式（OpenCode 非 OMO / OpenClaw）
+    // Additive mode for OpenCode without OMO, OpenClaw, and Hermes.
     if (isAdditiveMode) {
       if (isInConfig) {
         return {
@@ -149,7 +150,7 @@ export function ProviderActions({
             isDefaultModel && "opacity-40 cursor-not-allowed",
           ),
           icon: <Minus className="h-4 w-4" />,
-          text: t("provider.removeFromConfig", { defaultValue: "移除" }),
+          text: t("provider.removeFromConfig", { defaultValue: "Remove" }),
         };
       }
       return {
@@ -158,7 +159,7 @@ export function ProviderActions({
         className:
           "bg-emerald-500 hover:bg-emerald-600 dark:bg-emerald-600 dark:hover:bg-emerald-700",
         icon: <Plus className="h-4 w-4" />,
-        text: t("provider.addToConfig", { defaultValue: "添加" }),
+        text: t("provider.addToConfig", { defaultValue: "Add" }),
       };
     }
 
@@ -170,7 +171,7 @@ export function ProviderActions({
           className:
             "bg-blue-100 text-blue-600 hover:bg-blue-200 dark:bg-blue-900/50 dark:text-blue-400 dark:hover:bg-blue-900/70",
           icon: <Check className="h-4 w-4" />,
-          text: t("failover.inQueue", { defaultValue: "已加入" }),
+          text: t("failover.inQueue", { defaultValue: "In queue" }),
         };
       }
       return {
@@ -179,7 +180,7 @@ export function ProviderActions({
         className:
           "bg-blue-500 hover:bg-blue-600 dark:bg-blue-600 dark:hover:bg-blue-700",
         icon: <Plus className="h-4 w-4" />,
-        text: t("failover.addQueue", { defaultValue: "加入" }),
+        text: t("failover.addQueue", { defaultValue: "Add" }),
       };
     }
 
@@ -210,7 +211,8 @@ export function ProviderActions({
   const canDelete =
     !isReadOnly && (isOmo || isAdditiveMode ? true : !isCurrent);
   const readOnlyHint = t("provider.managedByHermesHint", {
-    defaultValue: "由 Hermes 管理，请在 Hermes Web UI 中编辑",
+    defaultValue:
+      "Defined in Hermes' providers: dict. Edit or remove it via Hermes Web UI.",
   });
 
   return (
@@ -221,12 +223,12 @@ export function ProviderActions({
         (() => {
           const activeLabel =
             appId === "hermes"
-              ? t("provider.inUse", { defaultValue: "已在用" })
-              : t("provider.isDefault", { defaultValue: "当前默认" });
+              ? t("provider.inUse", { defaultValue: "In Use" })
+              : t("provider.isDefault", { defaultValue: "Current Default" });
           const inactiveLabel =
             appId === "hermes"
-              ? t("provider.enable", { defaultValue: "启用" })
-              : t("provider.setAsDefault", { defaultValue: "设为默认" });
+              ? t("provider.enable", { defaultValue: "Enable" })
+              : t("provider.setAsDefault", { defaultValue: "Set Default" });
           return (
             <Button
               size="sm"
@@ -246,8 +248,9 @@ export function ProviderActions({
           );
         })()}
 
-      {/* wrapper span 承接 hover：disabled 按钮自身 pointer-events:none，
-          原生 title 与 cursor 都必须挂在未禁用的外层元素上才会生效 */}
+      {/* The enabled wrapper handles hover because disabled buttons use
+          pointer-events:none; native title and cursor behavior must be attached
+          to the wrapper. */}
       <span
         title={buttonState.title}
         className={cn(
@@ -297,7 +300,7 @@ export function ProviderActions({
           variant="ghost"
           onClick={onTest || undefined}
           disabled={isTesting}
-          title={t("provider.connectivityCheck", "检测连通")}
+          title={t("provider.connectivityCheck", "Connectivity check")}
           className={cn(
             iconButtonClass,
             !onTest && "opacity-40 cursor-not-allowed text-muted-foreground",
@@ -329,7 +332,7 @@ export function ProviderActions({
             size="icon"
             variant="ghost"
             onClick={onOpenTerminal}
-            title={t("provider.openTerminal", "打开终端")}
+            title={t("provider.openTerminal", "Open Terminal")}
             className={cn(
               iconButtonClass,
               "hover:text-emerald-600 dark:hover:text-emerald-400",

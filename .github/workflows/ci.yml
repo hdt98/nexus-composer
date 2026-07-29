@@ -47,6 +47,9 @@ jobs:
       - name: TypeScript type check
         run: pnpm typecheck
 
+      - name: Check maintained source language
+        run: pnpm language:check
+
       - name: Check formatting
         run: pnpm format:check
 

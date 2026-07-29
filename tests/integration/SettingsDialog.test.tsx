@@ -270,7 +270,7 @@ describe("SettingsPage integration", () => {
     await waitFor(() => expect(toastErrorMock).toHaveBeenCalled());
     const cancelMessage = toastErrorMock.mock.calls.at(-1)?.[0] as string;
     expect(cancelMessage).toMatch(
-      /settings\.selectFileFailed|请选择.*保存路径/,
+      /settings\.selectFileFailed|Please choose a valid SQL backup file/,
     );
 
     toastErrorMock.mockClear();

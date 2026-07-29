@@ -1,14 +1,14 @@
 import type { ProviderCategory } from "@/types";
 
 /**
- * Gemini 预设供应商的视觉主题配置
+ * Visual theme configuration for Gemini provider presets.
  */
 export interface GeminiPresetTheme {
-  /** 图标类型：'gemini' | 'generic' */
+  /** Icon type: 'gemini' or 'generic'. */
   icon?: "gemini" | "generic";
-  /** 背景色（选中状态），支持 hex 颜色 */
+  /** Background color when selected; supports hex colors. */
   backgroundColor?: string;
-  /** 文字色（选中状态），支持 hex 颜色 */
+  /** Text color when selected; supports hex colors. */
   textColor?: string;
 }
 
@@ -23,13 +23,13 @@ export interface GeminiProviderPreset {
   description?: string;
   category?: ProviderCategory;
   isPartner?: boolean;
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
+  primePartner?: boolean; // Top-tier featured partner, shown with a heart badge.
   partnerPromotionKey?: string;
   endpointCandidates?: string[];
   theme?: GeminiPresetTheme;
-  // 图标配置
-  icon?: string; // 图标名称
-  iconColor?: string; // 图标颜色
+  // Icon configuration.
+  icon?: string; // Icon name.
+  iconColor?: string; // Icon color.
 }
 
 export const geminiProviderPresets: GeminiProviderPreset[] = [

@@ -20,14 +20,19 @@ fn persist_sync_error(settings: &mut S3SyncSettings, error: &AppError, source: &
 fn s3_not_configured_error() -> String {
     AppError::localized(
         "s3.sync.not_configured",
-        "未配置 S3 同步",
+        "S3 sync is not configured",
         "S3 sync is not configured.",
     )
     .to_string()
 }
 
 fn s3_sync_disabled_error() -> String {
-    AppError::localized("s3.sync.disabled", "S3 同步未启用", "S3 sync is disabled.").to_string()
+    AppError::localized(
+        "s3.sync.disabled",
+        "S3 sync is disabled.",
+        "S3 sync is disabled.",
+    )
+    .to_string()
 }
 
 fn require_enabled_s3_settings() -> Result<S3SyncSettings, String> {
@@ -320,10 +325,7 @@ mod tests {
         .expect("seed disabled s3 settings");
 
         let err = require_enabled_s3_settings().expect_err("disabled settings should fail");
-        assert!(
-            err.contains("disabled") || err.contains("未启用"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("disabled"), "unexpected error: {err}");
     }
 
     #[test]

@@ -7,8 +7,7 @@ interface PromptToggleProps {
 }
 
 /**
- * Toggle 开关组件（提示词专用）
- * 启用时为绿色，禁用时为灰色
+ * Prompt-specific toggle, green when enabled and gray when disabled.
  */
 const PromptToggle: React.FC<PromptToggleProps> = ({
   enabled,

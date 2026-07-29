@@ -1,7 +1,7 @@
 import { TFunction } from "i18next";
 
 /**
- * 结构化错误对象
+ * Structured skill error.
  */
 export interface SkillError {
   code: string;
@@ -10,8 +10,8 @@ export interface SkillError {
 }
 
 /**
- * 尝试解析后端返回的错误字符串
- * 如果是 JSON 格式，返回结构化错误；否则返回 null
+ * Attempts to parse an error string returned by the backend.
+ * Returns a structured error for valid JSON, or null otherwise.
  */
 export function parseSkillError(errorString: string): SkillError | null {
   try {
@@ -20,13 +20,13 @@ export function parseSkillError(errorString: string): SkillError | null {
       return parsed as SkillError;
     }
   } catch {
-    // 不是 JSON 格式，返回 null
+    // The error is not valid JSON.
   }
   return null;
 }
 
 /**
- * 将错误码映射到 i18n key
+ * Maps an error code to an i18n key.
  */
 function getErrorI18nKey(code: string): string {
   const mapping: Record<string, string> = {
@@ -45,7 +45,7 @@ function getErrorI18nKey(code: string): string {
 }
 
 /**
- * 将建议码映射到 i18n key
+ * Maps a suggestion code to an i18n key.
  */
 function getSuggestionI18nKey(suggestion: string): string {
   const mapping: Record<string, string> = {
@@ -65,11 +65,12 @@ function getSuggestionI18nKey(suggestion: string): string {
 }
 
 /**
- * 格式化技能错误为用户友好的消息
- * @param errorString 后端返回的错误字符串
- * @param t i18next 翻译函数
- * @param defaultTitle 默认标题的 i18n key（如 "skills.installFailed"）
- * @returns 包含标题和描述的对象
+ * Formats a skill error as a user-friendly message.
+ * @param errorString Error string returned by the backend.
+ * @param t i18next translation function.
+ * @param defaultTitle i18n key for the default title, such as
+ * "skills.installFailed".
+ * @returns An object containing the title and description.
  */
 export function formatSkillError(
   errorString: string,
@@ -79,7 +80,7 @@ export function formatSkillError(
   const parsedError = parseSkillError(errorString);
 
   if (!parsedError) {
-    // 如果不是结构化错误，返回原始错误字符串
+    // Return the original string when the error is not structured.
     return {
       title: t(defaultTitle),
       description: errorString || t("common.error"),
@@ -88,13 +89,13 @@ export function formatSkillError(
 
   const { code, context, suggestion } = parsedError;
 
-  // 获取错误消息的 i18n key
+  // Resolve the error message's i18n key.
   const errorKey = getErrorI18nKey(code);
 
-  // 构建描述（错误消息 + 建议）
+  // Build the description from the error message and optional suggestion.
   let description = t(errorKey, context);
 
-  // 如果有建议，追加到描述中
+  // Append a suggestion when one is available.
   if (suggestion) {
     const suggestionKey = getSuggestionI18nKey(suggestion);
     const suggestionText = t(suggestionKey);

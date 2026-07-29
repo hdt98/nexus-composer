@@ -81,7 +81,7 @@ module.exports = {
         xl: "0.875rem",
       },
       fontFamily: {
-        // 使用与之前版本保持一致的系统字体栈
+        // Keep the system font stack consistent with earlier releases.
         sans: [
           "-apple-system",
           "BlinkMacSystemFont",
@@ -170,4 +170,3 @@ module.exports = {
   },
   plugins: [],
 };
-

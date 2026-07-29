@@ -1,13 +1,13 @@
-//! OpenAI API 数据模型
+//! OpenAI API data models.
 //!
-//! 用于 OpenAI Chat Completions API 的请求/响应格式转换
+//! Used to transform OpenAI Chat Completions API requests and responses.
 
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// OpenAI 请求
+/// OpenAI request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIRequest {
     pub model: String,
@@ -24,19 +24,19 @@ pub struct OpenAIRequest {
     pub tool_choice: Option<Value>,
 }
 
-/// OpenAI 消息
+/// OpenAI message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIMessage {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<Value>, // String 或 Vec<ContentPart>
+    pub content: Option<Value>, // String or Vec<ContentPart>.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<OpenAIToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
-/// OpenAI 内容部分
+/// OpenAI content part.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum OpenAIContentPart {
@@ -46,13 +46,13 @@ pub enum OpenAIContentPart {
     ImageUrl { image_url: ImageUrl },
 }
 
-/// 图片 URL
+/// Image URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImageUrl {
     pub url: String,
 }
 
-/// OpenAI 工具调用
+/// OpenAI tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIToolCall {
     pub id: String,
@@ -61,14 +61,14 @@ pub struct OpenAIToolCall {
     pub function: OpenAIFunction,
 }
 
-/// OpenAI 函数
+/// OpenAI function call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIFunction {
     pub name: String,
-    pub arguments: String, // JSON 字符串
+    pub arguments: String, // JSON string.
 }
 
-/// OpenAI 工具定义
+/// OpenAI tool definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAITool {
     #[serde(rename = "type")]
@@ -76,7 +76,7 @@ pub struct OpenAITool {
     pub function: OpenAIFunctionDef,
 }
 
-/// OpenAI 函数定义
+/// OpenAI function definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIFunctionDef {
     pub name: String,
@@ -85,7 +85,7 @@ pub struct OpenAIFunctionDef {
     pub parameters: Value,
 }
 
-/// OpenAI 响应
+/// OpenAI response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIResponse {
     pub id: String,
@@ -97,7 +97,7 @@ pub struct OpenAIResponse {
     pub usage: Option<OpenAIUsage>,
 }
 
-/// OpenAI 选择
+/// OpenAI response choice.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIChoice {
     pub index: u32,
@@ -106,7 +106,7 @@ pub struct OpenAIChoice {
     pub finish_reason: Option<String>,
 }
 
-/// OpenAI 使用量
+/// OpenAI usage.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIUsage {
     pub prompt_tokens: u32,

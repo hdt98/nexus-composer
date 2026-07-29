@@ -22,7 +22,7 @@ interface McpWizardModalProps {
 }
 
 /**
- * 解析环境变量文本为对象
+ * Parses environment-variable text into an object.
  */
 const parseEnvText = (text: string): Record<string, string> => {
   const lines = text
@@ -42,7 +42,7 @@ const parseEnvText = (text: string): Record<string, string> => {
 };
 
 /**
- * 解析headers文本为对象（支持 KEY: VALUE 或 KEY=VALUE）
+ * Parses header text into an object, supporting KEY: VALUE and KEY=VALUE.
  */
 const parseHeadersText = (text: string): Record<string, string> => {
   const lines = text
@@ -51,7 +51,7 @@ const parseHeadersText = (text: string): Record<string, string> => {
     .filter((l) => l.length > 0);
   const headers: Record<string, string> = {};
   for (const l of lines) {
-    // 支持 KEY: VALUE 或 KEY=VALUE
+    // Support KEY: VALUE and KEY=VALUE.
     const colonIdx = l.indexOf(":");
     const equalIdx = l.indexOf("=");
     let idx = -1;
@@ -70,8 +70,8 @@ const parseHeadersText = (text: string): Record<string, string> => {
 };
 
 /**
- * MCP 配置向导模态框
- * 帮助用户快速生成 MCP JSON 配置
+ * MCP configuration wizard modal.
+ * Helps users quickly generate MCP JSON configuration.
  */
 const McpWizardModal: React.FC<McpWizardModalProps> = ({
   isOpen,
@@ -85,25 +85,25 @@ const McpWizardModal: React.FC<McpWizardModalProps> = ({
     "stdio",
   );
   const [wizardTitle, setWizardTitle] = useState("");
-  // stdio 字段
+  // stdio fields.
   const [wizardCommand, setWizardCommand] = useState("");
   const [wizardArgs, setWizardArgs] = useState("");
   const [wizardEnv, setWizardEnv] = useState("");
-  // http 和 sse 字段
+  // HTTP and SSE fields.
   const [wizardUrl, setWizardUrl] = useState("");
   const [wizardHeaders, setWizardHeaders] = useState("");
 
-  // 生成预览 JSON
+  // Generate preview JSON.
   const generatePreview = (): string => {
     const config: McpServerSpec = {
       type: wizardType,
     };
 
     if (wizardType === "stdio") {
-      // stdio 类型必需字段
+      // Required stdio field.
       config.command = wizardCommand.trim();
 
-      // 可选字段
+      // Optional fields.
       if (wizardArgs.trim()) {
         config.args = wizardArgs
           .split("\n")
@@ -118,10 +118,10 @@ const McpWizardModal: React.FC<McpWizardModalProps> = ({
         }
       }
     } else {
-      // http 和 sse 类型必需字段
+      // Required HTTP and SSE field.
       config.url = wizardUrl.trim();
 
-      // 可选字段
+      // Optional fields.
       if (wizardHeaders.trim()) {
         const headers = parseHeadersText(wizardHeaders);
         if (Object.keys(headers).length > 0) {
@@ -153,7 +153,7 @@ const McpWizardModal: React.FC<McpWizardModalProps> = ({
   };
 
   const handleClose = () => {
-    // 重置表单
+    // Reset the form.
     setWizardType("stdio");
     setWizardTitle("");
     setWizardCommand("");
@@ -312,7 +312,7 @@ const McpWizardModal: React.FC<McpWizardModalProps> = ({
               />
             </div>
 
-            {/* Stdio 类型字段 */}
+            {/* stdio fields */}
             {wizardType === "stdio" && (
               <>
                 {/* Command */}
@@ -361,7 +361,7 @@ const McpWizardModal: React.FC<McpWizardModalProps> = ({
               </>
             )}
 
-            {/* HTTP 和 SSE 类型字段 */}
+            {/* HTTP and SSE fields */}
             {(wizardType === "http" || wizardType === "sse") && (
               <>
                 {/* URL */}

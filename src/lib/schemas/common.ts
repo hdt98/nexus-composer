@@ -2,20 +2,20 @@ import { z } from "zod";
 import { validateToml, tomlToMcpServer } from "@/utils/tomlUtils";
 
 /**
- * 解析 JSON 语法错误，返回更友好的位置信息。
+ * Parse a JSON syntax error and return clearer location information.
  */
 function parseJsonError(error: unknown): string {
   if (!(error instanceof SyntaxError)) {
-    return "JSON 格式错误";
+    return "Invalid JSON";
   }
 
-  const message = error.message || "JSON 解析失败";
+  const message = error.message || "Failed to parse JSON";
 
   // Chrome/V8: "Unexpected token ... in JSON at position 123"
   const positionMatch = message.match(/at position (\d+)/i);
   if (positionMatch) {
     const position = parseInt(positionMatch[1], 10);
-    return `JSON 格式错误（位置：${position}）`;
+    return `Invalid JSON (position: ${position})`;
   }
 
   // Firefox: "JSON.parse: unexpected character at line 1 column 23"
@@ -23,27 +23,27 @@ function parseJsonError(error: unknown): string {
   if (lineColumnMatch) {
     const line = lineColumnMatch[1];
     const column = lineColumnMatch[2];
-    return `JSON 格式错误：第 ${line} 行，第 ${column} 列`;
+    return `Invalid JSON: line ${line}, column ${column}`;
   }
 
-  return `JSON 格式错误：${message}`;
+  return `Invalid JSON: ${message}`;
 }
 
 /**
- * 通用的 JSON 配置文本校验：
- * - 非空
- * - 可解析且为对象（非数组）
+ * Shared JSON configuration text validation:
+ * - Must not be empty.
+ * - Must parse as an object rather than an array.
  */
 export const jsonConfigSchema = z
   .string()
-  .min(1, "配置不能为空")
+  .min(1, "Configuration cannot be empty")
   .superRefine((value, ctx) => {
     try {
       const obj = JSON.parse(value);
       if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "需为单个对象配置",
+          message: "Configuration must be a single object",
         });
       }
     } catch (e) {
@@ -55,17 +55,17 @@ export const jsonConfigSchema = z
   });
 
 /**
- * 通用的 TOML 配置文本校验：
- * - 允许为空（由上层业务决定是否必填）
- * - 语法与结构有效
- * - 针对 stdio/http/sse 的必填字段（command/url）进行提示
+ * Shared TOML configuration text validation:
+ * - May be empty when the calling feature does not require a value.
+ * - Must have valid syntax and structure.
+ * - Reports required command or url fields for stdio, http, and sse servers.
  */
 export const tomlConfigSchema = z.string().superRefine((value, ctx) => {
   const err = validateToml(value);
   if (err) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: `TOML 无效：${err}`,
+      message: `Invalid TOML: ${err}`,
     });
     return;
   }
@@ -77,7 +77,7 @@ export const tomlConfigSchema = z.string().superRefine((value, ctx) => {
     if (server.type === "stdio" && !server.command?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "stdio 类型需填写 command",
+        message: "stdio servers require command",
       });
     }
     if (
@@ -86,13 +86,13 @@ export const tomlConfigSchema = z.string().superRefine((value, ctx) => {
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: `${server.type} 类型需填写 url`,
+        message: `${server.type} servers require url`,
       });
     }
   } catch (e: any) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: e?.message || "TOML 解析失败",
+      message: e?.message || "Failed to parse TOML",
     });
   }
 });

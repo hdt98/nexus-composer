@@ -3,12 +3,12 @@ import { z } from "zod";
 const directorySchema = z
   .string()
   .trim()
-  .min(1, "路径不能为空")
+  .min(1, "Path cannot be empty")
   .optional()
   .or(z.literal(""));
 
 export const settingsSchema = z.object({
-  // 设备级 UI 设置
+  // Device-level UI settings.
   showInTray: z.boolean(),
   minimizeToTrayOnClose: z.boolean(),
   enableClaudePluginIntegration: z.boolean().optional(),
@@ -19,24 +19,25 @@ export const settingsSchema = z.object({
   unifyCodexSessionHistory: z.boolean().optional(),
   language: z.enum(["en", "vi"]).optional(),
 
-  // 设备级目录覆盖
+  // Device-level directory overrides.
   claudeConfigDir: directorySchema.nullable().optional(),
   codexConfigDir: directorySchema.nullable().optional(),
   geminiConfigDir: directorySchema.nullable().optional(),
   opencodeConfigDir: directorySchema.nullable().optional(),
   openclawConfigDir: directorySchema.nullable().optional(),
 
-  // 当前供应商 ID（设备级）
+  // Current device-level provider IDs.
   currentProviderClaude: z.string().optional(),
   currentProviderClaudeDesktop: z.string().optional(),
   currentProviderCodex: z.string().optional(),
   currentProviderGemini: z.string().optional(),
 
-  // Skill 同步设置
+  // Skill synchronization settings.
   skillSyncMethod: z.enum(["auto", "symlink", "copy"]).optional(),
   skillStorageLocation: z.enum(["cc_switch", "unified"]).optional(),
 
-  // WebDAV v2 同步设置（通过专用命令保存，schema 仅用于读取）
+  // WebDAV v2 synchronization settings are saved through a dedicated command;
+  // this schema is used only for reading.
   webdavSync: z
     .object({
       enabled: z.boolean().optional(),
@@ -59,7 +60,8 @@ export const settingsSchema = z.object({
     })
     .optional(),
 
-  // 本机自动迁移状态（后端维护且保存时后端忽略前端值，仅供读取展示）
+  // Local automatic-migration state maintained by the backend. Frontend values
+  // are ignored when saving and exposed only for display.
   localMigrations: z
     .object({
       codexThirdPartyHistoryProviderBucketV1: z

@@ -1,9 +1,9 @@
-//! 官方供应商种子数据
+//! Official provider seed data.
 //!
-//! 启动时调用 `Database::init_default_official_providers` 把这些条目
-//! 写入 `providers` 表，让所有用户都能看到一个"一键切回官方"的入口。
+//! At startup, `Database::init_default_official_providers` writes these entries to the
+//! `providers` table so every user has a one-click path back to the official provider.
 //!
-//! 字段与前端预设保持一致，参见：
+//! Fields match the renderer presets; see:
 //! - `src/config/claudeProviderPresets.ts`（"Claude Official"）
 //! - `src/config/codexProviderPresets.ts`（"OpenAI Official"）
 //! - `src/config/geminiProviderPresets.ts`（"Google Official"）
@@ -12,7 +12,7 @@ use crate::app_config::AppType;
 
 pub(crate) const CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID: &str = "claude-desktop-official";
 
-/// 单条官方供应商种子定义。
+/// Definition of one official provider seed.
 pub(crate) struct OfficialProviderSeed {
     pub id: &'static str,
     pub app_type: AppType,
@@ -20,13 +20,13 @@ pub(crate) struct OfficialProviderSeed {
     pub website_url: &'static str,
     pub icon: &'static str,
     pub icon_color: &'static str,
-    /// settings_config 的 JSON 字符串，每个 app 结构不同。
+    /// JSON string for settings_config, whose structure differs by application.
     pub settings_config_json: &'static str,
 }
 
-/// Claude / Claude Desktop / Codex / Gemini 的官方预设。
+/// Official presets for Claude, Claude Desktop, Codex, and Gemini.
 ///
-/// id 固定，便于幂等检查；name 直接用英文原名（与前端预设一致），不做 i18n。
+/// IDs are fixed for idempotency. Names use their original English form to match renderer presets.
 pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
     OfficialProviderSeed {
         id: "claude-official",
@@ -35,7 +35,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         website_url: "https://www.anthropic.com/claude-code",
         icon: "anthropic",
         icon_color: "#D4915D",
-        // 空 env 让用户走 Claude CLI 默认认证流程
+        // An empty env lets the user follow Claude CLI's default authentication flow.
         settings_config_json: r#"{"env":{}}"#,
     },
     OfficialProviderSeed {
@@ -45,7 +45,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         website_url: "https://claude.ai/download",
         icon: "anthropic",
         icon_color: "#D4915D",
-        // 空 env 只是占位；切换该 provider 时会恢复 Claude Desktop 1P 模式
+        // Empty env is a placeholder; selecting this provider restores Claude Desktop first-party mode.
         settings_config_json: r#"{"env":{}}"#,
     },
     OfficialProviderSeed {
@@ -55,7 +55,7 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         website_url: "https://chatgpt.com/codex",
         icon: "openai",
         icon_color: "#00A67E",
-        // 空 auth + 空 config 让用户走 ChatGPT Plus/Pro OAuth
+        // Empty auth and config allow the ChatGPT Plus/Pro OAuth flow.
         settings_config_json: r#"{"auth":{},"config":""}"#,
     },
     OfficialProviderSeed {
@@ -65,14 +65,14 @@ pub(crate) const OFFICIAL_SEEDS: &[OfficialProviderSeed] = &[
         website_url: "https://ai.google.dev/",
         icon: "gemini",
         icon_color: "#4285F4",
-        // 空 env + 空 config 让用户走 Google OAuth
+        // Empty env and config allow the Google OAuth flow.
         settings_config_json: r#"{"env":{},"config":{}}"#,
     },
 ];
 
-/// 判断给定的 provider id 是否属于内置官方种子。
+/// Returns whether a provider ID belongs to a built-in official seed.
 ///
-/// 单一事实源：直接扫描 `OFFICIAL_SEEDS`，避免在多处重复维护 id 列表。
+/// Scans `OFFICIAL_SEEDS` as the single source of truth instead of duplicating ID lists.
 pub(crate) fn is_official_seed_id(id: &str) -> bool {
     OFFICIAL_SEEDS.iter().any(|seed| seed.id == id)
 }

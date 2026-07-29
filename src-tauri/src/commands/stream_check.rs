@@ -1,7 +1,8 @@
-//! 供应商连通性检查命令
+//! Provider connectivity-check commands.
 //!
-//! 注意：本检查只探测 base_url 是否可达，不发真实大模型请求，也不触碰故障转移
-//! 熔断器（熔断器由真实转发流量驱动）。详见 `services::stream_check`。
+//! These checks only probe whether `base_url` is reachable. They do not send real model requests
+//! or affect the failover circuit breaker, which is driven by actual proxy traffic. See
+//! `services::stream_check`.
 
 use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
@@ -13,7 +14,7 @@ use crate::store::AppState;
 use std::collections::HashSet;
 use tauri::State;
 
-/// 连通性检查（单个供应商）
+/// Checks connectivity for one provider.
 #[tauri::command]
 pub async fn stream_check_provider(
     state: State<'_, AppState>,
@@ -26,16 +27,16 @@ pub async fn stream_check_provider(
     let providers = state.db.get_all_providers(app_type.as_str())?;
     let provider = providers
         .get(&provider_id)
-        .ok_or_else(|| AppError::Message(format!("供应商 {provider_id} 不存在")))?;
+        .ok_or_else(|| AppError::Message(format!("Provider {provider_id} does not exist")))?;
 
-    // Copilot 端点是动态的（随 OAuth token 解析），需预先取出 host 再探测；
-    // 其余供应商传 None，由服务层从 settings_config 提取 base_url。无需鉴权。
+    // Copilot endpoints are resolved dynamically from the OAuth token, so resolve the host first.
+    // Other providers pass None and let the service read base_url from settings_config. No auth is needed.
     let base_url_override = resolve_copilot_base_url_override(provider, &copilot_state).await?;
     let result =
         StreamCheckService::check_with_retry(&app_type, provider, &config, base_url_override)
             .await?;
 
-    // 记录日志
+    // Record the result.
     let _ =
         state
             .db
@@ -44,7 +45,7 @@ pub async fn stream_check_provider(
     Ok(result)
 }
 
-/// 批量连通性检查
+/// Checks connectivity for multiple providers.
 #[tauri::command]
 pub async fn stream_check_all_providers(
     state: State<'_, AppState>,
@@ -105,13 +106,13 @@ pub async fn stream_check_all_providers(
     Ok(results)
 }
 
-/// 获取连通性检查配置
+/// Returns the connectivity-check configuration.
 #[tauri::command]
 pub fn get_stream_check_config(state: State<'_, AppState>) -> Result<StreamCheckConfig, AppError> {
     state.db.get_stream_check_config()
 }
 
-/// 保存连通性检查配置
+/// Saves the connectivity-check configuration.
 #[tauri::command]
 pub fn save_stream_check_config(
     state: State<'_, AppState>,
@@ -120,8 +121,8 @@ pub fn save_stream_check_config(
     state.db.save_stream_check_config(&config)
 }
 
-/// Copilot 供应商的 base_url 需要从 OAuth 管理器动态解析（按账号或默认端点）。
-/// `is_full_url` 的供应商已是完整地址，无需解析。
+/// Resolves a Copilot provider's base_url dynamically through the OAuth manager by account or default endpoint.
+/// Providers marked `is_full_url` already have a complete address and need no resolution.
 async fn resolve_copilot_base_url_override(
     provider: &crate::provider::Provider,
     copilot_state: &State<'_, CopilotAuthState>,

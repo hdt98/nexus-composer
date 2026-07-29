@@ -9,7 +9,7 @@ import { settingsApi } from "@/lib/api";
 
 interface CodexAuthSettingsProps {
   settings: SettingsFormState;
-  /** 返回 false（或 resolve 为 false）表示保存失败；其余返回值视为成功 */
+  /** Returning or resolving to false indicates save failure; all other values indicate success. */
   onChange: (
     updates: Partial<SettingsFormState>,
   ) => void | boolean | Promise<void | boolean>;
@@ -29,7 +29,8 @@ export function CodexAuthSettings({
       setShowEnableConfirm(true);
       return;
     }
-    // 先探测有无迁移备份，决定关闭弹窗是否提供"恢复备份"勾选
+    // Check for a migration backup before deciding whether to offer restore in
+    // the disable dialog.
     void settingsApi
       .hasCodexUnifyHistoryBackup()
       .catch(() => false)
@@ -47,9 +48,10 @@ export function CodexAuthSettings({
     });
   };
 
-  // 备份探测可能落后于正在后台进行的迁移（刚勾选迁入就立刻关闭时，
-  // 备份尚未产出）。只要本轮勾选过"迁入既有会话"，就必须提供恢复入口；
-  // 真正有没有账本交给后端 restore 的 skippedReason 判定。
+  // Backup detection can lag behind an active background migration when the
+  // setting is disabled immediately after requesting migration. Offer restore
+  // whenever this cycle requested migration; the backend restore command uses
+  // skippedReason to report whether a ledger actually exists.
   const showRestoreOption =
     hasUnifyBackup || (settings.unifyCodexMigrateExisting ?? false);
 
@@ -59,16 +61,19 @@ export function CodexAuthSettings({
       unifyCodexSessionHistory: false,
       unifyCodexMigrateExisting: false,
     });
-    // 关闭保存失败时绝不还原：否则开关仍开着（live 仍统一路由），
-    // 已迁移会话却被翻回 openai 桶，历史被拆成两半。
+    // Never restore after a failed disable save. The toggle and live unified
+    // routing would still be active while migrated sessions moved back to the
+    // OpenAI bucket, splitting history across both locations.
     if (saved === false) return;
-    // 不再以探测结果短路：还原命令会在迁移锁上排队，等到迁移落盘后
-    // 拿到完整账本；确实无账本时由 skippedReason 提示。
+    // Do not short-circuit on the detection result. The restore command waits
+    // on the migration lock and reads the complete ledger after migration is
+    // persisted; skippedReason reports when no ledger exists.
     if (!restoreBackup) return;
     try {
       const result = await settingsApi.restoreCodexUnifiedHistory();
       if (result.skippedReason) {
-        // unify_toggle_on：还原排队期间开关被重新开启，后端拒绝还原
+        // unify_toggle_on means the setting was re-enabled while restore was
+        // queued, so the backend rejected restoration.
         toast.info(
           result.skippedReason === "unify_toggle_on"
             ? t("settings.unifyCodexHistoryRestoreSkippedToggleOn")

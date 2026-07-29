@@ -21,9 +21,10 @@ interface ToolUpgradeConfirmDialogProps {
 }
 
 /**
- * 升级前的「多处安装确认」。仅当某工具检测到 ≥2 处安装时弹出：展示命令行实际命中
- * 哪处（标「默认」= 升级目标）、各处版本，以及锚定后将执行的命令，让用户在
- * 「升级只动其中一处、其余不动」这件事上知情后再确认。单处安装不会走到这里。
+ * Pre-update confirmation for multiple installations. Shown only when at least
+ * two installations are detected, it identifies the command-line default and
+ * update target, displays versions, and previews the anchored command so users
+ * understand that only one installation changes. Single installations bypass it.
  */
 export function ToolUpgradeConfirmDialog({
   isOpen,

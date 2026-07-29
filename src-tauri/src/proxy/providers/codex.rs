@@ -1,9 +1,9 @@
 //! Codex (OpenAI) Provider Adapter
 //!
-//! 仅透传模式，支持直连 OpenAI API
+//! Pass-through mode for direct OpenAI API access.
 //!
-//! ## 客户端检测
-//! 支持检测官方 Codex 客户端 (codex_vscode, codex_cli_rs)
+//! ## Client detection
+//! Detects official Codex clients (`codex_vscode` and `codex_cli_rs`).
 
 use super::{AuthInfo, AuthStrategy, ProviderAdapter};
 use crate::provider::{CodexChatReasoningConfig, Provider};
@@ -14,12 +14,12 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
-/// 官方 Codex 客户端 User-Agent 正则
+/// User-Agent pattern for official Codex clients.
 #[allow(dead_code)]
 static CODEX_CLIENT_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(codex_vscode|codex_cli_rs)/[\d.]+").unwrap());
 
-/// Codex 适配器
+/// Codex adapter.
 pub struct CodexAdapter;
 
 /// Whether this Codex provider's real upstream should be called through
@@ -199,8 +199,9 @@ fn infer_codex_chat_reasoning_config(
         .to_ascii_lowercase();
     let name = provider.name.to_ascii_lowercase();
 
-    // 平台优先：聚合 / 托管平台的 reasoning 接口由平台的推理框架决定，而非模型官方实现，
-    // 因此先按平台标识（仅 name + base_url，不含 model 名）判定并覆盖模型规则。
+    // Platform rules take priority because aggregators and hosting platforms define their own
+    // reasoning interfaces. Detect them from `name` and `base_url`, excluding the model name,
+    // and override model-specific rules.
     if let Some(config) = infer_aggregator_platform_config(&name, &base_url) {
         return Some(config);
     }
@@ -218,9 +219,9 @@ fn infer_codex_chat_reasoning_config(
         });
     }
 
-    // StepFun：仅 step-3.5-flash-2603 这一版支持 reasoning effort（low/high 两档），
-    // 其余 step 模型不暴露 effort，故 supports_effort 仅对含 "2603" 的模型置真。
-    // 第二个 OR 分支覆盖「经中转/聚合跑该模型、但平台 name/base_url 不含 stepfun」的情况。
+    // StepFun exposes low/high reasoning effort only for `step-3.5-flash-2603`, so
+    // `supports_effort` is true only when the model contains "2603". The second condition
+    // detects this model when an intermediary platform omits StepFun from its name and URL.
     if haystack.contains("stepfun") || haystack.contains("step-3.5-flash-2603") {
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -290,21 +291,22 @@ fn infer_codex_chat_reasoning_config(
     None
 }
 
-/// 聚合 / 托管平台的 reasoning 接口由平台决定：同一个模型在不同平台参数可能完全不同
-/// （DeepSeek 官方用 `thinking:{type}`、SiliconFlow 用 `enable_thinking`、
-/// OpenRouter 用原生 `reasoning:{effort}` 对象）。仅以平台标识（name / base_url）判定，
-/// 绝不掺入 model 名——model 名属于模型厂商，会把托管平台误判成模型官方接口。
+/// Aggregators and hosting platforms define their own reasoning interfaces, so the same model
+/// can require different parameters across platforms. DeepSeek uses `thinking:{type}`;
+/// SiliconFlow uses `enable_thinking`; OpenRouter uses `reasoning:{effort}`. Detect platforms
+/// only from `name` and `base_url`. Including the model name could misclassify a hosted model
+/// as its vendor's official interface.
 fn infer_aggregator_platform_config(
     name: &str,
     base_url: &str,
 ) -> Option<CodexChatReasoningConfig> {
     let platform = format!("{name} {base_url}");
 
-    // OpenRouter：用原生归一化对象 `reasoning: { effort }`（由 OpenRouter 翻译成各底层
-    // 模型的正确推理参数，比顶层 OpenAI 别名 reasoning_effort 覆盖面更全）。effort 走
-    // "openrouter" 值映射：枚举为 xhigh|high|medium|low|minimal，无 max——max 会触发
-    // `400 reasoning_effort: Invalid option`（见 openclaw#77350），故钳到 xhigh。
-    // 安全降级：不发 `thinking:{type}`（OpenRouter 不认该字段），避免误配导致请求被拒。
+    // OpenRouter's native normalized `reasoning: { effort }` object maps to each underlying
+    // model more broadly than the top-level OpenAI `reasoning_effort` alias. Its mapping accepts
+    // xhigh|high|medium|low|minimal but not max; max causes
+    // `400 reasoning_effort: Invalid option` (openclaw#77350), so clamp it to xhigh.
+    // Do not send unsupported `thinking:{type}`, which would risk rejecting the request.
     if platform.contains("openrouter") {
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(false),
@@ -316,9 +318,9 @@ fn infer_aggregator_platform_config(
         });
     }
 
-    // SiliconFlow：平台级统一 `enable_thinking`，思维回传 reasoning_content。
-    // 安全降级：不按 reasoning_effort 发 effort（平台用 thinking_budget 控制深度，
-    // 发 reasoning_effort 反而可能不被接受）。
+    // SiliconFlow uses platform-wide `enable_thinking` and returns `reasoning_content`.
+    // Do not send `reasoning_effort`; the platform controls depth with `thinking_budget` and
+    // may reject the alias.
     if platform.contains("siliconflow") {
         return Some(CodexChatReasoningConfig {
             supports_thinking: Some(true),
@@ -352,8 +354,9 @@ fn is_chat_completions_url(value: &str) -> bool {
         .ends_with("/chat/completions")
 }
 
-/// `scheme://host` 之后没有路径段的纯 origin 形式。`build_url` 在这种情况下
-/// 会自动补 `/v1`；Stream Check 等同步生产路径的代码也需要同一判定。
+/// Returns whether a URL is a bare `scheme://host` origin with no path segments.
+/// `build_url` adds `/v1` in this case; related production paths such as Stream Check
+/// must use the same rule.
 pub fn is_origin_only_url(value: &str) -> bool {
     let trimmed = value.trim_end_matches('/');
     match trimmed.split_once("://") {
@@ -402,17 +405,17 @@ impl CodexAdapter {
         Self
     }
 
-    /// 检测是否为官方 Codex 客户端
+    /// Detects an official Codex client.
     ///
-    /// 匹配 User-Agent 模式: `^(codex_vscode|codex_cli_rs)/[\d.]+`
+    /// Matches User-Agent pattern `^(codex_vscode|codex_cli_rs)/[\d.]+`.
     #[allow(dead_code)]
     pub fn is_official_client(user_agent: &str) -> bool {
         CODEX_CLIENT_REGEX.is_match(user_agent)
     }
 
-    /// 从 Provider 配置中提取 API Key
+    /// Extracts the API key from provider configuration.
     fn extract_key(&self, provider: &Provider) -> Option<String> {
-        // 1. 尝试从 env 中获取
+        // 1. Try `env`.
         if let Some(env) = provider.settings_config.get("env") {
             if let Some(key) = env
                 .get("OPENAI_API_KEY")
@@ -424,14 +427,14 @@ impl CodexAdapter {
             }
         }
 
-        // 2. 尝试从 auth 中获取 (Codex CLI 格式)
+        // 2. Try Codex CLI-style `auth`.
         if let Some(auth) = provider.settings_config.get("auth") {
             if let Some(key) = crate::codex_config::extract_codex_auth_api_key(auth) {
                 return Some(key.to_string());
             }
         }
 
-        // 3. 尝试直接获取
+        // 3. Try direct fields.
         if let Some(key) = provider
             .settings_config
             .get("apiKey")
@@ -443,7 +446,7 @@ impl CodexAdapter {
             return Some(key.to_string());
         }
 
-        // 4. 尝试从 config 对象中获取
+        // 4. Try the `config` object.
         if let Some(config) = provider.settings_config.get("config") {
             if let Some(key) = config
                 .get("api_key")
@@ -480,7 +483,7 @@ impl ProviderAdapter for CodexAdapter {
     }
 
     fn extract_base_url(&self, provider: &Provider) -> Result<String, ProxyError> {
-        // 1. 尝试直接获取 base_url 字段
+        // 1. Try the direct `base_url` field.
         if let Some(url) = provider
             .settings_config
             .get("base_url")
@@ -489,7 +492,7 @@ impl ProviderAdapter for CodexAdapter {
             return Ok(url.trim_end_matches('/').to_string());
         }
 
-        // 2. 尝试 baseURL
+        // 2. Try `baseURL`.
         if let Some(url) = provider
             .settings_config
             .get("baseURL")
@@ -498,13 +501,13 @@ impl ProviderAdapter for CodexAdapter {
             return Ok(url.trim_end_matches('/').to_string());
         }
 
-        // 3. 尝试从 config 对象中获取
+        // 3. Try the `config` object.
         if let Some(config) = provider.settings_config.get("config") {
             if let Some(url) = config.get("base_url").and_then(|v| v.as_str()) {
                 return Ok(url.trim_end_matches('/').to_string());
             }
 
-            // 尝试解析 TOML 字符串格式
+            // Parse TOML string forms.
             if let Some(config_str) = config.as_str() {
                 if let Some(start) = config_str.find("base_url = \"") {
                     let rest = &config_str[start + 12..];
@@ -522,7 +525,7 @@ impl ProviderAdapter for CodexAdapter {
         }
 
         Err(ProxyError::ConfigError(
-            "Codex Provider 缺少 base_url 配置".to_string(),
+            "Codex provider is missing base_url configuration".to_string(),
         ))
     }
 
@@ -535,27 +538,27 @@ impl ProviderAdapter for CodexAdapter {
         let base_trimmed = base_url.trim_end_matches('/');
         let endpoint_trimmed = endpoint.trim_start_matches('/');
 
-        // OpenAI/Codex 的 base_url 可能是：
-        // - 纯 origin: https://api.openai.com  (需要自动补 /v1)
-        // - 已含 /v1: https://api.openai.com/v1 (直接拼接)
-        // - 自定义前缀: https://xxx/openai (不添加 /v1，直接拼接)
+        // OpenAI/Codex `base_url` forms:
+        // - Bare origin: https://api.openai.com (add /v1)
+        // - Versioned: https://api.openai.com/v1 (append directly)
+        // - Custom prefix: https://xxx/openai (append directly without /v1)
 
-        // 检查 base_url 是否已经包含 /v1
+        // Check whether `base_url` already contains `/v1`.
         let already_has_v1 = base_trimmed.ends_with("/v1");
         let origin_only = is_origin_only_url(base_trimmed);
 
         let mut url = if already_has_v1 {
-            // 已经有 /v1，直接拼接
+            // Append directly when `/v1` is present.
             format!("{base_trimmed}/{endpoint_trimmed}")
         } else if origin_only {
-            // 纯 origin，添加 /v1
+            // Add `/v1` to a bare origin.
             format!("{base_trimmed}/v1/{endpoint_trimmed}")
         } else {
-            // 自定义前缀，不添加 /v1，直接拼接
+            // Append directly to a custom prefix without adding `/v1`.
             format!("{base_trimmed}/{endpoint_trimmed}")
         };
 
-        // 去除重复的 /v1/v1（可能由 base_url 与 endpoint 都带版本导致）
+        // Remove duplicate `/v1/v1` when both `base_url` and endpoint are versioned.
         while url.contains("/v1/v1") {
             url = url.replace("/v1/v1", "/v1");
         }
@@ -679,12 +682,12 @@ experimental_bearer_token = "sk-config-key"
     #[test]
     fn test_build_url_dedup_v1() {
         let adapter = CodexAdapter::new();
-        // base_url 已包含 /v1，endpoint 也包含 /v1
+        // Both `base_url` and endpoint contain `/v1`.
         let url = adapter.build_url("https://www.packyapi.com/v1", "/v1/responses");
         assert_eq!(url, "https://www.packyapi.com/v1/responses");
     }
 
-    // 官方客户端检测测试
+    // Official client detection tests.
     #[test]
     fn test_is_official_client_vscode() {
         assert!(CodexAdapter::is_official_client("codex_vscode/1.0.0"));
@@ -709,7 +712,7 @@ experimental_bearer_token = "sk-config-key"
 
     #[test]
     fn test_is_official_client_partial_match() {
-        // 必须从开头匹配
+        // The pattern must match from the start.
         assert!(!CodexAdapter::is_official_client("some codex_vscode/1.0.0"));
         assert!(!CodexAdapter::is_official_client(
             "prefix_codex_cli_rs/1.0.0"
@@ -923,7 +926,7 @@ wire_api = "chat"
 "#
         }));
 
-        // 模型名含 "deepseek"，但平台是 OpenRouter —— 平台规则必须覆盖模型规则。
+        // The model contains "deepseek", but OpenRouter platform rules must take priority.
         let config = resolve_codex_chat_reasoning_config(
             &provider,
             &json!({ "model": "deepseek/deepseek-chat-v3.1" }),
@@ -950,7 +953,7 @@ wire_api = "chat"
 "#
         }));
 
-        // 模型是 MiniMax（官方用 reasoning_split），但平台是 SiliconFlow —— 应走平台的 enable_thinking。
+        // MiniMax normally uses `reasoning_split`, but SiliconFlow requires `enable_thinking`.
         let config = resolve_codex_chat_reasoning_config(
             &provider,
             &json!({ "model": "MiniMaxAI/MiniMax-M2.7" }),

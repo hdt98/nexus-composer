@@ -1,15 +1,16 @@
 //! Provider Adapters Module
 //!
-//! 供应商适配器模块，提供统一的接口抽象不同上游供应商的处理逻辑。
+//! This module provides provider adapters with a unified interface for
+//! different upstream provider implementations.
 //!
-//! ## 模块结构
-//! - `adapter`: 定义 `ProviderAdapter` trait
-//! - `auth`: 认证类型和策略
-//! - `claude`: Claude (Anthropic) 适配器
-//! - `codex`: Codex (OpenAI) 适配器
-//! - `gemini`: Gemini (Google) 适配器
-//! - `models`: API 数据模型
-//! - `transform`: 格式转换
+//! ## Module layout
+//! - `adapter`: defines the `ProviderAdapter` trait
+//! - `auth`: authentication types and strategies
+//! - `claude`: Claude (Anthropic) adapter
+//! - `codex`: Codex (OpenAI) adapter
+//! - `gemini`: Gemini (Google) adapter
+//! - `models`: API data models
+//! - `transform`: format transformation
 
 mod adapter;
 mod auth;
@@ -38,7 +39,7 @@ use crate::app_config::AppType;
 use crate::provider::Provider;
 use serde::{Deserialize, Serialize};
 
-// 公开导出
+// Public exports.
 pub use adapter::ProviderAdapter;
 pub use auth::{AuthInfo, AuthStrategy};
 pub use claude::{
@@ -54,37 +55,43 @@ pub use codex::{
 };
 pub use gemini::GeminiAdapter;
 
-/// 供应商类型枚举
+/// Provider type enumeration.
 ///
-/// 区分不同供应商的具体实现方式，决定认证和请求处理逻辑。
-/// 比 AppType 更细粒度，支持同一 AppType 下的多种变体。
+/// Distinguishes concrete provider implementations and determines
+/// authentication and request handling behavior.
+/// This is more granular than `AppType` and supports multiple variants under
+/// the same `AppType`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderType {
-    /// Anthropic 官方 API (x-api-key + anthropic-version)
+    /// Anthropic official API (`x-api-key` + `anthropic-version`).
     Claude,
-    /// Claude 中转服务 (仅 Bearer 认证，无 x-api-key)
+    /// Claude relay service (Bearer auth only, no `x-api-key`).
     ClaudeAuth,
     /// OpenAI Codex Response API
     Codex,
-    /// Google Gemini API (x-goog-api-key)
+    /// Google Gemini API (`x-goog-api-key`).
     Gemini,
-    /// Google Gemini CLI (OAuth Bearer)
+    /// Google Gemini CLI (OAuth Bearer).
     GeminiCli,
-    /// OpenRouter（已支持 Claude Code 兼容接口，默认透传；保留旧转换逻辑备用）
+    /// OpenRouter (now supports the Claude Code-compatible interface, so
+    /// passthrough is the default and the legacy transform is kept as backup).
     OpenRouter,
-    /// GitHub Copilot (OAuth + Copilot Token，需要 Anthropic ↔ OpenAI 转换)
+    /// GitHub Copilot (OAuth + Copilot token; requires Anthropic <-> OpenAI
+    /// transformation).
     GitHubCopilot,
-    /// OpenAI Codex (ChatGPT Plus/Pro OAuth，需要 Anthropic ↔ Responses API 转换)
+    /// OpenAI Codex (ChatGPT Plus/Pro OAuth; requires Anthropic <-> Responses
+    /// API transformation).
     CodexOAuth,
 }
 
 impl ProviderType {
-    /// 是否需要格式转换
+    /// Whether format transformation is required.
     ///
-    /// 过去 OpenRouter 需要将 Anthropic 格式转换为 OpenAI 格式；
-    /// 现在默认关闭转换（因为 OpenRouter 已支持 Claude Code 兼容接口）。
-    /// GitHub Copilot 需要转换（Anthropic → OpenAI 格式）。
+    /// OpenRouter previously required Anthropic-to-OpenAI transformation.
+    /// That transform is now disabled by default because OpenRouter supports
+    /// the Claude Code-compatible interface.
+    /// GitHub Copilot still requires Anthropic-to-OpenAI transformation.
     #[allow(dead_code)]
     pub fn needs_transform(&self) -> bool {
         match self {
@@ -95,7 +102,7 @@ impl ProviderType {
         }
     }
 
-    /// 获取默认端点
+    /// Get the default endpoint.
     #[allow(dead_code)]
     pub fn default_endpoint(&self) -> &'static str {
         match self {
@@ -110,9 +117,10 @@ impl ProviderType {
         }
     }
 
-    /// 从 AppType 和 Provider 配置推断供应商类型
+    /// Infer the provider type from `AppType` and provider configuration.
     ///
-    /// 根据配置中的 base_url、auth_mode、api_key 格式等信息推断具体的供应商类型
+    /// Uses fields such as `base_url`, `auth_mode`, and API key format to
+    /// infer the concrete provider type.
     #[allow(dead_code)]
     pub fn from_app_type_and_config(app_type: &AppType, provider: &Provider) -> Self {
         match app_type {
@@ -125,7 +133,7 @@ impl ProviderType {
                     };
                 }
 
-                // 检测是否为 GitHub Copilot
+                // Detect GitHub Copilot.
                 if let Some(meta) = provider.meta.as_ref() {
                     if meta.provider_type.as_deref() == Some("github_copilot") {
                         return ProviderType::GitHubCopilot;
@@ -135,21 +143,21 @@ impl ProviderType {
                     }
                 }
 
-                // 检测 base_url 是否为 GitHub Copilot
+                // Detect GitHub Copilot by `base_url`.
                 let adapter = ClaudeAdapter::new();
                 if let Ok(base_url) = adapter.extract_base_url(provider) {
                     if base_url.contains("githubcopilot.com") {
                         return ProviderType::GitHubCopilot;
                     }
-                    // 检测是否为 OpenRouter
+                    // Detect OpenRouter.
                     if base_url.contains("openrouter.ai") {
                         return ProviderType::OpenRouter;
                     }
                 }
-                // 检测是否为中转服务（仅 Bearer 认证）
-                // 注意：ProviderMeta 没有直接的 auth_mode 字段，
-                // 我们通过检查 settings_config 中的配置来判断
-                // 检查 settings_config 中的 auth_mode
+                // Detect relay services that use Bearer-only authentication.
+                // `ProviderMeta` does not expose an `auth_mode` field directly,
+                // so inspect the values under `settings_config`.
+                // Check `auth_mode` in `settings_config`.
                 if let Some(auth_mode) = provider
                     .settings_config
                     .get("auth_mode")
@@ -159,7 +167,7 @@ impl ProviderType {
                         return ProviderType::ClaudeAuth;
                     }
                 }
-                // 检查 env 中的 auth_mode
+                // Check `auth_mode` in `env`.
                 if let Some(env) = provider.settings_config.get("env") {
                     if let Some(auth_mode) = env.get("AUTH_MODE").and_then(|v| v.as_str()) {
                         if auth_mode == "bearer_only" {
@@ -171,15 +179,15 @@ impl ProviderType {
             }
             AppType::Codex => ProviderType::Codex,
             AppType::Gemini => {
-                // 检测是否为 CLI 模式（OAuth）
+                // Detect CLI mode (OAuth).
                 let adapter = GeminiAdapter::new();
                 if let Some(auth) = adapter.extract_auth(provider) {
                     let key = &auth.api_key;
-                    // OAuth access_token 以 ya29. 开头
+                    // OAuth access tokens start with `ya29.`.
                     if key.starts_with("ya29.") {
                         return ProviderType::GeminiCli;
                     }
-                    // JSON 格式的 OAuth 凭证
+                    // JSON-formatted OAuth credentials.
                     if key.starts_with('{') {
                         return ProviderType::GeminiCli;
                     }
@@ -193,7 +201,7 @@ impl ProviderType {
         }
     }
 
-    /// 转换为字符串表示
+    /// Convert to a string representation.
     pub fn as_str(&self) -> &'static str {
         match self {
             ProviderType::Claude => "claude",
@@ -234,7 +242,7 @@ impl std::str::FromStr for ProviderType {
     }
 }
 
-/// 根据 AppType 获取对应的适配器
+/// Get the adapter for the given `AppType`.
 pub fn get_adapter(app_type: &AppType) -> Box<dyn ProviderAdapter> {
     match app_type {
         AppType::Claude | AppType::ClaudeDesktop => Box::new(ClaudeAdapter::new()),
@@ -247,7 +255,7 @@ pub fn get_adapter(app_type: &AppType) -> Box<dyn ProviderAdapter> {
     }
 }
 
-/// 根据 ProviderType 获取对应的适配器
+/// Get the adapter for the given `ProviderType`.
 #[allow(dead_code)]
 pub fn get_adapter_for_provider_type(provider_type: &ProviderType) -> Box<dyn ProviderAdapter> {
     match provider_type {

@@ -1,15 +1,15 @@
 //! Per-app switch lock
 //!
-//! 确保同一应用同时只有一个供应商切换操作在执行，
-//! 防止并发切换导致 is_current 与 Live 备份不一致。
+//! Ensures that only one provider switch runs for an application at a time,
+//! preventing concurrent switches from desynchronizing `is_current` and the live backup.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, OwnedMutexGuard, RwLock};
 
-/// 每个应用类型一把互斥锁，保证同一应用的切换操作串行执行。
+/// One mutex per application type serializes switches for that application.
 ///
-/// 不同应用之间（如 Claude 和 Codex）可以并行切换。
+/// Different applications, such as Claude and Codex, may switch concurrently.
 #[derive(Clone, Default)]
 pub struct SwitchLockManager {
     locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
@@ -20,9 +20,10 @@ impl SwitchLockManager {
         Self::default()
     }
 
-    /// 获取指定应用的切换锁。
+    /// Acquires the switch lock for an application.
     ///
-    /// 返回 `OwnedMutexGuard`，持有期间同一 `app_type` 的其他切换会排队等待。
+    /// Other switches for the same `app_type` wait while the returned
+    /// `OwnedMutexGuard` is held.
     pub async fn lock_for_app(&self, app_type: &str) -> OwnedMutexGuard<()> {
         let lock = {
             let locks = self.locks.read().await;

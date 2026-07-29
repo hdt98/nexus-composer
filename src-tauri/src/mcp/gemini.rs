@@ -1,4 +1,4 @@
-//! Gemini MCP 同步和导入模块
+//! Gemini MCP synchronization and import.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -9,12 +9,12 @@ use crate::error::AppError;
 use super::validation::{extract_server_spec, validate_server_spec};
 
 fn should_sync_gemini_mcp() -> bool {
-    // Gemini 未安装/未初始化时：~/.gemini 目录不存在。
-    // 按用户偏好：目录缺失时跳过写入/删除，不创建任何文件或目录。
+    // The ~/.gemini directory is absent when Gemini is not installed or initialized.
+    // Honor the user's setup by skipping writes and deletes without creating files or directories.
     crate::gemini_config::get_gemini_dir().exists()
 }
 
-/// 返回已启用的 MCP 服务器（过滤 enabled==true）
+/// Returns MCP servers whose `enabled` field is true.
 fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
     let mut out = HashMap::new();
     for (id, entry) in cfg.servers.iter() {
@@ -30,14 +30,14 @@ fn collect_enabled_servers(cfg: &McpConfig) -> HashMap<String, Value> {
                 out.insert(id.clone(), spec);
             }
             Err(err) => {
-                log::warn!("跳过无效的 MCP 条目 '{id}': {err}");
+                log::warn!("Skipping invalid MCP entry '{id}': {err}");
             }
         }
     }
     out
 }
 
-/// 将 config.json 中 Gemini 的 enabled==true 项写入 Gemini MCP 配置
+/// Writes enabled Gemini entries from config.json to the Gemini MCP configuration.
 pub fn sync_enabled_to_gemini(config: &MultiAppConfig) -> Result<(), AppError> {
     if !should_sync_gemini_mcp() {
         return Ok(());
@@ -46,37 +46,37 @@ pub fn sync_enabled_to_gemini(config: &MultiAppConfig) -> Result<(), AppError> {
     crate::gemini_mcp::set_mcp_servers_map(&enabled)
 }
 
-/// 从 Gemini MCP 配置导入到统一结构（v3.7.0+）
-/// 已存在的服务器将启用 Gemini 应用，不覆盖其他字段和应用状态
+/// Imports the Gemini MCP configuration into the unified model (v3.7.0+).
+/// Existing servers enable Gemini without replacing other fields or application states.
 pub fn import_from_gemini(config: &mut MultiAppConfig) -> Result<usize, AppError> {
     let map = crate::gemini_mcp::read_mcp_servers_map()?;
     if map.is_empty() {
         return Ok(0);
     }
 
-    // 确保新结构存在
+    // Ensure the unified server map exists.
     let servers = config.mcp.servers.get_or_insert_with(HashMap::new);
 
     let mut changed = 0;
     let mut errors = Vec::new();
 
     for (id, spec) in map.iter() {
-        // 校验：单项失败不中止，收集错误继续处理
+        // Collect invalid entries without stopping the remaining imports.
         if let Err(e) = validate_server_spec(spec) {
-            log::warn!("跳过无效 MCP 服务器 '{id}': {e}");
+            log::warn!("Skipping invalid MCP server '{id}': {e}");
             errors.push(format!("{id}: {e}"));
             continue;
         }
 
         if let Some(existing) = servers.get_mut(id) {
-            // 已存在：仅启用 Gemini 应用
+            // Only enable Gemini on an existing server.
             if !existing.apps.gemini {
                 existing.apps.gemini = true;
                 changed += 1;
-                log::info!("MCP 服务器 '{id}' 已启用 Gemini 应用");
+                log::info!("Enabled Gemini for MCP server '{id}'");
             }
         } else {
-            // 新建服务器：默认仅启用 Gemini
+            // Enable only Gemini by default for a new server.
             servers.insert(
                 id.clone(),
                 McpServer {
@@ -97,18 +97,22 @@ pub fn import_from_gemini(config: &mut MultiAppConfig) -> Result<usize, AppError
                 },
             );
             changed += 1;
-            log::info!("导入新 MCP 服务器 '{id}'");
+            log::info!("Imported new MCP server '{id}'");
         }
     }
 
     if !errors.is_empty() {
-        log::warn!("导入完成，但有 {} 项失败: {:?}", errors.len(), errors);
+        log::warn!(
+            "Import completed with {} failed entries: {:?}",
+            errors.len(),
+            errors
+        );
     }
 
     Ok(changed)
 }
 
-/// 将单个 MCP 服务器同步到 Gemini live 配置
+/// Synchronizes one MCP server to the live Gemini configuration.
 pub fn sync_single_server_to_gemini(
     _config: &MultiAppConfig,
     id: &str,
@@ -117,27 +121,27 @@ pub fn sync_single_server_to_gemini(
     if !should_sync_gemini_mcp() {
         return Ok(());
     }
-    // 读取现有的 MCP 配置
+    // Read the current MCP configuration.
     let mut current = crate::gemini_mcp::read_mcp_servers_map()?;
 
-    // 添加/更新当前服务器
+    // Add or update the server.
     current.insert(id.to_string(), server_spec.clone());
 
-    // 写回
+    // Write the updated configuration.
     crate::gemini_mcp::set_mcp_servers_map(&current)
 }
 
-/// 从 Gemini live 配置中移除单个 MCP 服务器
+/// Removes one MCP server from the live Gemini configuration.
 pub fn remove_server_from_gemini(id: &str) -> Result<(), AppError> {
     if !should_sync_gemini_mcp() {
         return Ok(());
     }
-    // 读取现有的 MCP 配置
+    // Read the current MCP configuration.
     let mut current = crate::gemini_mcp::read_mcp_servers_map()?;
 
-    // 移除指定服务器
+    // Remove the requested server.
     current.remove(id);
 
-    // 写回
+    // Write the updated configuration.
     crate::gemini_mcp::set_mcp_servers_map(&current)
 }

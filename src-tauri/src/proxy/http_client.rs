@@ -1,7 +1,7 @@
-//! 全局 HTTP 客户端模块
+//! Global HTTP client module.
 //!
-//! 提供支持全局代理配置的 HTTP 客户端。
-//! 所有需要发送 HTTP 请求的模块都应使用此模块提供的客户端。
+//! Provides HTTP clients with global proxy support.
+//! Modules that send HTTP requests should use clients from this module.
 
 use once_cell::sync::OnceCell;
 use reqwest::Client;
@@ -19,15 +19,15 @@ struct GlobalClients {
 /// the forwarder applies the configured per-request timeout itself.
 static GLOBAL_CLIENTS: OnceCell<RwLock<GlobalClients>> = OnceCell::new();
 
-/// 当前代理 URL（用于日志和状态查询）
+/// Current proxy URL for logging and status queries.
 static CURRENT_PROXY_URL: OnceCell<RwLock<Option<String>>> = OnceCell::new();
 
-/// Nexus Composer 代理服务器当前监听的端口
+/// Port currently used by the Nexus Composer proxy server.
 static CC_SWITCH_PROXY_PORT: OnceCell<RwLock<u16>> = OnceCell::new();
 
-/// 设置 Nexus Composer 代理服务器的监听端口
+/// Sets the Nexus Composer proxy server port.
 ///
-/// 应在代理服务器启动时调用，以便系统代理检测能正确识别自己的端口
+/// Call when the proxy server starts so system proxy detection recognizes its port.
 pub fn set_proxy_port(port: u16) {
     if let Some(lock) = CC_SWITCH_PROXY_PORT.get() {
         if let Ok(mut current_port) = lock.write() {
@@ -40,27 +40,27 @@ pub fn set_proxy_port(port: u16) {
     }
 }
 
-/// 获取 Nexus Composer 代理服务器的监听端口
+/// Returns the Nexus Composer proxy server port.
 fn get_proxy_port() -> u16 {
     CC_SWITCH_PROXY_PORT
         .get()
         .and_then(|lock| lock.read().ok())
         .map(|port| *port)
-        .unwrap_or(15721) // 默认端口作为回退
+        .unwrap_or(15721) // Fall back to the default port.
 }
 
-/// 初始化全局 HTTP 客户端
+/// Initializes the global HTTP clients.
 ///
-/// 应在应用启动时调用一次。
+/// Call once during application startup.
 ///
 /// # Arguments
-/// * `proxy_url` - 代理 URL，如 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`
-///   传入 None 或空字符串表示直连
+/// * `proxy_url` - Proxy URL such as `http://127.0.0.1:7890` or
+///   `socks5://127.0.0.1:1080`; `None` or an empty string selects a direct connection
 pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
     let clients = build_clients(effective_url)?;
 
-    // 尝试初始化全局客户端，如果已存在则记录警告并使用 apply_proxy 更新
+    // Initialize the global clients, or update them through `apply_proxy` if already set.
     if GLOBAL_CLIENTS.set(RwLock::new(clients)).is_err() {
         log::warn!(
             "[GlobalProxy] [GP-003] Already initialized, updating instead: {}",
@@ -68,11 +68,11 @@ pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
                 .map(mask_url)
                 .unwrap_or_else(|| "direct connection".to_string())
         );
-        // 已初始化，改用 apply_proxy 更新
+        // Already initialized; update through `apply_proxy`.
         return apply_proxy(proxy_url);
     }
 
-    // 初始化代理 URL 记录
+    // Initialize the proxy URL record.
     let _ = CURRENT_PROXY_URL.set(RwLock::new(effective_url.map(|s| s.to_string())));
 
     log::info!(
@@ -85,16 +85,16 @@ pub fn init(proxy_url: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// 验证代理配置（不应用）
+/// Validates proxy configuration without applying it.
 ///
-/// 只验证代理 URL 是否有效，不实际更新全局客户端。
-/// 用于在持久化之前验证配置的有效性。
+/// Validates the proxy URL without updating the global clients. Use before persisting
+/// configuration.
 ///
 /// # Arguments
-/// * `proxy_url` - 代理 URL，None 或空字符串表示直连
+/// * `proxy_url` - Proxy URL; `None` or an empty string selects a direct connection
 ///
 /// # Returns
-/// 验证成功返回 Ok(())，失败返回错误信息
+/// Returns `Ok(())` when valid, or an error message otherwise.
 pub fn validate_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
     // Build both clients to validate the complete runtime configuration.
@@ -102,18 +102,18 @@ pub fn validate_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// 应用代理配置（假设已验证）
+/// Applies previously validated proxy configuration.
 ///
-/// 直接应用代理配置到全局客户端，不做额外验证。
-/// 应在 validate_proxy 成功后调用。
+/// Applies proxy configuration to the global clients without extra validation.
+/// Call after `validate_proxy` succeeds.
 ///
 /// # Arguments
-/// * `proxy_url` - 代理 URL，None 或空字符串表示直连
+/// * `proxy_url` - Proxy URL; `None` or an empty string selects a direct connection
 pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
     let new_clients = build_clients(effective_url)?;
 
-    // 更新客户端
+    // Update the clients.
     if let Some(lock) = GLOBAL_CLIENTS.get() {
         let mut clients = lock.write().map_err(|e| {
             log::error!("[GlobalProxy] [GP-001] Failed to acquire write lock: {e}");
@@ -121,11 +121,11 @@ pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
         })?;
         *clients = new_clients;
     } else {
-        // 如果还没初始化，则初始化
+        // Initialize if needed.
         return init(proxy_url);
     }
 
-    // 更新代理 URL 记录
+    // Update the proxy URL record.
     if let Some(lock) = CURRENT_PROXY_URL.get() {
         let mut url = lock.write().map_err(|e| {
             log::error!("[GlobalProxy] [GP-002] Failed to acquire URL write lock: {e}");
@@ -144,20 +144,20 @@ pub fn apply_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// 更新代理配置（热更新）
+/// Updates proxy configuration at runtime.
 ///
-/// 可在运行时调用以更改代理设置，无需重启应用。
-/// 注意：此函数同时验证和应用，如果需要先验证后持久化再应用，
-/// 请使用 validate_proxy + apply_proxy 组合。
+/// Changes proxy settings without restarting the application. This function both
+/// validates and applies them. To validate before persisting, use `validate_proxy`
+/// followed by `apply_proxy`.
 ///
 /// # Arguments
-/// * `proxy_url` - 新的代理 URL，None 或空字符串表示直连
+/// * `proxy_url` - New proxy URL; `None` or an empty string selects a direct connection
 #[allow(dead_code)]
 pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     let effective_url = proxy_url.filter(|s| !s.trim().is_empty());
     let new_clients = build_clients(effective_url)?;
 
-    // 更新客户端
+    // Update the clients.
     if let Some(lock) = GLOBAL_CLIENTS.get() {
         let mut clients = lock.write().map_err(|e| {
             log::error!("[GlobalProxy] [GP-001] Failed to acquire write lock: {e}");
@@ -165,11 +165,11 @@ pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
         })?;
         *clients = new_clients;
     } else {
-        // 如果还没初始化，则初始化
+        // Initialize if needed.
         return init(proxy_url);
     }
 
-    // 更新代理 URL 记录
+    // Update the proxy URL record.
     if let Some(lock) = CURRENT_PROXY_URL.get() {
         let mut url = lock.write().map_err(|e| {
             log::error!("[GlobalProxy] [GP-002] Failed to acquire URL write lock: {e}");
@@ -188,9 +188,9 @@ pub fn update_proxy(proxy_url: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// 获取全局 HTTP 客户端
+/// Returns the global HTTP client.
 ///
-/// 返回配置了代理的客户端（如果已配置代理），否则返回跟随系统代理的客户端。
+/// Uses the configured proxy when present, otherwise follows the system proxy.
 pub fn get() -> Client {
     GLOBAL_CLIENTS
         .get()
@@ -218,9 +218,9 @@ pub fn get_for_forwarding() -> Client {
         })
 }
 
-/// 获取当前代理 URL
+/// Returns the current proxy URL.
 ///
-/// 返回当前配置的代理 URL，None 表示直连。
+/// `None` indicates a direct connection.
 pub fn get_current_proxy_url() -> Option<String> {
     CURRENT_PROXY_URL
         .get()
@@ -228,13 +228,13 @@ pub fn get_current_proxy_url() -> Option<String> {
         .and_then(|url| url.clone())
 }
 
-/// 检查是否正在使用代理
+/// Returns whether a proxy is configured.
 #[allow(dead_code)]
 pub fn is_proxy_enabled() -> bool {
     get_current_proxy_url().is_some()
 }
 
-/// 构建 HTTP 客户端
+/// Builds an HTTP client.
 fn build_client(proxy_url: Option<&str>) -> Result<Client, String> {
     build_client_with_timeout(proxy_url, Some(Duration::from_secs(600)))
 }
@@ -258,8 +258,9 @@ fn build_client_with_timeout(
         .connect_timeout(Duration::from_secs(30))
         .pool_max_idle_per_host(10)
         .tcp_keepalive(Duration::from_secs(60))
-        // 禁用 reqwest 自动解压：防止 reqwest 覆盖客户端原始 accept-encoding header。
-        // 响应解压由 response_processor 根据 content-encoding 手动处理。
+        // Disable automatic decompression so reqwest does not overwrite the client's original
+        // `accept-encoding` header. `response_processor` handles the response according to
+        // `content-encoding`.
         .no_gzip()
         .no_brotli()
         .no_deflate()
@@ -269,9 +270,9 @@ fn build_client_with_timeout(
         builder = builder.timeout(timeout);
     }
 
-    // 有代理地址则使用代理，否则跟随系统代理
+    // Use the explicit proxy when present; otherwise follow the system proxy.
     if let Some(url) = proxy_url {
-        // 先验证 URL 格式和 scheme
+        // Validate the URL format and scheme first.
         let parsed = url::Url::parse(url)
             .map_err(|e| format!("Invalid proxy URL '{}': {}", mask_url(url), e))?;
 
@@ -289,8 +290,8 @@ fn build_client_with_timeout(
         builder = builder.proxy(proxy);
         log::debug!("[GlobalProxy] Proxy configured: {}", mask_url(url));
     } else {
-        // 未设置全局代理时，让 reqwest 自动检测系统代理（环境变量）
-        // 若系统代理指向本机，禁用系统代理避免自环
+        // Without an explicit proxy, let reqwest detect proxy environment variables.
+        // Bypass a system proxy that points back to this server to avoid recursion.
         if system_proxy_points_to_loopback() {
             builder = builder.no_proxy();
             log::warn!(
@@ -333,8 +334,7 @@ fn proxy_points_to_loopback(value: &str) -> bool {
             .unwrap_or(false)
     }
 
-    // 检查是否指向 Nexus Composer 自己的代理端口
-    // 只有指向自己的代理才需要跳过，避免递归
+    // Bypass only the Nexus Composer proxy port to avoid recursive forwarding.
     fn is_cc_switch_proxy_port(port: Option<u16>) -> bool {
         let cc_switch_port = get_proxy_port();
         port == Some(cc_switch_port)
@@ -342,7 +342,7 @@ fn proxy_points_to_loopback(value: &str) -> bool {
 
     if let Ok(parsed) = url::Url::parse(value) {
         if let Some(host) = parsed.host_str() {
-            // 只有当主机是 loopback 且端口是 Nexus Composer 的端口时才返回 true
+            // Match only a loopback host using the Nexus Composer proxy port.
             return host_is_loopback(host) && is_cc_switch_proxy_port(parsed.port());
         }
         return false;
@@ -358,17 +358,17 @@ fn proxy_points_to_loopback(value: &str) -> bool {
     false
 }
 
-/// 隐藏 URL 中的敏感信息（用于日志）
+/// Masks sensitive URL data for logging.
 pub fn mask_url(url: &str) -> String {
     if let Ok(parsed) = url::Url::parse(url) {
-        // 隐藏用户名和密码，保留 scheme、host 和端口
+        // Hide credentials while retaining the scheme, host, and port.
         let host = parsed.host_str().unwrap_or("?");
         match parsed.port() {
             Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
             None => format!("{}://{}", parsed.scheme(), host),
         }
     } else {
-        // URL 解析失败，返回部分内容
+        // Return a truncated value when URL parsing fails.
         if url.len() > 20 {
             format!("{}...", &url[..20])
         } else {
@@ -398,7 +398,7 @@ mod tests {
             mask_url("socks5://admin:secret@proxy.example.com:1080"),
             "socks5://proxy.example.com:1080"
         );
-        // 无端口的 URL 不应显示 ":?"
+        // A URL without a port must not display ":?".
         assert_eq!(
             mask_url("http://proxy.example.com"),
             "http://proxy.example.com"
@@ -429,27 +429,27 @@ mod tests {
 
     #[test]
     fn test_build_client_invalid_url() {
-        // reqwest::Proxy::all 对某些无效 URL 不会立即报错
-        // 使用明确无效的 scheme 来触发错误
+        // `reqwest::Proxy::all` does not reject every invalid URL immediately, so use an
+        // explicitly invalid scheme.
         let result = build_client(Some("invalid-scheme://127.0.0.1:7890"));
         assert!(result.is_err(), "Should reject invalid proxy scheme");
     }
 
     #[test]
     fn test_proxy_points_to_loopback() {
-        // 设置 Nexus Composer 代理端口为 15721（默认值）
+        // Set the Nexus Composer proxy port to its default, 15721.
         set_proxy_port(15721);
 
-        // 只有指向 Nexus Composer 自己端口的 loopback 地址才返回 true
+        // Match loopback addresses only when they use the Nexus Composer port.
         assert!(proxy_points_to_loopback("http://127.0.0.1:15721"));
         assert!(proxy_points_to_loopback("socks5://localhost:15721"));
         assert!(proxy_points_to_loopback("127.0.0.1:15721"));
 
-        // 其他 loopback 端口不应该被跳过（允许使用其他本地代理工具）
+        // Allow other loopback ports for other local proxy tools.
         assert!(!proxy_points_to_loopback("http://127.0.0.1:7890"));
         assert!(!proxy_points_to_loopback("socks5://localhost:1080"));
 
-        // 非 loopback 地址不应该被跳过
+        // Do not bypass non-loopback addresses.
         assert!(!proxy_points_to_loopback("http://192.168.1.10:7890"));
         assert!(!proxy_points_to_loopback("http://192.168.1.10:15721"));
     }
@@ -458,7 +458,7 @@ mod tests {
     fn test_system_proxy_points_to_loopback() {
         let _guard = env_lock().lock().unwrap();
 
-        // 设置 Nexus Composer 代理端口
+        // Set the Nexus Composer proxy port.
         set_proxy_port(15721);
 
         let keys = [
@@ -474,15 +474,15 @@ mod tests {
             std::env::remove_var(key);
         }
 
-        // 指向 Nexus Composer 端口的代理应该被跳过
+        // Bypass a proxy that points to the Nexus Composer port.
         std::env::set_var("HTTP_PROXY", "http://127.0.0.1:15721");
         assert!(system_proxy_points_to_loopback());
 
-        // 指向其他端口的本地代理不应该被跳过
+        // Do not bypass a local proxy on another port.
         std::env::set_var("HTTP_PROXY", "http://127.0.0.1:7890");
         assert!(!system_proxy_points_to_loopback());
 
-        // 非 loopback 地址不应该被跳过
+        // Do not bypass non-loopback addresses.
         std::env::set_var("HTTP_PROXY", "http://10.0.0.2:7890");
         assert!(!system_proxy_points_to_loopback());
 

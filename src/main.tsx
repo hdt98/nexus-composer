@@ -4,7 +4,7 @@ import App from "./App";
 import { DatabaseUpgrade } from "./components/DatabaseUpgrade";
 import { UpdateProvider } from "./contexts/UpdateContext";
 import "./index.css";
-// 导入国际化配置
+// Load internationalization configuration.
 import i18n from "./i18n";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -15,7 +15,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "@tauri-apps/plugin-dialog";
 import { exit } from "@tauri-apps/plugin-process";
 
-// 根据平台添加 body class，便于平台特定样式
+// Add a platform-specific body class for platform-specific styling.
 try {
   const ua = navigator.userAgent || "";
   const plat = (navigator.platform || "").toLowerCase();
@@ -24,20 +24,21 @@ try {
     document.body.classList.add("is-mac");
   }
 } catch {
-  // 忽略平台检测失败
+  // Ignore platform detection failures.
 }
 
-// 配置加载错误payload类型
+// Configuration-load error payload.
 interface ConfigLoadErrorPayload {
   path?: string;
   error?: string;
-  /** "db_version_too_new" 表示数据库版本过新，渲染应用内升级恢复界面 */
+  /** "db_version_too_new" renders the in-app upgrade recovery screen. */
   kind?: string;
 }
 
 /**
- * 处理配置加载失败：显示错误消息并强制退出应用
- * 不给用户"取消"选项，因为配置损坏时应用无法正常运行
+ * Handles configuration-load failures by displaying an error and forcing the
+ * application to exit. A damaged configuration prevents normal operation, so
+ * the dialog intentionally provides no cancel option.
  */
 async function handleConfigLoadError(
   payload: ConfigLoadErrorPayload | null,
@@ -50,11 +51,11 @@ async function handleConfigLoadError(
       path,
       detail,
       defaultValue:
-        "无法读取配置文件：\n{{path}}\n\n错误详情：\n{{detail}}\n\n请手动检查 JSON 是否有效，或从同目录的备份文件（如 config.json.bak）恢复。\n\n应用将退出以便您进行修复。",
+        "Unable to read configuration file:\n{{path}}\n\nError details:\n{{detail}}\n\nPlease check if the JSON is valid, or restore from a backup file (e.g., config.json.bak) in the same directory.\n\nThe app will exit so you can fix this.",
     }),
     {
       title: i18n.t("errors.configLoadFailedTitle", {
-        defaultValue: "配置加载失败",
+        defaultValue: "Configuration Load Failed",
       }),
       kind: "error",
     },
@@ -63,24 +64,26 @@ async function handleConfigLoadError(
   await exit(1);
 }
 
-// 监听后端的配置加载错误事件：仅提醒用户并强制退出，不修改任何配置文件
+// Listen for backend configuration-load errors. Notify the user and force an
+// exit without modifying configuration files.
 try {
   void listen("configLoadError", async (evt) => {
     await handleConfigLoadError(evt.payload as ConfigLoadErrorPayload | null);
   });
 } catch (e) {
-  // 忽略事件订阅异常（例如在非 Tauri 环境下）
-  console.error("订阅 configLoadError 事件失败", e);
+  // Ignore subscription failures, such as in a non-Tauri environment.
+  console.error("Failed to subscribe to the configLoadError event", e);
 }
 
 async function bootstrap() {
-  // 启动早期主动查询后端初始化错误，避免事件竞态
+  // Query backend initialization errors early to avoid an event race.
   try {
     const initError = (await invoke(
       "get_init_error",
     )) as ConfigLoadErrorPayload | null;
     if (initError && initError.kind === "db_version_too_new") {
-      // 数据库版本过新：渲染应用内「升级应用」恢复界面，不进入正常 App
+      // If the database is newer than the app, render the in-app upgrade
+      // recovery screen instead of the normal application.
       ReactDOM.createRoot(document.getElementById("root")!).render(
         <React.StrictMode>
           <ThemeProvider
@@ -96,12 +99,12 @@ async function bootstrap() {
     }
     if (initError && (initError.path || initError.error)) {
       await handleConfigLoadError(initError);
-      // 注意：不会执行到这里，因为 exit(1) 会终止进程
+      // This is unreachable because exit(1) terminates the process.
       return;
     }
   } catch (e) {
-    // 忽略拉取错误，继续渲染
-    console.error("拉取初始化错误失败", e);
+    // Ignore retrieval failures and continue rendering.
+    console.error("Failed to retrieve the initialization error", e);
   }
 
   ReactDOM.createRoot(document.getElementById("root")!).render(

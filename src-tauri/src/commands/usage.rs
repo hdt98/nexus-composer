@@ -112,7 +112,7 @@ pub fn get_model_stats(
     )
 }
 
-/// 获取请求日志列表
+/// Returns the request log list.
 #[tauri::command]
 pub fn get_request_logs(
     state: State<'_, AppState>,
@@ -123,7 +123,7 @@ pub fn get_request_logs(
     state.db.get_request_logs(&filters, page, page_size)
 }
 
-/// 获取单个请求详情
+/// Returns one request's details.
 #[tauri::command]
 pub fn get_request_detail(
     state: State<'_, AppState>,
@@ -132,16 +132,16 @@ pub fn get_request_detail(
     state.db.get_request_detail(&request_id)
 }
 
-/// 获取模型定价列表
+/// Returns the model pricing list.
 #[tauri::command]
 pub fn get_model_pricing(state: State<'_, AppState>) -> Result<Vec<ModelPricingInfo>, AppError> {
-    log::info!("获取模型定价列表");
+    log::info!("Fetching model pricing list");
     state.db.ensure_model_pricing_seeded()?;
 
     let db = state.db.clone();
     let conn = crate::database::lock_conn!(db.conn);
 
-    // 检查表是否存在
+    // Check whether the table exists.
     let table_exists: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='model_pricing'",
@@ -151,7 +151,9 @@ pub fn get_model_pricing(state: State<'_, AppState>) -> Result<Vec<ModelPricingI
         .unwrap_or(false);
 
     if !table_exists {
-        log::error!("model_pricing 表不存在,可能需要重启应用以触发数据库迁移");
+        log::error!(
+            "The model_pricing table is missing; restart the application to run database migrations"
+        );
         return Ok(Vec::new());
     }
 
@@ -178,11 +180,11 @@ pub fn get_model_pricing(state: State<'_, AppState>) -> Result<Vec<ModelPricingI
         pricing.push(row?);
     }
 
-    log::info!("成功获取 {} 条模型定价数据", pricing.len());
+    log::info!("Fetched {} model pricing records", pricing.len());
     Ok(pricing)
 }
 
-/// 更新模型定价
+/// Updates model pricing.
 #[tauri::command]
 pub fn update_model_pricing(
     state: State<'_, AppState>,
@@ -199,14 +201,14 @@ pub fn update_model_pricing(
     if model_id.is_empty() {
         return Err(AppError::localized(
             "usage.modelIdRequired",
-            "模型 ID 不能为空",
+            "Model ID is required",
             "Model ID is required",
         ));
     }
     if display_name.is_empty() {
         return Err(AppError::localized(
             "usage.displayNameRequired",
-            "显示名称不能为空",
+            "Display name is required",
             "Display name is required",
         ));
     }
@@ -220,14 +222,14 @@ pub fn update_model_pricing(
         let parsed = Decimal::from_str(value.trim()).map_err(|e| {
             AppError::localized(
                 "usage.invalidPrice",
-                format!("{label} 价格无效: {value} - {e}"),
+                format!("{label} price is invalid: {value} - {e}"),
                 format!("{label} price is invalid: {value} - {e}"),
             )
         })?;
         if parsed < Decimal::ZERO {
             return Err(AppError::localized(
                 "usage.invalidPrice",
-                format!("{label} 价格必须为非负数: {value}"),
+                format!("{label} price must be non-negative: {value}"),
                 format!("{label} price must be non-negative: {value}"),
             ));
         }
@@ -249,17 +251,19 @@ pub fn update_model_pricing(
                 cache_creation_cost.trim()
             ],
         )
-        .map_err(|e| AppError::Database(format!("更新模型定价失败: {e}")))?;
+        .map_err(|e| AppError::Database(format!("Failed to update model pricing: {e}")))?;
     }
 
     if let Err(e) = db.backfill_missing_usage_costs_for_model(&model_id) {
-        log::warn!("模型定价更新后回填历史用量成本失败 (model_id={model_id}): {e}");
+        log::warn!(
+            "Failed to backfill historical usage costs after updating model pricing (model_id={model_id}): {e}"
+        );
     }
 
     Ok(())
 }
 
-/// 检查 Provider 使用限额
+/// Checks provider usage limits.
 #[tauri::command]
 pub fn check_provider_limits(
     state: State<'_, AppState>,
@@ -269,7 +273,7 @@ pub fn check_provider_limits(
     state.db.check_provider_limits(&provider_id, &app_type)
 }
 
-/// 删除模型定价
+/// Deletes model pricing.
 #[tauri::command]
 pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Result<(), AppError> {
     let db = state.db.clone();
@@ -279,9 +283,9 @@ pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Res
         "DELETE FROM model_pricing WHERE model_id = ?1",
         rusqlite::params![model_id],
     )
-    .map_err(|e| AppError::Database(format!("删除模型定价失败: {e}")))?;
+    .map_err(|e| AppError::Database(format!("Failed to delete model pricing: {e}")))?;
 
-    log::info!("已删除模型定价: {model_id}");
+    log::info!("Deleted model pricing: {model_id}");
     Ok(())
 }
 
@@ -293,7 +297,7 @@ pub async fn sync_session_usage(
     crate::services::session_usage::sync_all_session_usage(state.db.clone()).await
 }
 
-/// 获取数据来源分布
+/// Returns the usage data-source distribution.
 #[tauri::command]
 pub fn get_usage_data_sources(
     state: State<'_, AppState>,
@@ -447,7 +451,7 @@ mod tests {
     }
 }
 
-/// 模型定价信息
+/// Model pricing information.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelPricingInfo {

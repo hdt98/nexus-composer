@@ -285,7 +285,7 @@ command = "say"
         );
     }
 
-    // v3.7.0+: 使用统一的 MCP 结构
+    // v3.7.0+ uses the unified MCP model.
     config.mcp.servers = Some(HashMap::new());
     config.mcp.servers.as_mut().unwrap().insert(
         "echo-server".into(),
@@ -298,7 +298,7 @@ command = "say"
             }),
             apps: McpApps {
                 claude: false,
-                codex: true, // 启用 Codex
+                codex: true, // Enable Codex.
                 gemini: false,
                 opencode: false,
                 hermes: false,
@@ -357,8 +357,8 @@ command = "say"
         .get("config")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    // 供应商配置应该包含在 live 文件中
-    // 注意：live 文件还会包含 MCP 同步后的内容
+    // The live file should contain the provider configuration.
+    // It also includes content synchronized from MCP settings.
     assert!(
         config_text.contains("mcp_servers.latest"),
         "live file should contain provider's original config"
@@ -377,8 +377,8 @@ command = "say"
         .and_then(|v| v.get("OPENAI_API_KEY"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    // 回填机制：切换前会将 live 配置回填到当前供应商
-    // 这保护了用户在 live 文件中的手动修改
+    // Backfill the live configuration into the current provider before switching.
+    // This preserves manual changes made to the live file.
     assert_eq!(
         legacy_auth_value, "legacy-key",
         "previous provider should be backfilled with live auth"
@@ -403,8 +403,8 @@ fn switch_provider_missing_provider_returns_error() {
 
     let err_str = err.to_string();
     assert!(
-        err_str.contains("供应商不存在")
-            || err_str.contains("Provider not found")
+        err_str.contains("Provider not found")
+            || err_str.contains("does not exist")
             || err_str.contains("missing-provider"),
         "error message should mention missing provider, got: {err_str}"
     );
@@ -499,8 +499,8 @@ fn switch_provider_updates_claude_live_and_state() {
     let legacy_provider = providers
         .get("old-provider")
         .expect("legacy provider still exists");
-    // 回填机制：切换前会将 live 配置回填到当前供应商
-    // 这保护了用户在 live 文件中的手动修改
+    // Backfill the live configuration into the current provider before switching.
+    // This preserves manual changes made to the live file.
     assert_eq!(
         legacy_provider.settings_config, legacy_live,
         "previous provider should be backfilled with live config"
@@ -517,8 +517,8 @@ fn switch_provider_updates_claude_live_and_state() {
         "new provider snapshot should retain fresh auth"
     );
 
-    // v3.7.0+ 使用 SQLite 数据库而非 config.json
-    // 验证数据已持久化到数据库
+    // v3.7.0+ uses SQLite instead of config.json.
+    // Verify that the data was persisted to the database.
     let home_dir = std::env::var("HOME").expect("HOME should be set by ensure_test_home");
     let db_path = std::path::Path::new(&home_dir)
         .join(".cc-switch")
@@ -528,7 +528,7 @@ fn switch_provider_updates_claude_live_and_state() {
         "switching provider should persist to cc-switch.db"
     );
 
-    // 验证当前供应商已更新
+    // Verify that the current provider was updated.
     let current_id = app_state
         .db
         .get_current_provider(AppType::Claude.as_str())
@@ -580,9 +580,9 @@ fn switch_provider_codex_missing_auth_returns_error_and_keeps_state() {
         .db
         .get_current_provider(AppType::Codex.as_str())
         .expect("get current provider");
-    // 切换失败后，由于数据库操作是先设置再验证，current 可能已被设为 "invalid"
-    // 但由于 live 配置写入失败，状态应该回滚
-    // 注意：这个行为取决于 switch_provider 的具体实现
+    // The database update precedes validation, so a failed switch may leave current set to "invalid".
+    // A failed live-config write should otherwise roll back the state.
+    // The exact outcome depends on the switch_provider implementation.
     assert!(
         current_id.is_none() || current_id.as_deref() == Some("invalid"),
         "current provider should remain empty or be the attempted id on failure, got: {current_id:?}"
@@ -595,7 +595,7 @@ fn import_refuses_live_config_under_proxy_takeover() {
     reset_test_fs();
     ensure_test_home();
 
-    // 接管态 Codex Live：auth 是 PROXY_MANAGED 占位符，不是用户真实配置
+    // A proxy-managed Codex live config uses the PROXY_MANAGED placeholder, not the user's real auth.
     let auth = json!({"OPENAI_API_KEY": "PROXY_MANAGED"});
     let config = r#"model = "gpt-5"
 "#;

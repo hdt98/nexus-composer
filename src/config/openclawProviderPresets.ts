@@ -26,7 +26,7 @@ export interface OpenClawProviderPreset {
   settingsConfig: OpenClawProviderConfig;
   isOfficial?: boolean;
   isPartner?: boolean;
-  primePartner?: boolean; // 置顶合作伙伴（顶级）：徽章显示为心形
+  primePartner?: boolean; // Top-tier featured partner, shown with a heart badge.
   partnerPromotionKey?: string;
   category?: ProviderCategory;
   /** Template variable definitions */
@@ -2268,8 +2268,8 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
       ],
     },
     category: "aggregator",
-    isPartner: true, // 合作伙伴
-    partnerPromotionKey: "ucloud", // 促销信息 i18n key
+    isPartner: true, // Partner.
+    partnerPromotionKey: "ucloud", // Promotion i18n key.
     icon: "ucloud",
     iconColor: "#000000",
     templateValues: {
@@ -2308,8 +2308,8 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
       ],
     },
     category: "aggregator",
-    isPartner: true, // 合作伙伴
-    partnerPromotionKey: "ucloud", // 促销信息 i18n key（复用）
+    isPartner: true, // Partner.
+    partnerPromotionKey: "ucloud", // Reused promotion i18n key.
     icon: "ucloud",
     iconColor: "#000000",
     templateValues: {
@@ -2471,7 +2471,7 @@ export const openclawProviderPresets: OpenClawProviderPreset[] = [
     name: "AWS Bedrock",
     websiteUrl: "https://aws.amazon.com/bedrock/",
     settingsConfig: {
-      // 请将 us-west-2 替换为你的 AWS Region
+      // Replace us-west-2 with your AWS Region.
       baseUrl: "https://bedrock-runtime.us-west-2.amazonaws.com",
       apiKey: "",
       api: "bedrock-converse-stream",

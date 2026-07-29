@@ -28,13 +28,13 @@ export function LocalProxyRequestOverridesField({
       <div className="space-y-1">
         <FormLabel>
           {t("providerForm.localProxyRequestOverrides", {
-            defaultValue: "本地代理请求覆盖",
+            defaultValue: "Local proxy request overrides",
           })}
         </FormLabel>
         <p className="text-xs text-muted-foreground">
           {t("providerForm.localProxyRequestOverridesHint", {
             defaultValue:
-              "仅在本地路由/代理接管后生效，应用于协议转换后的上游请求。",
+              "Only takes effect after local routing/proxy takeover; applied to the transformed upstream request.",
           })}
         </p>
       </div>
@@ -43,7 +43,7 @@ export function LocalProxyRequestOverridesField({
         <div className="space-y-2">
           <FormLabel className="text-xs text-muted-foreground">
             {t("providerForm.localProxyHeaderOverrides", {
-              defaultValue: "Header 覆盖",
+              defaultValue: "Header overrides",
             })}
           </FormLabel>
           <Textarea
@@ -57,7 +57,7 @@ export function LocalProxyRequestOverridesField({
             <p className="text-xs text-destructive">
               {t("providerForm.localProxyHeaderOverridesInvalidDetail", {
                 error: headerError,
-                defaultValue: "Header 覆盖格式错误：{{error}}",
+                defaultValue: "Header overrides format error: {{error}}",
               })}
             </p>
           )}
@@ -66,7 +66,7 @@ export function LocalProxyRequestOverridesField({
         <div className="space-y-2">
           <FormLabel className="text-xs text-muted-foreground">
             {t("providerForm.localProxyBodyOverrides", {
-              defaultValue: "Body 覆盖",
+              defaultValue: "Body overrides",
             })}
           </FormLabel>
           <Textarea
@@ -80,7 +80,7 @@ export function LocalProxyRequestOverridesField({
             <p className="text-xs text-destructive">
               {t("providerForm.localProxyBodyOverridesInvalidDetail", {
                 error: bodyError,
-                defaultValue: "Body 覆盖格式错误：{{error}}",
+                defaultValue: "Body overrides format error: {{error}}",
               })}
             </p>
           )}

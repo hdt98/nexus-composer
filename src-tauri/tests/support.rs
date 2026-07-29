@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use nexus_composer_lib::{update_settings, AppSettings, AppState, Database, MultiAppConfig};
 
-/// 为测试设置隔离的 HOME 目录，避免污染真实用户数据。
+/// Configures an isolated HOME directory for tests to protect real user data.
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
@@ -12,8 +12,8 @@ pub fn ensure_test_home() -> &'static Path {
             let _ = std::fs::remove_dir_all(&base);
         }
         std::fs::create_dir_all(&base).expect("create test home");
-        // Windows 上 `dirs::home_dir()` 不受 HOME/USERPROFILE 影响（走 Known Folder API），
-        // 用 CC_SWITCH_TEST_HOME 显式覆盖，以确保测试不会污染真实用户目录。
+        // On Windows, `dirs::home_dir()` ignores HOME/USERPROFILE and uses the Known Folder
+        // API. Override it explicitly with CC_SWITCH_TEST_HOME so tests cannot alter real user data.
         std::env::set_var("CC_SWITCH_TEST_HOME", &base);
         std::env::set_var("HOME", &base);
         #[cfg(windows)]
@@ -23,7 +23,7 @@ pub fn ensure_test_home() -> &'static Path {
     .as_path()
 }
 
-/// 清理测试目录中生成的配置文件与缓存。
+/// Removes configuration files and caches generated in the test directory.
 pub fn reset_test_fs() {
     let home = ensure_test_home();
     for sub in [
@@ -47,7 +47,7 @@ pub fn reset_test_fs() {
         let _ = std::fs::remove_file(&claude_json);
     }
 
-    // 重置内存中的设置缓存，确保测试环境不受上一次调用影响
+    // Reset the in-memory settings cache so the previous invocation cannot affect this test.
     let _ = update_settings(AppSettings::default());
 }
 
@@ -60,20 +60,20 @@ pub fn enable_codex_official_auth_preservation() {
     .expect("enable Codex official auth preservation");
 }
 
-/// 全局互斥锁，避免多测试并发写入相同的 HOME 目录。
+/// Global mutex that prevents concurrent tests from writing to the same HOME directory.
 pub fn test_mutex() -> &'static Mutex<()> {
     static MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
     MUTEX.get_or_init(|| Mutex::new(()))
 }
 
-/// 创建测试用的 AppState，包含一个空的数据库
+/// Creates test AppState with an empty database.
 #[allow(dead_code)]
 pub fn create_test_state() -> Result<AppState, Box<dyn std::error::Error>> {
     let db = Arc::new(Database::init()?);
     Ok(AppState::new(db))
 }
 
-/// 创建测试用的 AppState，并从 MultiAppConfig 迁移数据
+/// Creates test AppState and migrates data from MultiAppConfig.
 #[allow(dead_code)]
 pub fn create_test_state_with_config(
     config: &MultiAppConfig,

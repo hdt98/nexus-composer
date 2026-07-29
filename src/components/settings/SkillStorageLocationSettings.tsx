@@ -102,7 +102,7 @@ export function SkillStorageLocationSettings({
           : t("settings.skillStorage.ccSwitchHint")}
       </p>
 
-      {/* 迁移确认对话框 */}
+      {/* Migration confirmation dialog */}
       <Dialog
         open={pendingTarget !== null}
         onOpenChange={(open) => {

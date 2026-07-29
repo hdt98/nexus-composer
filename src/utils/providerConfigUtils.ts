@@ -1,4 +1,4 @@
-// 供应商配置处理工具函数
+// Provider configuration utilities.
 
 import type { TemplateValueConfig } from "../config/claudeProviderPresets";
 import { deepClone } from "@/utils/deepClone";
@@ -20,7 +20,7 @@ const deepMerge = (
       }
       deepMerge(target[key], value);
     } else {
-      // 直接覆盖非对象字段（数组/基础类型）
+      // Replace non-object fields, including arrays and primitive values.
       target[key] = value;
     }
   });
@@ -35,13 +35,13 @@ const deepRemove = (
     if (!(key in target)) return;
 
     if (isPlainObject(value) && isPlainObject(target[key])) {
-      // 只移除完全匹配的嵌套属性
+      // Remove only nested properties that match exactly.
       deepRemove(target[key], value);
       if (Object.keys(target[key]).length === 0) {
         delete target[key];
       }
     } else if (isSubset(target[key], value)) {
-      // 只有当值完全匹配时才删除
+      // Delete the field only when its value matches exactly.
       delete target[key];
     }
   });
@@ -68,10 +68,10 @@ export interface UpdateCommonConfigResult {
   error?: string;
 }
 
-// 验证JSON配置格式
+// Validate JSON configuration syntax.
 export const validateJsonConfig = (
   value: string,
-  fieldName: string = "配置",
+  fieldName: string = "Configuration",
 ): string => {
   if (!value.trim()) {
     return "";
@@ -79,15 +79,15 @@ export const validateJsonConfig = (
   try {
     const parsed = JSON.parse(value);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return `${fieldName}必须是 JSON 对象`;
+      return `${fieldName} must be a JSON object`;
     }
     return "";
   } catch {
-    return `${fieldName}JSON格式错误，请检查语法`;
+    return `${fieldName} contains invalid JSON; check the syntax`;
   }
 };
 
-// 将通用配置片段写入/移除 settingsConfig
+// Add or remove the common configuration snippet in settingsConfig.
 export const updateCommonConfigSnippet = (
   jsonString: string,
   snippetString: string,
@@ -99,7 +99,8 @@ export const updateCommonConfigSnippet = (
   } catch (err) {
     return {
       updatedConfig: jsonString,
-      error: "配置 JSON 解析失败，无法应用通用配置",
+      error:
+        "The configuration JSON could not be parsed, so the common configuration cannot be applied",
     };
   }
 
@@ -109,8 +110,11 @@ export const updateCommonConfigSnippet = (
     };
   }
 
-  // 使用统一的验证函数
-  const snippetError = validateJsonConfig(snippetString, "通用配置片段");
+  // Use the shared validation function.
+  const snippetError = validateJsonConfig(
+    snippetString,
+    "Common configuration snippet",
+  );
   if (snippetError) {
     return {
       updatedConfig: JSON.stringify(config, null, 2),
@@ -134,7 +138,7 @@ export const updateCommonConfigSnippet = (
   };
 };
 
-// 检查当前配置是否已包含通用配置片段
+// Check whether the current configuration contains the common snippet.
 export const hasCommonConfigSnippet = (
   jsonString: string,
   snippetString: string,
@@ -150,7 +154,7 @@ export const hasCommonConfigSnippet = (
   }
 };
 
-// 读取配置中的 API Key（支持 Claude, Codex, Gemini）
+// Read an API key from a Claude, Codex, or Gemini configuration.
 export const getApiKeyFromConfig = (
   jsonString: string,
   appType?: string,
@@ -158,7 +162,7 @@ export const getApiKeyFromConfig = (
   try {
     const config = JSON.parse(jsonString);
 
-    // 优先检查顶层 apiKey 字段（用于 Bedrock API Key 等预设）
+    // Prefer a top-level apiKey field used by presets such as Bedrock API Key.
     if (
       typeof config?.apiKey === "string" &&
       config.apiKey &&
@@ -183,7 +187,7 @@ export const getApiKeyFromConfig = (
       return typeof codexKey === "string" ? codexKey : "";
     }
 
-    // Claude API Key (优先 ANTHROPIC_AUTH_TOKEN，其次 ANTHROPIC_API_KEY)
+    // Claude API key: prefer ANTHROPIC_AUTH_TOKEN, then ANTHROPIC_API_KEY.
     const token = env.ANTHROPIC_AUTH_TOKEN;
     const apiKey = env.ANTHROPIC_API_KEY;
     const value =
@@ -198,7 +202,7 @@ export const getApiKeyFromConfig = (
   }
 };
 
-// 模板变量替换
+// Replace template variables.
 export const applyTemplateValues = (
   config: any,
   templateValues: Record<string, TemplateValueConfig> | undefined,
@@ -243,7 +247,7 @@ export const applyTemplateValues = (
   return traverse(config);
 };
 
-// 判断配置中是否存在 API Key 字段
+// Check whether the configuration contains an API-key field.
 export const hasApiKeyField = (
   jsonString: string,
   appType?: string,
@@ -251,7 +255,7 @@ export const hasApiKeyField = (
   try {
     const config = JSON.parse(jsonString);
 
-    // 检查顶层 apiKey 字段（用于 Bedrock API Key 等预设）
+    // Check for a top-level apiKey field used by presets such as Bedrock API Key.
     if (Object.prototype.hasOwnProperty.call(config, "apiKey")) {
       return true;
     }
@@ -275,7 +279,7 @@ export const hasApiKeyField = (
   }
 };
 
-// 写入/更新配置中的 API Key，默认不新增缺失字段
+// Write or update an API key without creating a missing field by default.
 export const setApiKeyInConfig = (
   jsonString: string,
   apiKey: string,
@@ -289,7 +293,7 @@ export const setApiKeyInConfig = (
   try {
     const config = JSON.parse(jsonString);
 
-    // 优先检查顶层 apiKey 字段（用于 Bedrock API Key 等预设）
+    // Prefer a top-level apiKey field used by presets such as Bedrock API Key.
     if (Object.prototype.hasOwnProperty.call(config, "apiKey")) {
       config.apiKey = apiKey;
       return JSON.stringify(config, null, 2);
@@ -325,7 +329,8 @@ export const setApiKeyInConfig = (
       return JSON.stringify(config, null, 2);
     }
 
-    // Claude API Key (优先写入已存在的字段；若两者均不存在且允许创建，则使用 apiKeyField 或默认 AUTH_TOKEN 字段)
+    // Claude API key: update an existing field first. When creation is allowed,
+    // use apiKeyField or default to ANTHROPIC_AUTH_TOKEN.
     if ("ANTHROPIC_AUTH_TOKEN" in env) {
       env.ANTHROPIC_AUTH_TOKEN = apiKey;
     } else if ("ANTHROPIC_API_KEY" in env) {
@@ -708,13 +713,13 @@ const CODEX_CHAT_WIRE_API_VALUES = new Set([
   "openai_chat_completions",
 ]);
 
-// 判断给定的 wire_api 字符串是否表示 Codex 的 Chat Completions 协议
+// Check whether wire_api identifies the Codex Chat Completions protocol.
 export const isCodexChatWireApi = (
   wireApi: string | undefined | null,
 ): boolean =>
   CODEX_CHAT_WIRE_API_VALUES.has((wireApi ?? "").trim().toLowerCase());
 
-// 从 Codex 的 TOML 配置文本中提取 wire_api（支持单/双引号）
+// Extract wire_api from Codex TOML with single- or double-quoted values.
 export const extractCodexWireApi = (
   configText: string | undefined | null,
 ): string | undefined => {
@@ -764,7 +769,7 @@ export const extractCodexWireApi = (
   }
 };
 
-// 在 Codex 的 TOML 配置文本中写入或更新 wire_api 字段
+// Write or update wire_api in Codex TOML.
 export const setCodexWireApi = (
   configText: string,
   wireApi: "responses" | "chat",
@@ -1037,7 +1042,7 @@ export const setCodexRemoteCompaction = (
   return targetSectionRange ? finalizeTomlText(lines) : normalizedText;
 };
 
-// 从 Codex 的 TOML 配置文本中提取 base_url（支持单/双引号）
+// Extract base_url from Codex TOML with single- or double-quoted values.
 export const extractCodexBaseUrl = (
   configText: string | undefined | null,
 ): string | undefined => {
@@ -1087,7 +1092,7 @@ export const extractCodexBaseUrl = (
   }
 };
 
-// 从 Codex 的 TOML 配置文本中提取 experimental_bearer_token（兼容 Mobile 模式）
+// Extract experimental_bearer_token from Codex TOML for Mobile-mode compatibility.
 export const extractCodexExperimentalBearerToken = (
   configText: string | undefined | null,
 ): string | undefined => {
@@ -1154,9 +1159,11 @@ export const extractCodexExperimentalBearerToken = (
   }
 };
 
-// 同步更新 Codex config.toml 中已有的 experimental_bearer_token
-// 仅修改已存在的条目, 不主动新增——避免破坏未使用 Mobile 兼容模式的普通 third-party 配置
-// token 为空时删除该行 (让用户能真正清空 API key, 而不是被 pickCodexApiKey 的 fallback 又填回去)
+// Synchronize an existing experimental_bearer_token in Codex config.toml.
+// Update only an existing entry to avoid changing ordinary third-party
+// configurations that do not use Mobile compatibility mode.
+// Remove the line when the token is empty so users can clear the API key
+// instead of having pickCodexApiKey restore it through a fallback.
 export const updateCodexExperimentalBearerToken = (
   configText: string,
   token: string,
@@ -1215,7 +1222,7 @@ export const updateCodexExperimentalBearerToken = (
   return finalizeTomlText(lines);
 };
 
-// 从 Provider 对象中提取 Codex base_url（当 settingsConfig.config 为 TOML 字符串时）
+// Extract Codex base_url from a Provider whose settingsConfig.config is TOML.
 export const getCodexBaseUrl = (
   provider: { settingsConfig?: Record<string, any> } | undefined | null,
 ): string | undefined => {
@@ -1230,7 +1237,7 @@ export const getCodexBaseUrl = (
   }
 };
 
-// 在 Codex 的 TOML 配置文本中写入或更新 base_url 字段
+// Write or update base_url in Codex TOML.
 export const setCodexBaseUrl = (
   configText: string,
   baseUrl: string,
@@ -1351,7 +1358,7 @@ export const setCodexBaseUrl = (
 
 // ========== Codex model name utils ==========
 
-// 从 Codex 的 TOML 配置文本中提取 model 字段（支持单/双引号）
+// Extract the model field from Codex TOML with single- or double-quoted values.
 export const extractCodexModelName = (
   configText: string | undefined | null,
 ): string | undefined => {
@@ -1372,7 +1379,7 @@ export const extractCodexModelName = (
   }
 };
 
-// 在 Codex 的 TOML 配置文本中写入或更新 model 字段
+// Write or update the model field in Codex TOML.
 export const setCodexModelName = (
   configText: string,
   modelName: string,
@@ -1436,7 +1443,7 @@ const findTopLevelIntMatch = (
   return undefined;
 };
 
-// 从 Codex TOML 配置中提取顶级整数字段
+// Extract a top-level integer field from Codex TOML.
 export const extractCodexTopLevelInt = (
   configText: string | undefined | null,
   fieldName: string,
@@ -1453,7 +1460,7 @@ export const extractCodexTopLevelInt = (
   }
 };
 
-// 在 Codex TOML 配置中设置或更新顶级整数字段
+// Set or update a top-level integer field in Codex TOML.
 export const setCodexTopLevelInt = (
   configText: string,
   fieldName: string,
@@ -1470,7 +1477,7 @@ export const setCodexTopLevelInt = (
     return finalizeTomlText(lines);
   }
 
-  // 插入位置：顶级区域末尾（section header 之前）
+  // Insert at the end of the top-level region, before the first section header.
   if (lines.length === 0) {
     return `${replacementLine}\n`;
   }
@@ -1479,7 +1486,7 @@ export const setCodexTopLevelInt = (
   return finalizeTomlText(lines);
 };
 
-// 从 Codex TOML 配置中移除顶级字段行
+// Remove a top-level field line from Codex TOML.
 export const removeCodexTopLevelField = (
   configText: string,
   fieldName: string,

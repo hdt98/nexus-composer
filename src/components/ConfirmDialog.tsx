@@ -20,7 +20,7 @@ interface ConfirmDialogProps {
   cancelText?: string;
   variant?: "destructive" | "info";
   zIndex?: "base" | "nested" | "alert" | "top";
-  /** 可选勾选项：提供 label 即显示，勾选状态经 onConfirm 参数回传 */
+  /** Optional checkbox shown when a label is provided; onConfirm receives its state. */
   checkboxLabel?: string;
   checkboxDefaultChecked?: boolean;
   isLoading?: boolean;
@@ -99,7 +99,7 @@ export function ConfirmDialog({
             aria-busy={isLoading}
             onClick={() => {
               if (isLoading) return;
-              // 未渲染勾选框时不得回传 defaultChecked 残留值
+              // Do not return a stale defaultChecked value when no checkbox is rendered.
               onConfirm(checkboxLabel ? checkboxChecked : false);
             }}
           >

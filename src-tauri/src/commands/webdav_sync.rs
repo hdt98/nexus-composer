@@ -20,7 +20,7 @@ fn persist_sync_error(settings: &mut WebDavSyncSettings, error: &AppError, sourc
 fn webdav_not_configured_error() -> String {
     AppError::localized(
         "webdav.sync.not_configured",
-        "未配置 WebDAV 同步",
+        "WebDAV sync is not configured",
         "WebDAV sync is not configured.",
     )
     .to_string()
@@ -29,7 +29,7 @@ fn webdav_not_configured_error() -> String {
 fn webdav_sync_disabled_error() -> String {
     AppError::localized(
         "webdav.sync.disabled",
-        "WebDAV 同步未启用",
+        "WebDAV sync is disabled.",
         "WebDAV sync is disabled.",
     )
     .to_string()
@@ -325,10 +325,7 @@ mod tests {
         .expect("seed disabled webdav settings");
 
         let err = require_enabled_webdav_settings().expect_err("disabled settings should fail");
-        assert!(
-            err.contains("disabled") || err.contains("未启用"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("disabled"), "unexpected error: {err}");
     }
 
     #[test]

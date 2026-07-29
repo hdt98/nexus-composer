@@ -1,87 +1,92 @@
-//! 错误类型到 HTTP 状态码的映射
+//! Mapping from proxy errors to HTTP status codes.
 //!
-//! 将 ProxyError 映射到合适的 HTTP 状态码，用于日志记录和手动构建错误响应
+//! Maps `ProxyError` to appropriate HTTP status codes for logging and manual
+//! error responses.
 
 use super::ProxyError;
 
-/// 将 ProxyError 映射到 HTTP 状态码
+/// Map `ProxyError` to an HTTP status code.
 ///
-/// 映射规则：
-/// - 上游错误：直接使用上游返回的状态码
-/// - 超时：504 Gateway Timeout
-/// - 连接失败：502 Bad Gateway
-/// - 无可用 Provider：503 Service Unavailable
-/// - 重试耗尽：503 Service Unavailable
-/// - 认证错误：401 Unauthorized
-/// - 配置/请求错误：400 Bad Request
-/// - 转换错误：422 Unprocessable Entity
-/// - 其他错误：500 Internal Server Error
+/// Mapping rules:
+/// - Upstream errors: use the upstream status code directly
+/// - Timeouts: `504 Gateway Timeout`
+/// - Connection failures: `502 Bad Gateway`
+/// - No provider available: `503 Service Unavailable`
+/// - Retries exhausted: `503 Service Unavailable`
+/// - Authentication errors: `401 Unauthorized`
+/// - Configuration/request errors: `400 Bad Request`
+/// - Transformation errors: `422 Unprocessable Entity`
+/// - Other errors: `500 Internal Server Error`
 pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
     match error {
-        // 服务状态错误：与 IntoResponse 保持一致
+        // Server state errors: keep these aligned with `IntoResponse`.
         ProxyError::AlreadyRunning => 409,
         ProxyError::NotRunning => 503,
 
-        // 上游错误：使用实际状态码
+        // Upstream errors: use the actual upstream status code.
         ProxyError::UpstreamError { status, .. } => *status,
 
-        // 超时错误：504 Gateway Timeout
+        // Timeout errors: `504 Gateway Timeout`.
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => 504,
 
-        // 转发失败/连接失败：502 Bad Gateway
+        // Forwarding and connection failures: `502 Bad Gateway`.
         ProxyError::ForwardFailed(_) => 502,
 
-        // 无可用 Provider：503 Service Unavailable
+        // No provider available: `503 Service Unavailable`.
         ProxyError::NoAvailableProvider => 503,
 
-        // 所有供应商已熔断：503 Service Unavailable
+        // All provider circuits are open: `503 Service Unavailable`.
         ProxyError::AllProvidersCircuitOpen => 503,
 
-        // 未配置供应商：503 Service Unavailable
+        // No providers configured: `503 Service Unavailable`.
         ProxyError::NoProvidersConfigured => 503,
 
-        // 重试耗尽：503 Service Unavailable
+        // Retries exhausted: `503 Service Unavailable`.
         ProxyError::MaxRetriesExceeded => 503,
 
-        // Provider 不健康：503 Service Unavailable
+        // Provider unhealthy: `503 Service Unavailable`.
         ProxyError::ProviderUnhealthy(_) => 503,
 
-        // 配置错误/无效请求：400 Bad Request
+        // Configuration errors and invalid requests: `400 Bad Request`.
         ProxyError::ConfigError(_) | ProxyError::InvalidRequest(_) => 400,
 
-        // 认证错误：401 Unauthorized
+        // Authentication errors: `401 Unauthorized`.
         ProxyError::AuthError(_) => 401,
 
-        // 数据库错误：500 Internal Server Error
+        // Database errors: `500 Internal Server Error`.
         ProxyError::DatabaseError(_) => 500,
 
-        // 转换错误：422 Unprocessable Entity
+        // Transformation errors: `422 Unprocessable Entity`.
         ProxyError::TransformError(_) => 422,
 
-        // 其他未知错误：500 Internal Server Error
+        // Other unknown errors: `500 Internal Server Error`.
         _ => 500,
     }
 }
 
-/// 将 ProxyError 转换为用户友好的错误消息
+/// Convert `ProxyError` to a user-friendly error message.
 pub fn get_error_message(error: &ProxyError) -> String {
     match error {
         ProxyError::UpstreamError { status, body } => {
             if let Some(body) = body {
-                format!("上游错误 ({status}): {body}")
+                format!("Upstream error ({status}): {body}")
             } else {
-                format!("上游错误 ({status})")
+                format!("Upstream error ({status})")
             }
         }
-        ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
-        ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),
-        ProxyError::NoAvailableProvider => "无可用 Provider".to_string(),
-        ProxyError::AllProvidersCircuitOpen => "所有供应商已熔断，无可用渠道".to_string(),
-        ProxyError::NoProvidersConfigured => "未配置供应商".to_string(),
-        ProxyError::MaxRetriesExceeded => "所有 Provider 都失败，重试耗尽".to_string(),
-        ProxyError::ProviderUnhealthy(msg) => format!("Provider 不健康: {msg}"),
-        ProxyError::DatabaseError(msg) => format!("数据库错误: {msg}"),
-        ProxyError::TransformError(msg) => format!("请求/响应转换错误: {msg}"),
+        ProxyError::Timeout(msg) => format!("Request timed out: {msg}"),
+        ProxyError::ForwardFailed(msg) => format!("Forwarding failed: {msg}"),
+        ProxyError::NoAvailableProvider => "No provider available".to_string(),
+        ProxyError::AllProvidersCircuitOpen => {
+            "All providers are circuit-open; no route available".to_string()
+        }
+        ProxyError::NoProvidersConfigured => "No providers configured".to_string(),
+        ProxyError::MaxRetriesExceeded => {
+            "All providers failed and retries were exhausted".to_string()
+        }
+        ProxyError::ProviderUnhealthy(msg) => format!("Provider is unhealthy: {msg}"),
+        ProxyError::DatabaseError(msg) => format!("Database error: {msg}"),
+        ProxyError::TransformError(msg) => format!("Request/response transformation error: {msg}"),
         _ => error.to_string(),
     }
 }
@@ -148,7 +153,7 @@ mod tests {
             body: Some("Internal Server Error".to_string()),
         };
         let msg = get_error_message(&error);
-        assert!(msg.contains("上游错误"));
+        assert!(msg.contains("Upstream error"));
         assert!(msg.contains("500"));
         assert!(msg.contains("Internal Server Error"));
     }

@@ -1,6 +1,6 @@
-// NOTE: Codex 1M 上下文 UI 已暂时隐藏（详见下方 CodexConfigSection 内 JSX 注释）。
-// 如需恢复，请同时：
-//   - 取消下面 `@/utils/providerConfigUtils` import 的注释
+// NOTE: The Codex 1M context UI is temporarily hidden; see the JSX comment in
+// CodexConfigSection below. To restore it, also uncomment the
+// `@/utils/providerConfigUtils` import below.
 import React, {
   useCallback,
   useEffect,
@@ -196,7 +196,8 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
     [handleLocalChange, providerName],
   );
 
-  // Codex 1M 上下文相关状态/回调暂时禁用——见同文件下方 JSX 注释处的恢复说明。
+  // Codex 1M context state and callbacks are temporarily disabled. See the JSX
+  // restoration instructions below.
   /*
   // Parse toggle states from TOML text
   const toggleStates = useMemo(() => {
@@ -331,8 +332,12 @@ export const CodexConfigSection: React.FC<CodexConfigSectionProps> = ({
         </p>
       )}
 
-      {/* Codex 1M 上下文 UI 已隐藏：模型不再支持该字段。
-          恢复方法：(1) 取消本段 JSX 注释；(2) 取消文件顶部 import 中 useMemo / extractCodexTopLevelInt / setCodexTopLevelInt / removeCodexTopLevelField 的注释；(3) 取消下方 toggleStates / compactTimerRef / handleContextWindowToggle / handleCompactLimitChange / cleanup useEffect 的注释。
+      {/* The Codex 1M context UI is hidden because models no longer support the
+          field. To restore it: (1) uncomment this JSX block; (2) uncomment
+          useMemo, extractCodexTopLevelInt, setCodexTopLevelInt, and
+          removeCodexTopLevelField in the imports above; and (3) uncomment
+          toggleStates, compactTimerRef, handleContextWindowToggle,
+          handleCompactLimitChange, and the cleanup effect below.
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
         <label className="inline-flex items-center gap-2 text-sm text-muted-foreground cursor-pointer">
           <input

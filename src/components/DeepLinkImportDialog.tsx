@@ -30,7 +30,7 @@ export function DeepLinkImportDialog() {
   const [isImporting, setIsImporting] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
 
-  // 容错判断：MCP 导入结果可能缺少 type 字段
+  // Tolerate MCP import results that omit the type field.
   const isMcpImportResult = (
     value: unknown,
   ): value is {
@@ -103,7 +103,7 @@ export function DeepLinkImportDialog() {
         importedIds: string[];
         failed: Array<{ id: string; error: string }>;
       }) => {
-        // 强制刷新 MCP 相关缓存，确保管理页重新从数据库加载
+        // Refresh MCP caches so the management page reloads from the database.
         await queryClient.invalidateQueries({
           queryKey: ["mcp", "all"],
           refetchType: "all",
@@ -175,7 +175,7 @@ export function DeepLinkImportDialog() {
           });
         }
       } else if (isMcpImportResult(result)) {
-        // 兜底处理：旧版本后端可能未返回 type 字段
+        // Older backend versions may omit the type field.
         await refreshMcp(result);
       } else {
         // Legacy return type (string ID) - assume provider
@@ -248,14 +248,14 @@ export function DeepLinkImportDialog() {
       const parsed = JSON.parse(decoded) as Record<string, unknown>;
 
       if (request.app === "claude") {
-        // Claude 格式: { env: { ANTHROPIC_AUTH_TOKEN: ..., ... } }
+        // Claude format: { env: { ANTHROPIC_AUTH_TOKEN: ..., ... } }
         return {
           type: "claude",
           env: (parsed.env as Record<string, string>) || {},
           raw: parsed,
         };
       } else if (request.app === "codex") {
-        // Codex 格式: { auth: { OPENAI_API_KEY: ... }, config: "TOML string" }
+        // Codex format: { auth: { OPENAI_API_KEY: ... }, config: "TOML string" }
         return {
           type: "codex",
           auth: (parsed.auth as Record<string, string>) || {},
@@ -263,7 +263,7 @@ export function DeepLinkImportDialog() {
           raw: parsed,
         };
       } else if (request.app === "gemini") {
-        // Gemini 格式: 扁平结构 { GEMINI_API_KEY: ..., GEMINI_BASE_URL: ... }
+        // Gemini format: flat { GEMINI_API_KEY: ..., GEMINI_BASE_URL: ... }
         return {
           type: "gemini",
           env: parsed as Record<string, string>,
@@ -322,13 +322,13 @@ export function DeepLinkImportDialog() {
       <DialogContent className="sm:max-w-[500px]" zIndex="top">
         {request && (
           <>
-            {/* 标题显式左对齐，避免默认居中样式影响 */}
+            {/* Explicitly left-align the title instead of using centered defaults */}
             <DialogHeader className="text-left sm:text-left">
               <DialogTitle>{getTitle()}</DialogTitle>
               <DialogDescription>{getDescription()}</DialogDescription>
             </DialogHeader>
 
-            {/* 主体内容整体右移，略大于标题内边距，让内容看起来不贴边 */}
+            {/* Indent body content slightly beyond the title padding */}
             <div className="space-y-4 px-8 py-4 max-h-[60vh] overflow-y-auto [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar]:block [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-gray-200 dark:[&::-webkit-scrollbar-thumb]:bg-gray-700">
               {request.resource === "prompt" && (
                 <PromptConfirmation request={request} />
@@ -420,10 +420,10 @@ export function DeepLinkImportDialog() {
                     </div>
                   </div>
 
-                  {/* Model Fields - 根据应用类型显示不同的模型字段 */}
+                  {/* Model fields vary by application type */}
                   {request.app === "claude" ? (
                     <>
-                      {/* Claude 四种模型字段 */}
+                      {/* Four Claude model fields */}
                       {request.haikuModel && (
                         <div className="grid grid-cols-3 items-center gap-4">
                           <div className="font-medium text-sm text-muted-foreground">
@@ -467,7 +467,7 @@ export function DeepLinkImportDialog() {
                     </>
                   ) : (
                     <>
-                      {/* Codex 和 Gemini 使用通用 model 字段 */}
+                      {/* Codex and Gemini use the generic model field */}
                       {request.model && (
                         <div className="grid grid-cols-3 items-center gap-4">
                           <div className="font-medium text-sm text-muted-foreground">
@@ -628,7 +628,7 @@ export function DeepLinkImportDialog() {
                       <div className="grid grid-cols-3 items-center gap-4">
                         <div className="font-medium text-sm text-muted-foreground">
                           {t("deeplink.usageScript", {
-                            defaultValue: "用量查询",
+                            defaultValue: "Usage Query",
                           })}
                         </div>
                         <div className="col-span-2 text-sm">
@@ -641,10 +641,10 @@ export function DeepLinkImportDialog() {
                           >
                             {request.usageEnabled !== false
                               ? t("deeplink.usageScriptEnabled", {
-                                  defaultValue: "已启用",
+                                  defaultValue: "Enabled",
                                 })
                               : t("deeplink.usageScriptDisabled", {
-                                  defaultValue: "未启用",
+                                  defaultValue: "Disabled",
                                 })}
                           </span>
                         </div>
@@ -656,7 +656,7 @@ export function DeepLinkImportDialog() {
                           <div className="grid grid-cols-3 items-center gap-4">
                             <div className="font-medium text-sm text-muted-foreground">
                               {t("deeplink.usageApiKey", {
-                                defaultValue: "用量 API Key",
+                                defaultValue: "Usage API Key",
                               })}
                             </div>
                             <div className="col-span-2 text-sm font-mono text-muted-foreground">
@@ -673,7 +673,7 @@ export function DeepLinkImportDialog() {
                           <div className="grid grid-cols-3 items-center gap-4">
                             <div className="font-medium text-sm text-muted-foreground">
                               {t("deeplink.usageBaseUrl", {
-                                defaultValue: "用量查询地址",
+                                defaultValue: "Usage Query URL",
                               })}
                             </div>
                             <div className="col-span-2 text-sm break-all">
@@ -688,12 +688,12 @@ export function DeepLinkImportDialog() {
                           <div className="grid grid-cols-3 items-center gap-4">
                             <div className="font-medium text-sm text-muted-foreground">
                               {t("deeplink.usageAutoInterval", {
-                                defaultValue: "自动查询",
+                                defaultValue: "Auto Query",
                               })}
                             </div>
                             <div className="col-span-2 text-sm">
                               {t("deeplink.usageAutoIntervalValue", {
-                                defaultValue: "每 {{minutes}} 分钟",
+                                defaultValue: "Every {{minutes}} minutes",
                                 minutes: request.usageAutoInterval,
                               })}
                             </div>
