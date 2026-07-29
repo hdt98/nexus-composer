@@ -297,9 +297,7 @@ pub(crate) fn responses_to_chat_completions_with_reasoning_history(
             preserve_exact_history,
         )?;
     }
-    if preserve_exact_history {
-        append_agent_loop_continuation_hint(&mut messages, &tool_context);
-    }
+    append_agent_loop_continuation_hint(&mut messages, &tool_context);
     let messages = collapse_system_messages_to_head(messages);
     result["messages"] = json!(messages);
 
@@ -543,8 +541,8 @@ fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
 /// A text-only assistant reply ends the Codex turn with nothing executed. When the
 /// transcript already contains tool results and the model's last message was such a
 /// reply, append a temporary system hint so the next turn continues with a tool call
-/// instead of idling. Only the Nexus-owned exact-history path triggers this; the
-/// hint is recomputed per request and never persists into recorded history.
+/// instead of idling. This runs on both history modes because the cutoff happens on
+/// either; the hint is recomputed per request and never persists into recorded history.
 fn append_agent_loop_continuation_hint(messages: &mut Vec<Value>, tool_context: &CodexToolContext) {
     if tool_context.chat_tools().is_empty() {
         return;
@@ -1941,12 +1939,14 @@ mod tests {
         );
 
         let baseline = responses_to_chat_completions(input()).unwrap();
-        assert!(
-            !baseline["messages"][0]["content"]
+        assert_eq!(
+            baseline["messages"][0]["content"]
                 .as_str()
                 .unwrap()
-                .contains(hint),
-            "non-history-preserving path must not gain the hint"
+                .matches(hint)
+                .count(),
+            1,
+            "non-history-preserving path must also gain the hint"
         );
     }
 
@@ -1992,14 +1992,23 @@ mod tests {
         let hint = "so it executed nothing and ended the turn";
 
         for input in cases {
-            let preserved =
-                responses_to_chat_completions_with_reasoning_history(input, None, true).unwrap();
-            let leaked = preserved["messages"].as_array().unwrap().iter().any(|msg| {
-                msg.get("content")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|content| content.contains(hint))
-            });
-            assert!(!leaked, "hint must not appear: {preserved}");
+            for preserve in [true, false] {
+                let result = responses_to_chat_completions_with_reasoning_history(
+                    input.clone(),
+                    None,
+                    preserve,
+                )
+                .unwrap();
+                let leaked = result["messages"].as_array().unwrap().iter().any(|msg| {
+                    msg.get("content")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|content| content.contains(hint))
+                });
+                assert!(
+                    !leaked,
+                    "hint must not appear (preserve={preserve}): {result}"
+                );
+            }
         }
     }
 
