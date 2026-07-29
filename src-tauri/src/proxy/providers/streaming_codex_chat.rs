@@ -6,9 +6,9 @@ use super::{
     },
     transform_codex_chat::{
         chat_usage_to_responses_usage, custom_tool_input_from_chat_arguments,
-        merge_responses_usage, response_id_from_chat_id, response_message_item_id,
-        response_status_from_finish_reason, response_tool_call_item_from_chat_name,
-        response_tool_call_item_id_from_chat_name, CodexToolContext,
+        response_id_from_chat_id, response_message_item_id, response_status_from_finish_reason,
+        response_tool_call_item_from_chat_name, response_tool_call_item_id_from_chat_name,
+        CodexToolContext,
     },
 };
 use crate::proxy::json_canonical::canonicalize_tool_arguments_str;
@@ -16,249 +16,9 @@ use crate::proxy::sse::{strip_sse_field, take_sse_block};
 use bytes::Bytes;
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, future::Future, pin::Pin};
+use std::{collections::BTreeMap, pin::Pin};
 
 pub(crate) type BoxChatStream = Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>;
-pub(crate) type ChatContinuationFuture =
-    Pin<Box<dyn Future<Output = Result<BoxChatStream, String>> + Send>>;
-pub(crate) type ChatContinuation = Box<dyn FnMut(String) -> ChatContinuationFuture + Send>;
-pub(crate) const MAX_PROGRESS_CONTINUATIONS: usize = 2;
-const CONTINUATION_BOUNDARY_FIELD: &str = "_nexus_chat_continuation_boundary";
-
-#[derive(Debug, Default)]
-struct ChatTurnOutcome {
-    text: String,
-    finish_reason: Option<String>,
-    saw_tool_call: bool,
-}
-
-impl ChatTurnOutcome {
-    fn observe(&mut self, value: &Value) {
-        let Some(choice) = value
-            .get("choices")
-            .and_then(Value::as_array)
-            .and_then(|choices| choices.first())
-        else {
-            return;
-        };
-        if let Some(payload) = choice.get("delta").or_else(|| choice.get("message")) {
-            if let Some(content) = payload.get("content").and_then(Value::as_str) {
-                self.text.push_str(content);
-            }
-            self.saw_tool_call |= payload
-                .get("tool_calls")
-                .and_then(Value::as_array)
-                .is_some_and(|calls| !calls.is_empty())
-                || payload.get("function_call").is_some();
-        }
-        if let Some(reason) = choice
-            .get("finish_reason")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|reason| !reason.is_empty())
-        {
-            self.finish_reason = Some(reason.to_string());
-        }
-    }
-
-    fn should_continue(&self, tools_available: bool) -> bool {
-        tools_available
-            && !self.saw_tool_call
-            && self.finish_reason.as_deref() == Some("stop")
-            && is_clearly_unfinished_progress(&self.text)
-    }
-}
-
-pub(crate) fn is_clearly_unfinished_progress(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.ends_with('?') {
-        return false;
-    }
-    let lower = trimmed.to_ascii_lowercase();
-    if [
-        "need your approval",
-        "need your input",
-        "need user input",
-        "requires your approval",
-        "requires your input",
-        "waiting for your approval",
-        "waiting for your input",
-        "please confirm",
-        "please provide",
-        "waiting for you",
-        "hand this back",
-        "handing this back",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
-    {
-        return false;
-    }
-
-    let tail = lower
-        .rsplit(['\n', '.', '!', ':', ';'])
-        .map(str::trim)
-        .find(|part| !part.is_empty())
-        .unwrap_or(lower.as_str());
-    if ["which ", "what should", "you can now"]
-        .iter()
-        .any(|marker| tail.starts_with(marker))
-    {
-        return false;
-    }
-    let future_action = [
-        "let me ",
-        "i'll now ",
-        "i’ll now ",
-        "i will now ",
-        "i’m now ",
-        "i'm now ",
-        "i am now ",
-    ]
-    .iter()
-    .any(|marker| tail.starts_with(marker));
-    let ongoing_action = [
-        "checking ",
-        "continuing ",
-        "creating ",
-        "fetching ",
-        "inspecting ",
-        "launching ",
-        "monitoring ",
-        "opening ",
-        "reading ",
-        "running ",
-        "starting ",
-        "testing ",
-        "verifying ",
-        "waiting ",
-    ]
-    .iter()
-    .any(|prefix| tail.starts_with(prefix));
-
-    future_action || ongoing_action
-}
-
-pub(crate) fn recover_progress_only_chat_stream(
-    initial: BoxChatStream,
-    tools_available: bool,
-    continuation: Option<ChatContinuation>,
-) -> BoxChatStream {
-    Box::pin(async_stream::stream! {
-        let mut current = initial;
-        let mut continuation = continuation;
-        let mut outcome = ChatTurnOutcome::default();
-        let mut buffer = String::new();
-        let mut utf8_remainder = Vec::new();
-        let mut continuation_count = 0usize;
-
-        'turns: loop {
-            let mut done_block = None;
-            'current_stream: while let Some(chunk) = current.next().await {
-                let bytes = match chunk {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        yield Err(error);
-                        break 'turns;
-                    }
-                };
-                crate::proxy::sse::append_utf8_safe(
-                    &mut buffer,
-                    &mut utf8_remainder,
-                    &bytes,
-                );
-
-                while let Some(block) = take_sse_block(&mut buffer) {
-                    let data = block
-                        .lines()
-                        .filter_map(|line| strip_sse_field(line, "data"))
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    if data.trim() == "[DONE]" {
-                        done_block = Some(Bytes::from(format!("{block}\n\n")));
-                        break 'current_stream;
-                    }
-
-                    if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                        outcome.observe(&value);
-                    }
-                    yield Ok(Bytes::from(format!("{block}\n\n")));
-                }
-            }
-
-            if done_block.is_none() && !buffer.is_empty() {
-                let data = buffer
-                    .lines()
-                    .filter_map(|line| strip_sse_field(line, "data"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if let Ok(value) = serde_json::from_str::<Value>(&data) {
-                    outcome.observe(&value);
-                    let residual = std::mem::take(&mut buffer);
-                    yield Ok(Bytes::from(format!("{residual}\n\n")));
-                }
-            }
-
-            if outcome.should_continue(tools_available) {
-                let Some(resume) = continuation.as_mut() else {
-                    if let Some(done_block) = done_block {
-                        yield Ok(done_block);
-                    }
-                    if !buffer.is_empty() {
-                        yield Ok(Bytes::from(std::mem::take(&mut buffer)));
-                    }
-                    break;
-                };
-                if continuation_count >= MAX_PROGRESS_CONTINUATIONS {
-                    let error = json!({
-                        "error": {
-                            "message": "Chat upstream repeatedly stopped after unfinished progress updates",
-                            "type": "agent_loop_continuation_exhausted"
-                        }
-                    });
-                    yield Ok(sse_event("error", error));
-                    break;
-                }
-                continuation_count += 1;
-                log::warn!(
-                    "[Codex] Chat upstream stopped after an unfinished progress update; \
-                     continuing without changing the original request instructions"
-                );
-                match resume(outcome.text.trim().to_string()).await {
-                    Ok(next) => {
-                        yield Ok(sse_event(
-                            "nexus.chat_continuation_boundary",
-                            json!({CONTINUATION_BOUNDARY_FIELD: true}),
-                        ));
-                        current = next;
-                        outcome = ChatTurnOutcome::default();
-                        buffer.clear();
-                        utf8_remainder.clear();
-                        continue;
-                    }
-                    Err(message) => {
-                        let error = json!({
-                            "error": {
-                                "message": message,
-                                "type": "agent_loop_continuation_error"
-                            }
-                        });
-                        yield Ok(sse_event("error", error));
-                        break;
-                    }
-                }
-            }
-
-            if let Some(done_block) = done_block {
-                yield Ok(done_block);
-            }
-            if !buffer.is_empty() {
-                yield Ok(Bytes::from(std::mem::take(&mut buffer)));
-            }
-            break;
-        }
-    })
-}
 
 #[derive(Debug, Default)]
 struct TextItemState {
@@ -313,7 +73,6 @@ struct ChatToResponsesState {
     inline_think: InlineThinkState,
     tools: BTreeMap<usize, ToolCallState>,
     output_items: Vec<(u32, Value)>,
-    completed_turn_usage: Option<Value>,
     current_turn_usage: Option<Value>,
     finish_reason: Option<String>,
     tool_context: CodexToolContext,
@@ -333,7 +92,6 @@ impl Default for ChatToResponsesState {
             inline_think: InlineThinkState::default(),
             tools: BTreeMap::new(),
             output_items: Vec::new(),
-            completed_turn_usage: None,
             current_turn_usage: None,
             finish_reason: None,
             tool_context: CodexToolContext::default(),
@@ -350,14 +108,6 @@ impl ChatToResponsesState {
     }
 
     fn handle_chat_chunk(&mut self, chunk: &Value, normalized: bool) -> Vec<Bytes> {
-        if chunk
-            .get(CONTINUATION_BOUNDARY_FIELD)
-            .and_then(Value::as_bool)
-            == Some(true)
-        {
-            return self.finish_continuation_turn();
-        }
-
         let mut events = Vec::new();
 
         if !self.response_started {
@@ -986,7 +736,7 @@ impl ChatToResponsesState {
             "status": status,
             "model": self.model,
             "output": output,
-            "usage": self.combined_usage().unwrap_or_else(|| {
+            "usage": self.current_turn_usage.clone().unwrap_or_else(|| {
                 json!({
                     "input_tokens": 0,
                     "output_tokens": 0,
@@ -995,32 +745,6 @@ impl ChatToResponsesState {
                 })
             })
         })
-    }
-
-    fn finish_usage_turn(&mut self) {
-        if let Some(usage) = self.current_turn_usage.take() {
-            accumulate_responses_usage(&mut self.completed_turn_usage, &usage);
-        }
-    }
-
-    fn finish_continuation_turn(&mut self) -> Vec<Bytes> {
-        let mut events = self.flush_inline_think_at_boundary();
-        events.extend(self.finalize_reasoning());
-        events.extend(self.finalize_text());
-        self.finish_usage_turn();
-        self.text = TextItemState::default();
-        self.reasoning = ReasoningItemState::default();
-        self.inline_think = InlineThinkState::default();
-        self.finish_reason = None;
-        events
-    }
-
-    fn combined_usage(&self) -> Option<Value> {
-        let mut total = self.completed_turn_usage.clone();
-        if let Some(usage) = &self.current_turn_usage {
-            accumulate_responses_usage(&mut total, usage);
-        }
-        total
     }
 
     fn next_output_index(&mut self) -> u32 {
@@ -1047,14 +771,6 @@ impl ChatToResponsesState {
             }),
         )
     }
-}
-
-fn accumulate_responses_usage(total: &mut Option<Value>, usage: &Value) {
-    let Some(total) = total.as_mut() else {
-        *total = Some(usage.clone());
-        return;
-    };
-    merge_responses_usage(total, usage);
 }
 
 fn chat_delta_reasoning_text(delta: &Value) -> Option<String> {
@@ -1643,74 +1359,6 @@ mod tests {
         assert!(!output.contains("event: response.completed"));
     }
 
-    #[test]
-    fn only_clear_progress_updates_are_recoverable() {
-        for text in [
-            "Checking the managed Nexus preset migration logic now.",
-            "Creating the goal now.",
-            "I'll now run the focused regression test.",
-            "I’ll now run the focused regression test.",
-            "Let me inspect the current provider configuration.",
-            "Preflight passed. Launching the orchestrator now.",
-            "Monitoring the build.",
-            "All tests passed. I'll now package the bundle.",
-            "I preserved your input. Checking the provider now.",
-        ] {
-            assert!(
-                is_clearly_unfinished_progress(text),
-                "expected recoverable progress: {text}"
-            );
-        }
-
-        for text in [
-            "The task is complete and all tests pass.",
-            "The setting is stored in config.toml.",
-            "Which provider should I use?",
-            "I need your approval before deleting the old bundle.",
-            "I am waiting for your input before continuing.",
-            "You can now restart Codex and retest.",
-            "I'll now run the tests. All tests passed.",
-        ] {
-            assert!(
-                !is_clearly_unfinished_progress(text),
-                "must remain terminal: {text}"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn progress_only_stop_continues_without_suppressing_commentary() {
-        let first = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl_first\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"Checking the provider now.\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":1,\"total_tokens\":9}}\n\ndata: {\"id\":\"chatcmpl_first\",\"model\":\"kimi-k3\",\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"total_tokens\":12}}\n\ndata: [DONE]\n\n",
-        ))]);
-        let continuation: ChatContinuation = Box::new(|progress| {
-            assert_eq!(progress, "Checking the provider now.");
-            Box::pin(async {
-                Ok(Box::pin(stream::iter([Ok::<_, std::io::Error>(
-                    Bytes::from_static(
-                        b"data: {\"id\":\"chatcmpl_second\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":2,\"total_tokens\":13}}\n\ndata: {\"id\":\"chatcmpl_second\",\"model\":\"kimi-k3\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15}}\n\ndata: [DONE]\n\n",
-                    ),
-                )])) as BoxChatStream)
-            })
-        });
-        let recovered =
-            recover_progress_only_chat_stream(Box::pin(first), true, Some(continuation));
-        let converted = create_responses_sse_stream_from_chat_with_context(
-            recovered,
-            CodexToolContext::default(),
-        );
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("Checking the provider now."));
-        assert!(output.contains("\"name\":\"exec\""));
-        assert!(output.contains("\"input_tokens\":22"));
-        assert!(output.contains("\"output_tokens\":5"));
-        assert!(output.contains("\"total_tokens\":27"));
-        assert_eq!(output.matches("event: response.completed").count(), 1);
-        assert_eq!(output.matches("event: response.created").count(), 1);
-    }
-
     #[tokio::test]
     async fn repeated_usage_snapshots_within_one_turn_use_the_latest_snapshot() {
         let input = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
@@ -1724,129 +1372,5 @@ mod tests {
         assert!(output.contains("\"output_tokens\":2"));
         assert!(output.contains("\"total_tokens\":7"));
         assert!(!output.contains("\"input_tokens\":9"));
-    }
-
-    #[tokio::test]
-    async fn multiple_progress_continuations_remain_distinct_commentary_items() {
-        let first = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl_first\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"Checking the provider.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        ))]);
-        let mut continuation_index = 0usize;
-        let continuation: ChatContinuation = Box::new(move |_| {
-            continuation_index += 1;
-            let chunk = if continuation_index == 1 {
-                Bytes::from_static(
-                    b"data: {\"id\":\"chatcmpl_second\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"Verifying the route.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-                )
-            } else {
-                Bytes::from_static(
-                    b"data: {\"id\":\"chatcmpl_third\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
-                )
-            };
-            Box::pin(async move {
-                Ok(Box::pin(stream::iter([Ok::<_, std::io::Error>(chunk)])) as BoxChatStream)
-            })
-        });
-        let recovered =
-            recover_progress_only_chat_stream(Box::pin(first), true, Some(continuation));
-        let converted = create_responses_sse_stream_from_chat(recovered);
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("Checking the provider."));
-        assert!(output.contains("Verifying the route."));
-        assert!(output.contains("\"name\":\"exec\""));
-        assert_eq!(
-            output.matches("event: response.output_text.done").count(),
-            2
-        );
-        assert_eq!(output.matches("event: response.completed").count(), 1);
-    }
-
-    #[tokio::test]
-    async fn progress_only_stop_without_done_sentinel_still_continues() {
-        let first = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl_first\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"Let me inspect the provider.\"},\"finish_reason\":\"stop\"}]}",
-        ))]);
-        let continuation: ChatContinuation = Box::new(|_| {
-            Box::pin(async {
-                Ok(Box::pin(stream::iter([Ok::<_, std::io::Error>(
-                    Bytes::from_static(
-                        b"data: {\"id\":\"chatcmpl_second\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n",
-                    ),
-                )])) as BoxChatStream)
-            })
-        });
-        let recovered =
-            recover_progress_only_chat_stream(Box::pin(first), true, Some(continuation));
-        let converted = create_responses_sse_stream_from_chat(recovered);
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("Let me inspect the provider."));
-        assert!(output.contains("\"name\":\"exec\""));
-        assert_eq!(output.matches("event: response.completed").count(), 1);
-    }
-
-    #[tokio::test]
-    async fn terminal_text_stop_does_not_continue() {
-        let first = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl_done\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"The task is complete and all tests pass.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        ))]);
-        let continuation: ChatContinuation = Box::new(|_| {
-            panic!("terminal text must not trigger continuation");
-        });
-        let recovered =
-            recover_progress_only_chat_stream(Box::pin(first), true, Some(continuation));
-        let converted = create_responses_sse_stream_from_chat(recovered);
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("The task is complete and all tests pass."));
-        assert_eq!(output.matches("event: response.completed").count(), 1);
-    }
-
-    #[tokio::test]
-    async fn progress_only_stop_without_tools_remains_terminal() {
-        let first = stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl_done\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"Checking the provider now.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        ))]);
-        let continuation: ChatContinuation = Box::new(|_| {
-            panic!("requests without tools must not trigger continuation");
-        });
-        let recovered =
-            recover_progress_only_chat_stream(Box::pin(first), false, Some(continuation));
-        let converted = create_responses_sse_stream_from_chat(recovered);
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("Checking the provider now."));
-        assert_eq!(output.matches("event: response.completed").count(), 1);
-    }
-
-    #[tokio::test]
-    async fn repeated_progress_stops_fail_instead_of_claiming_completion() {
-        let progress_chunk = Bytes::from_static(
-            b"data: {\"id\":\"chatcmpl_progress\",\"model\":\"kimi-k3\",\"choices\":[{\"delta\":{\"content\":\"Checking the next step.\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
-        );
-        let first = stream::iter([Ok::<_, std::io::Error>(progress_chunk.clone())]);
-        let continuation: ChatContinuation = Box::new(move |_| {
-            let progress_chunk = progress_chunk.clone();
-            Box::pin(async move {
-                Ok(
-                    Box::pin(stream::iter([Ok::<_, std::io::Error>(progress_chunk)]))
-                        as BoxChatStream,
-                )
-            })
-        });
-        let recovered =
-            recover_progress_only_chat_stream(Box::pin(first), true, Some(continuation));
-        let converted = create_responses_sse_stream_from_chat(recovered);
-        let bytes: Vec<Bytes> = converted.map(|item| item.unwrap()).collect().await;
-        let output = String::from_utf8(bytes.concat()).unwrap();
-
-        assert!(output.contains("event: response.failed"));
-        assert!(output.contains("agent_loop_continuation_exhausted"));
-        assert!(!output.contains("event: response.completed"));
     }
 }

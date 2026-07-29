@@ -11,7 +11,7 @@
 use super::{
     content_encoding::{decompress_body, get_content_encoding, is_supported_content_encoding},
     error_mapper::{get_error_message, map_proxy_error_to_status},
-    forwarder::{is_claude_count_tokens_path, ActiveConnectionGuard, RequestForwarder},
+    forwarder::{is_claude_count_tokens_path, ActiveConnectionGuard},
     handler_config::{
         claude_stream_usage_event_filter, codex_stream_usage_event_filter, UsageParserConfig,
         CLAUDE_PARSER_CONFIG, CODEX_PARSER_CONFIG, GEMINI_PARSER_CONFIG, OPENAI_PARSER_CONFIG,
@@ -26,11 +26,7 @@ use super::{
         codex_chat_history::record_responses_sse_stream,
         get_adapter, get_claude_api_format,
         streaming::{create_anthropic_sse_stream, create_anthropic_sse_stream_with_mode},
-        streaming_codex_chat::{
-            create_responses_sse_stream_from_chat_with_mode, is_clearly_unfinished_progress,
-            recover_progress_only_chat_stream, BoxChatStream, ChatContinuation,
-            MAX_PROGRESS_CONTINUATIONS,
-        },
+        streaming_codex_chat::{create_responses_sse_stream_from_chat_with_mode, BoxChatStream},
         streaming_gemini::create_anthropic_sse_stream_from_gemini,
         streaming_responses::create_anthropic_sse_stream_from_responses,
         transform, transform_codex_chat, transform_gemini, transform_responses,
@@ -48,13 +44,10 @@ use super::{
 };
 use crate::app_config::AppType;
 use crate::database::PRICING_SOURCE_REQUEST;
-use crate::provider::Provider;
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use bytes::Bytes;
-use http::Extensions;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 // ============================================================================
 // Health and status endpoints.
@@ -841,11 +834,6 @@ pub async fn handle_responses(
         body.pointer("/chat_template_kwargs/enable_thinking") == Some(&Value::Bool(true));
 
     let forwarder = ctx.create_forwarder(&state);
-    let continuation_method = method.clone();
-    let continuation_endpoint = endpoint.clone();
-    let continuation_body = body.clone();
-    let continuation_headers = headers.clone();
-    let continuation_extensions = extensions.clone();
     let mut result = match forwarder
         .forward_with_retry(
             &AppType::Codex,
@@ -873,17 +861,6 @@ pub async fn handle_responses(
     ctx.provider = result.provider;
     let normalize = enabled_for_request(&ctx.provider, request_enables_reasoning);
     let response = result.response;
-    let continuation =
-        (!codex_tool_context.chat_tools().is_empty()).then(|| CodexChatContinuationContext {
-            forwarder,
-            method: continuation_method,
-            endpoint: continuation_endpoint,
-            body: continuation_body,
-            headers: continuation_headers,
-            extensions: continuation_extensions,
-            provider: ctx.provider.clone(),
-            normalize,
-        });
 
     if super::providers::should_convert_codex_responses_to_chat(&ctx.provider, &endpoint) {
         return handle_codex_chat_to_responses_transform(
@@ -895,7 +872,6 @@ pub async fn handle_responses(
                 connection_guard,
                 tool_context: codex_tool_context,
                 normalize,
-                continuation,
             },
         )
         .await;
@@ -981,7 +957,6 @@ pub async fn handle_responses_compact(
                 connection_guard,
                 tool_context: codex_tool_context,
                 normalize,
-                continuation: None,
             },
         )
         .await;
@@ -997,76 +972,11 @@ pub async fn handle_responses_compact(
     .await
 }
 
-struct CodexChatContinuationContext {
-    forwarder: RequestForwarder,
-    method: http::Method,
-    endpoint: String,
-    body: Value,
-    headers: axum::http::HeaderMap,
-    extensions: Extensions,
-    provider: Provider,
-    normalize: bool,
-}
-
-impl CodexChatContinuationContext {
-    async fn request(
-        &self,
-        progress: &str,
-    ) -> Result<super::hyper_client::ProxyResponse, ProxyError> {
-        let body =
-            transform_codex_chat::append_progress_continuation_request(&self.body, progress)?;
-        self.forwarder
-            .forward_codex_chat_continuation(
-                &self.method,
-                &self.provider,
-                &self.endpoint,
-                &body,
-                &self.headers,
-                &self.extensions,
-            )
-            .await
-    }
-
-    async fn stream(&self, progress: String) -> Result<BoxChatStream, String> {
-        let response = self
-            .request(&progress)
-            .await
-            .map_err(|error| error.to_string())?;
-        let stream = normalize_sse_stream(response.bytes_stream(), self.normalize, true);
-        Ok(Box::pin(stream))
-    }
-}
-
-fn progress_only_chat_stop(chat_response: &Value, tools_available: bool) -> Option<String> {
-    if !tools_available {
-        return None;
-    }
-    let choice = chat_response
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())?;
-    if choice.get("finish_reason").and_then(Value::as_str) != Some("stop") {
-        return None;
-    }
-    let message = choice.get("message")?;
-    if message
-        .get("tool_calls")
-        .and_then(Value::as_array)
-        .is_some_and(|calls| !calls.is_empty())
-        || message.get("function_call").is_some()
-    {
-        return None;
-    }
-    let text = message.get("content").and_then(Value::as_str)?.trim();
-    is_clearly_unfinished_progress(text).then(|| text.to_string())
-}
-
 struct CodexChatTransformOptions {
     is_stream: bool,
     connection_guard: Option<ActiveConnectionGuard>,
     tool_context: transform_codex_chat::CodexToolContext,
     normalize: bool,
-    continuation: Option<CodexChatContinuationContext>,
 }
 
 async fn handle_codex_chat_to_responses_transform(
@@ -1080,7 +990,6 @@ async fn handle_codex_chat_to_responses_transform(
         connection_guard,
         tool_context,
         normalize,
-        continuation,
     } = options;
     let status = response.status();
 
@@ -1093,21 +1002,11 @@ async fn handle_codex_chat_to_responses_transform(
     }
 
     if is_stream || response.is_sse() {
-        let tools_available = !tool_context.chat_tools().is_empty();
-        let initial: BoxChatStream = Box::pin(normalize_sse_stream(
+        let stream: BoxChatStream = Box::pin(normalize_sse_stream(
             response.bytes_stream(),
             normalize,
             true,
         ));
-        let continuation: Option<ChatContinuation> = continuation.map(|context| {
-            let context = Arc::new(context);
-            Box::new(move |progress| {
-                let context = Arc::clone(&context);
-                Box::pin(async move { context.stream(progress).await })
-                    as super::providers::streaming_codex_chat::ChatContinuationFuture
-            }) as ChatContinuation
-        });
-        let stream = recover_progress_only_chat_stream(initial, tools_available, continuation);
         let sse_stream =
             create_responses_sse_stream_from_chat_with_mode(stream, tool_context, normalize);
         let sse_stream = record_responses_sse_stream(sse_stream, state.codex_chat_history.clone());
@@ -1233,9 +1132,7 @@ async fn handle_codex_chat_to_responses_transform(
             ));
         }
     };
-    let tools_available = !tool_context.chat_tools().is_empty();
-    let initial_progress = progress_only_chat_stop(&chat_response, tools_available);
-    let mut responses_response = transform_codex_chat::chat_completion_to_response_with_context(
+    let responses_response = transform_codex_chat::chat_completion_to_response_with_context(
         chat_response,
         &tool_context,
     )
@@ -1243,53 +1140,6 @@ async fn handle_codex_chat_to_responses_transform(
         log::error!("[Codex] Failed to transform Chat response to Responses: {e}");
         e
     })?;
-    if let (Some(context), Some(mut progress)) = (continuation.as_ref(), initial_progress) {
-        for attempt in 0..MAX_PROGRESS_CONTINUATIONS {
-            log::warn!(
-                "[Codex] Non-streaming Chat upstream stopped after an unfinished progress update; \
-                 continuation attempt {}",
-                attempt + 1
-            );
-            let next_response = context.request(&progress).await?;
-            let next_headers = next_response.headers().clone();
-            let next_bytes = next_response.bytes().await?;
-            let next_body = String::from_utf8_lossy(&next_bytes);
-            let next_chat: Value = match serde_json::from_slice(&next_bytes) {
-                Ok(value) if normalize => normalize_chat_value(value, false)?,
-                Ok(value) => value,
-                Err(_) if body_looks_like_sse(&next_body) => {
-                    normalize_chat_fallback(&next_body, &next_headers, normalize, false)?
-                }
-                Err(error) => {
-                    return Err(upstream_body_parse_error(
-                        "Failed to parse upstream chat continuation",
-                        &error,
-                        &next_headers,
-                        &next_body,
-                    ))
-                }
-            };
-            let next_progress = progress_only_chat_stop(&next_chat, tools_available);
-            let next_responses = transform_codex_chat::chat_completion_to_response_with_context(
-                next_chat,
-                &tool_context,
-            )?;
-            transform_codex_chat::merge_continuation_response(
-                &mut responses_response,
-                next_responses,
-            );
-            let Some(next_progress) = next_progress else {
-                break;
-            };
-            if attempt + 1 == MAX_PROGRESS_CONTINUATIONS {
-                return Err(ProxyError::TransformError(
-                    "Chat upstream repeatedly stopped after unfinished progress updates"
-                        .to_string(),
-                ));
-            }
-            progress = next_progress;
-        }
-    }
     state
         .codex_chat_history
         .record_response(&responses_response)

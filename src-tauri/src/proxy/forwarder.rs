@@ -1152,35 +1152,6 @@ impl RequestForwarder {
     ///
     /// On success, returns `(response, claude_api_format, outbound_model)`, where
     /// `outbound_model` is the final model name sent upstream after mapping and rewriting.
-    pub(crate) async fn forward_codex_chat_continuation(
-        &self,
-        method: &http::Method,
-        provider: &Provider,
-        endpoint: &str,
-        body: &Value,
-        headers: &axum::http::HeaderMap,
-        extensions: &Extensions,
-    ) -> Result<ProxyResponse, ProxyError> {
-        if !super::providers::should_convert_codex_responses_to_chat(provider, endpoint) {
-            return Err(ProxyError::InvalidRequest(
-                "Agent-loop continuation requires a Codex Responses-to-Chat provider".to_string(),
-            ));
-        }
-        let adapter = get_adapter(&AppType::Codex);
-        self.forward(
-            &AppType::Codex,
-            method,
-            provider,
-            endpoint,
-            body,
-            headers,
-            extensions,
-            adapter.as_ref(),
-        )
-        .await
-        .map(|(response, _, _)| response)
-    }
-
     #[allow(clippy::too_many_arguments)]
     async fn forward(
         &self,

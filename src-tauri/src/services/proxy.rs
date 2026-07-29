@@ -3199,7 +3199,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn codex_chat_bridge_recovers_progress_stop_without_rewriting_harness() {
+    async fn codex_chat_bridge_merges_narration_into_history_tool_calls() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -3215,24 +3215,16 @@ mod tests {
                     let request_count = Arc::clone(&request_count);
                     async move {
                         requests.lock().expect("capture Chat request").push(body);
-                        let attempt = request_count.fetch_add(1, Ordering::SeqCst);
-                        let stream = if attempt == 0 {
-                            concat!(
-                                "data: {\"id\":\"chatcmpl_progress\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Checking the provider now.\"},\"finish_reason\":\"stop\"}]}\n\n",
-                                "data: [DONE]\n\n"
-                            )
-                        } else {
-                            concat!(
-                                "data: {\"id\":\"chatcmpl_tool\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"exec\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
-                                "data: [DONE]\n\n"
-                            )
-                        };
+                        request_count.fetch_add(1, Ordering::SeqCst);
                         (
                             [(
                                 axum::http::header::CONTENT_TYPE,
                                 "text/event-stream",
                             )],
-                            stream,
+                            concat!(
+                                "data: {\"id\":\"chatcmpl_done\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"All done.\"},\"finish_reason\":\"stop\"}]}\n\n",
+                                "data: [DONE]\n\n"
+                            ),
                         )
                     }
                 }
@@ -3292,11 +3284,29 @@ mod tests {
             .json(&json!({
                 "model": "kimi-k3",
                 "instructions": "Keep normal commentary while completing the task.",
-                "input": [{
-                    "type": "message",
-                    "role": "user",
-                    "content": [{"type": "input_text", "text": "Inspect the provider."}]
-                }],
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "Inspect the provider."}]
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Checking the provider now."}]
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "exec",
+                        "arguments": "{}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "ok"
+                    }
+                ],
                 "tools": [{
                     "type": "function",
                     "name": "exec",
@@ -3314,29 +3324,36 @@ mod tests {
         state.proxy_service.stop().await.expect("stop proxy");
         upstream_task.abort();
 
-        assert_eq!(request_count.load(Ordering::SeqCst), 2);
-        assert!(downstream.contains("Checking the provider now."));
-        assert!(downstream.contains("\"name\":\"exec\""));
-        assert_eq!(downstream.matches("event: response.created").count(), 1);
         assert_eq!(downstream.matches("event: response.completed").count(), 1);
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
 
         let requests = requests.lock().expect("read captured Chat requests");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1);
+        let messages = requests[0]["messages"].as_array().expect("chat messages");
+        let assistant_tool_calls: Vec<&Value> = messages
+            .iter()
+            .filter(|message| {
+                message["role"] == "assistant"
+                    && message["tool_calls"]
+                        .as_array()
+                        .is_some_and(|calls| !calls.is_empty())
+            })
+            .collect();
+        assert_eq!(assistant_tool_calls.len(), 1);
         assert_eq!(
-            requests[0]["messages"][0]["content"],
+            assistant_tool_calls[0]["content"], "Checking the provider now.",
+            "mid-turn narration must ride on the assistant tool_calls message"
+        );
+        let bare_narration = messages.iter().any(|message| {
+            message["role"] == "assistant"
+                && message.get("tool_calls").is_none()
+                && message["content"] == "Checking the provider now."
+        });
+        assert!(!bare_narration, "no bare narration-only assistant messages");
+        assert_eq!(
+            messages[0]["content"],
             "Keep normal commentary while completing the task."
         );
-        assert_eq!(
-            requests[0]["messages"][1]["content"],
-            "Inspect the provider."
-        );
-        assert_eq!(requests[1]["messages"][2]["role"], "assistant");
-        assert_eq!(
-            requests[1]["messages"][2]["content"],
-            "Checking the provider now."
-        );
-        assert_eq!(requests[1]["messages"][3]["role"], "user");
-        assert_eq!(requests[1]["messages"][3]["content"], "Continue.");
         let serialized_requests =
             serde_json::to_string(&*requests).expect("serialize captured requests");
         assert!(!serialized_requests.contains("MUST NOT send narration"));

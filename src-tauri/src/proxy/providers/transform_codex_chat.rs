@@ -552,106 +552,6 @@ fn collapse_system_messages_to_head(messages: Vec<Value>) -> Vec<Value> {
     out
 }
 
-pub(crate) fn append_progress_continuation_request(
-    body: &Value,
-    progress: &str,
-) -> Result<Value, ProxyError> {
-    let mut continued = body.clone();
-    let mut input = match continued.get("input") {
-        Some(Value::Array(items)) => items.clone(),
-        Some(Value::String(text)) => vec![json!({
-            "type": "message",
-            "role": "user",
-            "content": [{"type": "input_text", "text": text}]
-        })],
-        Some(Value::Null) | None => Vec::new(),
-        Some(_) => {
-            return Err(ProxyError::TransformError(
-                "Responses input must be a string or array for continuation".to_string(),
-            ))
-        }
-    };
-    input.push(json!({
-        "type": "message",
-        "role": "assistant",
-        "content": [{"type": "output_text", "text": progress}]
-    }));
-    input.push(json!({
-        "type": "message",
-        "role": "user",
-        "content": [{"type": "input_text", "text": "Continue."}]
-    }));
-    continued["input"] = Value::Array(input);
-    Ok(continued)
-}
-
-pub(crate) fn merge_continuation_response(base: &mut Value, continuation: Value) {
-    if let Some(output) = continuation.get("output").and_then(Value::as_array) {
-        if !base.get("output").is_some_and(Value::is_array) {
-            base["output"] = json!([]);
-        }
-        if let Some(base_output) = base.get_mut("output").and_then(Value::as_array_mut) {
-            base_output.extend(output.iter().cloned());
-        }
-    }
-
-    for field in ["status", "model", "incomplete_details", "error"] {
-        if let Some(value) = continuation.get(field) {
-            base[field] = value.clone();
-        } else if matches!(field, "incomplete_details" | "error") {
-            if let Some(object) = base.as_object_mut() {
-                object.remove(field);
-            }
-        }
-    }
-
-    let continuation_usage = continuation.get("usage");
-    if let (Some(base_usage), Some(continuation_usage)) =
-        (base.get_mut("usage"), continuation_usage)
-    {
-        merge_responses_usage(base_usage, continuation_usage);
-    }
-}
-
-pub(crate) fn merge_responses_usage(base: &mut Value, continuation: &Value) {
-    for field in ["input_tokens", "output_tokens", "total_tokens"] {
-        let sum = base
-            .get(field)
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .saturating_add(continuation.get(field).and_then(Value::as_u64).unwrap_or(0));
-        base[field] = json!(sum);
-    }
-    for (parent, field) in [
-        ("input_tokens_details", "cached_tokens"),
-        ("output_tokens_details", "reasoning_tokens"),
-    ] {
-        let sum = base
-            .pointer(&format!("/{parent}/{field}"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .saturating_add(
-                continuation
-                    .pointer(&format!("/{parent}/{field}"))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            );
-        if sum > 0 {
-            base[parent][field] = json!(sum);
-        }
-    }
-    for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
-        let sum = base
-            .get(field)
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-            .saturating_add(continuation.get(field).and_then(Value::as_u64).unwrap_or(0));
-        if sum > 0 {
-            base[field] = json!(sum);
-        }
-    }
-}
-
 fn instruction_text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
@@ -719,6 +619,14 @@ fn append_responses_input_as_chat_messages(
         &mut pending_reasoning,
         &mut last_assistant_index,
     );
+    // Codex records mid-turn narration as a standalone assistant message right
+    // before the tool calls it announced. Left as-is, the chat history shows
+    // a bare content-only assistant turn, which teaches chat models that
+    // narration alone ends a turn and causes agent loops to stall. Reattach
+    // the narration to the assistant message that carries those tool calls so
+    // the history matches what actually happened. Standalone assistant
+    // messages (final answers, narration before a user turn) are untouched.
+    merge_narration_into_tool_call_messages(messages);
     if preserve_exact_history {
         if let Some(reasoning) = pending_reasoning
             .take()
@@ -898,6 +806,50 @@ fn append_responses_item_as_chat_message(
     }
 
     Ok(())
+}
+
+/// Fold an assistant narration message directly followed by an assistant
+/// tool_calls message into that tool_calls message. Both describe the same
+/// model turn split by Codex history, so the merged form preserves every
+/// session-visible word while matching the canonical chat shape.
+fn merge_narration_into_tool_call_messages(messages: &mut Vec<Value>) {
+    let mut index = 0;
+    while index + 1 < messages.len() {
+        let narration_text = {
+            let message = &messages[index];
+            let is_narration = message.get("role").and_then(Value::as_str) == Some("assistant")
+                && message.get("tool_calls").is_none();
+            if !is_narration {
+                index += 1;
+                continue;
+            }
+            match message.get("content") {
+                Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
+                _ => None,
+            }
+        };
+        let Some(narration_text) = narration_text else {
+            index += 1;
+            continue;
+        };
+        let next_has_tool_calls = {
+            let next = &messages[index + 1];
+            next.get("role").and_then(Value::as_str) == Some("assistant")
+                && next
+                    .get("tool_calls")
+                    .and_then(Value::as_array)
+                    .is_some_and(|calls| !calls.is_empty())
+        };
+        if !next_has_tool_calls {
+            index += 1;
+            continue;
+        }
+        if let Some(obj) = messages[index + 1].as_object_mut() {
+            obj.insert("content".to_string(), Value::String(narration_text));
+        }
+        messages.remove(index);
+        index += 1;
+    }
 }
 
 fn flush_pending_tool_calls(
@@ -2023,105 +1975,6 @@ mod tests {
     }
 
     #[test]
-    fn continuation_request_preserves_progress_and_uses_neutral_resume_turn() {
-        let original = json!({
-            "model": "kimi-k3",
-            "input": [{
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": "Inspect the repository."}]
-            }],
-            "tools": [{
-                "type": "function",
-                "name": "exec",
-                "parameters": {"type": "object", "properties": {}}
-            }],
-            "stream": true
-        });
-
-        let continued = append_progress_continuation_request(
-            &original,
-            "Checking the provider configuration now.",
-        )
-        .unwrap();
-        let input = continued["input"].as_array().unwrap();
-
-        assert_eq!(input.len(), 3);
-        assert_eq!(input[0], original["input"][0]);
-        assert_eq!(input[1]["role"], "assistant");
-        assert_eq!(
-            input[1]["content"][0]["text"],
-            "Checking the provider configuration now."
-        );
-        assert_eq!(input[2]["role"], "user");
-        assert_eq!(input[2]["content"][0]["text"], "Continue.");
-        let serialized = serde_json::to_string(&continued).unwrap();
-        assert!(!serialized.contains("MUST"));
-        assert!(!serialized.contains("Do not send narration"));
-    }
-
-    #[test]
-    fn continuation_response_preserves_commentary_and_accumulates_usage() {
-        let mut first = json!({
-            "id": "resp_first",
-            "status": "completed",
-            "model": "kimi-k3",
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "Checking the provider now."}]
-            }],
-            "usage": {
-                "input_tokens": 10,
-                "output_tokens": 2,
-                "total_tokens": 12,
-                "input_tokens_details": {"cached_tokens": 3},
-                "cache_read_input_tokens": 3
-            }
-        });
-        let second = json!({
-            "id": "resp_second",
-            "status": "completed",
-            "model": "kimi-k3",
-            "output": [{
-                "type": "function_call",
-                "call_id": "call_1",
-                "name": "exec",
-                "arguments": "{}"
-            }],
-            "usage": {
-                "input_tokens": 12,
-                "output_tokens": 3,
-                "total_tokens": 15,
-                "input_tokens_details": {"cached_tokens": 4},
-                "output_tokens_details": {"reasoning_tokens": 1},
-                "cache_read_input_tokens": 4,
-                "cache_creation_input_tokens": 2
-            }
-        });
-
-        merge_continuation_response(&mut first, second);
-
-        assert_eq!(first["id"], "resp_first");
-        assert_eq!(first["output"].as_array().unwrap().len(), 2);
-        assert_eq!(
-            first["output"][0]["content"][0]["text"],
-            "Checking the provider now."
-        );
-        assert_eq!(first["output"][1]["name"], "exec");
-        assert_eq!(first["usage"]["input_tokens"], 22);
-        assert_eq!(first["usage"]["output_tokens"], 5);
-        assert_eq!(first["usage"]["total_tokens"], 27);
-        assert_eq!(first["usage"]["input_tokens_details"]["cached_tokens"], 7);
-        assert_eq!(
-            first["usage"]["output_tokens_details"]["reasoning_tokens"],
-            1
-        );
-        assert_eq!(first["usage"]["cache_read_input_tokens"], 7);
-        assert_eq!(first["usage"]["cache_creation_input_tokens"], 2);
-    }
-
-    #[test]
     fn nexus_history_is_exact_while_baseline_history_still_backfills() {
         let tool = "  tool call\n\n[redacted thinking]\nReal.  \n";
         let input = json!({
@@ -2280,6 +2133,58 @@ mod tests {
         assert_eq!(content[0]["type"], "file");
         assert_eq!(content[0]["file"]["file_id"], "file_top");
         assert_eq!(content[0]["file"]["filename"], "top.pdf");
+    }
+
+    #[test]
+    fn mid_turn_assistant_narration_merges_into_following_tool_call_message() {
+        let input = json!({
+            "model": "kimi-k3",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "I will check the config now."}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "exec",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "ok"
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "All done."}]
+                }
+            ],
+            "tools": [{
+                "type": "function",
+                "name": "exec",
+                "parameters": {"type": "object"}
+            }]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .filter_map(|message| message.get("role").and_then(|role| role.as_str()))
+            .collect();
+
+        assert_eq!(
+            roles,
+            vec!["assistant", "tool", "assistant"],
+            "narration must merge into the adjacent assistant tool_call message, got {roles:?}"
+        );
+        assert_eq!(messages[0]["content"], "I will check the config now.");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(messages[2]["content"], "All done.");
+        assert!(messages[2].get("tool_calls").is_none());
     }
 
     #[test]
