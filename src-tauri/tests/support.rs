@@ -7,14 +7,14 @@ use nexus_composer_lib::{update_settings, AppSettings, AppState, Database, Multi
 pub fn ensure_test_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
-        let base = std::env::temp_dir().join("cc-switch-test-home");
+        let base = std::env::temp_dir().join("nexus-composer-test-home");
         if base.exists() {
             let _ = std::fs::remove_dir_all(&base);
         }
         std::fs::create_dir_all(&base).expect("create test home");
         // On Windows, `dirs::home_dir()` ignores HOME/USERPROFILE and uses the Known Folder
-        // API. Override it explicitly with CC_SWITCH_TEST_HOME so tests cannot alter real user data.
-        std::env::set_var("CC_SWITCH_TEST_HOME", &base);
+        // API. Override it explicitly so tests cannot alter real user data.
+        std::env::set_var("NEXUS_COMPOSER_TEST_HOME", &base);
         std::env::set_var("HOME", &base);
         #[cfg(windows)]
         std::env::set_var("USERPROFILE", &base);
@@ -30,6 +30,7 @@ pub fn reset_test_fs() {
         ".claude",
         ".codex",
         ".cc-switch",
+        ".nexus-composer",
         ".gemini",
         ".config",
         ".openclaw",

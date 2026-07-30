@@ -1,7 +1,7 @@
 //! Panic hook module
 //!
 //! Captures panic details in `<app_config_dir>/crash.log`, which defaults to
-//! `~/.cc-switch/crash.log`, for crash diagnosis.
+//! `~/.nexus-composer/crash.log`, for crash diagnosis.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -18,29 +18,20 @@ pub fn init_app_config_dir(dir: PathBuf) {
     let _ = APP_CONFIG_DIR.set(dir);
 }
 
-/// Return the default application configuration directory without panicking.
-fn default_app_config_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".cc-switch")
-}
-
-/// Return the initialized or default application configuration directory without panicking.
-fn get_app_config_dir() -> PathBuf {
-    APP_CONFIG_DIR
-        .get()
-        .cloned()
-        .unwrap_or_else(default_app_config_dir)
-}
-
 /// Return the crash log path.
 fn get_crash_log_path() -> PathBuf {
-    get_app_config_dir().join("crash.log")
+    APP_CONFIG_DIR
+        .get()
+        .map(|dir| dir.join("crash.log"))
+        .unwrap_or_else(crate::config::get_app_crash_log_path)
 }
 
 /// Return the log directory path.
 pub fn get_log_dir() -> PathBuf {
-    get_app_config_dir().join("logs")
+    APP_CONFIG_DIR
+        .get()
+        .map(|dir| dir.join("logs"))
+        .unwrap_or_else(crate::config::get_app_log_dir)
 }
 
 /// Return environment information without panicking.
@@ -194,7 +185,7 @@ mod tests {
     fn test_crash_log_path() {
         let path = get_crash_log_path();
         assert!(path.ends_with("crash.log"));
-        assert!(path.to_string_lossy().contains(".cc-switch"));
+        assert!(path.to_string_lossy().contains(".nexus-composer"));
     }
 
     #[test]

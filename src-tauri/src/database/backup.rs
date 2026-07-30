@@ -3,7 +3,7 @@
 //! Provides SQL import/export and binary snapshot backups.
 
 use super::{lock_conn, Database};
-use crate::config::get_app_config_dir;
+use crate::config::{get_app_backup_dir, get_app_database_path};
 use crate::error::AppError;
 use chrono::{Local, Utc};
 use rusqlite::backup::Backup;
@@ -244,7 +244,7 @@ impl Database {
     pub(crate) fn periodic_backup_if_needed(&self) -> Result<(), AppError> {
         let interval_hours = crate::settings::effective_backup_interval_hours();
         if interval_hours > 0 {
-            let backup_dir = get_app_config_dir().join("backups");
+            let backup_dir = get_app_backup_dir();
             if !backup_dir.exists() {
                 self.backup_database_file()?;
             } else {
@@ -304,7 +304,7 @@ impl Database {
 
     /// Create a consistent snapshot and return its path, or None if no database exists.
     pub(crate) fn backup_database_file(&self) -> Result<Option<PathBuf>, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = get_app_database_path();
         if !db_path.exists() {
             return Ok(None);
         }
@@ -527,7 +527,7 @@ impl Database {
 
     /// List all database backup files, sorted by creation time (newest first)
     pub fn list_backups() -> Result<Vec<BackupEntry>, AppError> {
-        let backup_dir = get_app_config_dir().join("backups");
+        let backup_dir = get_app_backup_dir();
         if !backup_dir.exists() {
             return Ok(vec![]);
         }
@@ -574,7 +574,7 @@ impl Database {
             ));
         }
 
-        let backup_dir = get_app_config_dir().join("backups");
+        let backup_dir = get_app_backup_dir();
         let backup_path = backup_dir.join(filename);
 
         if !backup_path.exists() {
@@ -653,7 +653,7 @@ impl Database {
 
         let new_filename = format!("{name_part}.db");
 
-        let backup_dir = get_app_config_dir().join("backups");
+        let backup_dir = get_app_backup_dir();
         let old_path = backup_dir.join(old_filename);
         let new_path = backup_dir.join(&new_filename);
 
@@ -687,7 +687,7 @@ impl Database {
             ));
         }
 
-        let backup_path = get_app_config_dir().join("backups").join(filename);
+        let backup_path = get_app_backup_dir().join(filename);
         if !backup_path.exists() {
             return Err(AppError::InvalidInput(format!(
                 "Backup file not found: {filename}"

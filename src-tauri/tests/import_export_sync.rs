@@ -883,7 +883,7 @@ fn create_backup_skips_missing_file() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
-    let config_path = home.join(".cc-switch").join("config.json");
+    let config_path = home.join(".nexus-composer").join("config.json");
 
     // A missing file returns an empty string without error.
     let result = ConfigService::create_backup(&config_path).expect("create backup");
@@ -898,7 +898,7 @@ fn create_backup_generates_snapshot_file() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
-    let config_dir = home.join(".cc-switch");
+    let config_dir = home.join(".nexus-composer");
     let config_path = config_dir.join("config.json");
     fs::create_dir_all(&config_dir).expect("prepare config dir");
     fs::write(&config_path, r#"{"version":2}"#).expect("write config file");
@@ -928,7 +928,7 @@ fn create_backup_retains_only_latest_entries() {
     let _guard = test_mutex().lock().expect("acquire test mutex");
     reset_test_fs();
     let home = ensure_test_home();
-    let config_dir = home.join(".cc-switch");
+    let config_dir = home.join(".nexus-composer");
     let config_path = config_dir.join("config.json");
     fs::create_dir_all(&config_dir).expect("prepare config dir");
     fs::write(&config_path, r#"{"version":3}"#).expect("write config file");
@@ -1008,7 +1008,7 @@ fn sync_gemini_packycode_sets_security_selected_type() {
     ConfigService::sync_current_providers_to_live(&mut config)
         .expect("syncing gemini live should succeed");
 
-    // security field is written to ~/.gemini/settings.json, not ~/.cc-switch/settings.json
+    // security field is written to ~/.gemini/settings.json, not the Nexus app settings file
     let gemini_settings = home.join(".gemini").join("settings.json");
     assert!(
         gemini_settings.exists(),
@@ -1059,7 +1059,7 @@ fn sync_gemini_google_official_sets_oauth_security() {
     ConfigService::sync_current_providers_to_live(&mut config)
         .expect("syncing google official gemini should succeed");
 
-    // security field is written to ~/.gemini/settings.json, not ~/.cc-switch/settings.json
+    // security field is written to ~/.gemini/settings.json, not the Nexus app settings file
     let gemini_settings = home.join(".gemini").join("settings.json");
     assert!(
         gemini_settings.exists(),

@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
 
@@ -339,7 +338,7 @@ pub struct CodexOfficialHistoryUnifyMigration {
 
 /// Application settings structure.
 ///
-/// Stores device-level settings in local `~/.cc-switch/settings.json` without
+/// Stores device-level settings in the canonical Nexus Composer app-data directory without
 /// syncing them through the database. This keeps each device independent in
 /// cloud-sync scenarios.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,12 +560,7 @@ impl Default for AppSettings {
 
 impl AppSettings {
     fn settings_path() -> Option<PathBuf> {
-        // Keep settings.json for legacy migration and database-free scenarios.
-        Some(
-            crate::config::get_home_dir()
-                .join(".cc-switch")
-                .join("settings.json"),
-        )
+        Some(crate::config::get_app_settings_path())
     }
 
     fn normalize_paths(&mut self) {
@@ -668,31 +662,14 @@ fn save_settings_file(settings: &AppSettings) -> Result<(), AppError> {
         ));
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-    }
-
     let json = serde_json::to_string_pretty(&normalized)
         .map_err(|e| AppError::JsonSerialize { source: e })?;
+    crate::config::atomic_write(&path, json.as_bytes())?;
     #[cfg(unix)]
     {
-        use std::fs::OpenOptions;
-        use std::os::unix::fs::OpenOptionsExt;
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .map_err(|e| AppError::io(&path, e))?;
-        file.write_all(json.as_bytes())
-            .map_err(|e| AppError::io(&path, e))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        fs::write(&path, json).map_err(|e| AppError::io(&path, e))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| AppError::io(&path, error))?;
     }
 
     Ok(())

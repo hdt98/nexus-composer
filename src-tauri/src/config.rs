@@ -6,6 +6,11 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::AppError;
 
+pub const APP_CONFIG_DIR_NAME: &str = ".nexus-composer";
+pub const APP_DATABASE_FILENAME: &str = "nexus-composer.db";
+pub const LEGACY_APP_CONFIG_DIR_NAME: &str = ".cc-switch";
+pub const LEGACY_APP_DATABASE_FILENAME: &str = "cc-switch.db";
+
 /// Returns the user home directory with fallback and logging.
 ///
 /// ## Windows considerations
@@ -13,18 +18,34 @@ use crate::error::AppError;
 /// - On Windows, `dirs::home_dir()` uses `SHGetKnownFolderPath(FOLDERID_Profile)` and returns the
 ///   actual user profile, such as `C:\\Users\\Alice`, matching v3.10.2 behavior.
 /// - Do not use the `HOME` environment variable directly. Git, Cygwin, MSYS, or other tools may set
-///   it to a different directory, changing `.cc-switch/cc-switch.db` and making data appear lost.
+///   it to a different directory, making a legacy database appear to disappear. The startup storage
+///   resolver inventories that historical Windows candidate explicitly.
 ///
 /// ## Test isolation
 ///
-/// Windows CI and local tests may override the home directory with `CC_SWITCH_TEST_HOME` to isolate
-/// real user data. This override is only for tests and diagnostics.
-pub fn get_home_dir() -> PathBuf {
-    if let Ok(home) = std::env::var("CC_SWITCH_TEST_HOME") {
-        let trimmed = home.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
+/// Windows CI and local tests may override the home directory with
+/// `NEXUS_COMPOSER_TEST_HOME` (preferred) or the legacy `CC_SWITCH_TEST_HOME`
+/// name. These overrides are only for tests and diagnostics.
+pub fn get_test_home_dir() -> Option<PathBuf> {
+    for variable in ["NEXUS_COMPOSER_TEST_HOME", "CC_SWITCH_TEST_HOME"] {
+        if let Some(home) = std::env::var_os(variable) {
+            if let Some(text) = home.to_str() {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() {
+                    return Some(PathBuf::from(trimmed));
+                }
+            } else if !home.is_empty() {
+                return Some(PathBuf::from(home));
+            }
         }
+    }
+
+    None
+}
+
+pub fn get_home_dir() -> PathBuf {
+    if let Some(home) = get_test_home_dir() {
+        return home;
     }
 
     dirs::home_dir().unwrap_or_else(|| {
@@ -181,40 +202,52 @@ pub fn get_claude_settings_path() -> PathBuf {
     settings
 }
 
-/// Returns the application configuration-directory path: ~/.cc-switch.
+/// Returns the single authoritative application data directory.
+///
+/// This helper is deliberately read-only. Storage migration is performed once
+/// during startup by `app_storage::prepare_app_storage` before any settings,
+/// logs, or database files are opened.
 pub fn get_app_config_dir() -> PathBuf {
     if let Some(custom) = crate::app_store::get_app_config_dir_override() {
         return custom;
     }
 
-    let default_dir = get_home_dir().join(".cc-switch");
+    get_home_dir().join(APP_CONFIG_DIR_NAME)
+}
 
-    // v3.10.3 compatibility: if `HOME` differed from the real user profile, v3.10.3 may have created
-    // or used the database under `HOME/.cc-switch/`. Fall back to that legacy location only when the
-    // default location has no database, preventing providers from appearing to disappear while keeping
-    // new installations from writing to an unexpected path merely because `HOME` is set.
-    #[cfg(windows)]
-    {
-        let default_db = default_dir.join("cc-switch.db");
-        if !default_db.exists() {
-            if let Ok(home_env) = std::env::var("HOME") {
-                let trimmed = home_env.trim();
-                if !trimmed.is_empty() {
-                    let legacy_dir = PathBuf::from(trimmed).join(".cc-switch");
-                    if legacy_dir.join("cc-switch.db").exists() {
-                        log::info!(
-                            "Detected v3.10.3 legacy database at {}, using it instead of {}",
-                            legacy_dir.display(),
-                            default_dir.display()
-                        );
-                        return legacy_dir;
-                    }
-                }
-            }
-        }
-    }
+/// Returns the authoritative SQLite database path.
+pub fn get_app_database_path() -> PathBuf {
+    get_app_config_dir().join(APP_DATABASE_FILENAME)
+}
 
-    default_dir
+/// Returns the device-local settings path.
+pub fn get_app_settings_path() -> PathBuf {
+    get_app_config_dir().join("settings.json")
+}
+
+/// Returns the database and environment backup directory.
+pub fn get_app_backup_dir() -> PathBuf {
+    get_app_config_dir().join("backups")
+}
+
+/// Returns the application log directory.
+pub fn get_app_log_dir() -> PathBuf {
+    get_app_config_dir().join("logs")
+}
+
+/// Returns the crash log path.
+pub fn get_app_crash_log_path() -> PathBuf {
+    get_app_config_dir().join("crash.log")
+}
+
+/// Returns the Nexus-managed Skill source-of-truth directory.
+pub fn get_app_skills_dir() -> PathBuf {
+    get_app_config_dir().join("skills")
+}
+
+/// Returns the Skill uninstall backup directory.
+pub fn get_app_skill_backup_dir() -> PathBuf {
+    get_app_config_dir().join("skill-backups")
 }
 
 /// Returns the application configuration-file path.

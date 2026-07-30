@@ -285,7 +285,7 @@
     },
     "unifyCodexHistory": {
       "title": "Unified Codex session history",
-      "message": "When enabled, the official subscription and third-party providers share one session history list. Note: resuming an old session across providers may fail because its encrypted_content reasoning cannot be decrypted by another backend.\n\nYou can also migrate your existing official session history into the shared list (originals are backed up to ~/.cc-switch/backups first and can be restored when you turn this off).",
+      "message": "Khi bật, gói đăng ký chính thức và provider bên thứ ba dùng chung một danh sách lịch sử phiên. Lưu ý: tiếp tục một phiên cũ bằng provider khác có thể thất bại vì encrypted_content chỉ được backend đã tạo ra nó giải mã.\n\nBạn cũng có thể chuyển lịch sử phiên chính thức hiện có vào danh sách chung (bản gốc được sao lưu vào ~/.nexus-composer/backups trước và có thể khôi phục khi tắt tính năng).",
       "migrateExisting": "Also migrate existing official session history",
       "confirm": "I understand, enable"
     },
@@ -702,7 +702,7 @@
       "description": "Choose where Nexus Composer stores the master copies of your skills",
       "ccSwitch": "Nexus Composer",
       "unified": "~/.agents/skills",
-      "ccSwitchHint": "Skills are stored in ~/.cc-switch/skills/ and synced to each app via symlink or copy.",
+      "ccSwitchHint": "Skills được lưu trong ~/.nexus-composer/skills/ và đồng bộ sang từng ứng dụng bằng liên kết hoặc bản sao.",
       "unifiedHint": "Skills are stored in ~/.agents/skills/, the Agent Skills open standard. Compatible tools (Claude Code, Codex, Gemini CLI, etc.) discover skills here natively.",
       "confirmTitle": "Migrate Skill Storage",
       "confirmMessage": "{{count}} skill(s) will be moved to the new location. Continue?",
