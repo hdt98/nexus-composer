@@ -2,7 +2,7 @@
 //!
 //! Unified management architecture for v3.10.0 and later:
 //! - Supports per-application toggles for Claude, Codex, and Gemini.
-//! - Stores the source of truth in `~/.cc-switch/skills/`.
+//! - Stores the source of truth in `~/.nexus-composer/skills/`.
 
 use crate::app_config::{AppType, InstalledSkill, UnmanagedSkill};
 use crate::error::format_skill_error;

@@ -991,7 +991,7 @@ impl Database {
         })?;
 
         // Mark the database for a post-startup filesystem scan that rebuilds Skills data.
-        // v3 moves the Skills SSOT to ~/.cc-switch/skills/. The old table contains only installation
+        // v3 moves the Skills SSOT to the Nexus Composer app-data directory. The old table contains only installation
         // records and cannot be losslessly converted, so startup scans application directories instead.
         let _ = conn.execute(
             "INSERT OR REPLACE INTO settings (key, value) VALUES ('skills_ssot_migration_pending', 'true')",

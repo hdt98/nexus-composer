@@ -1,7 +1,7 @@
 //! Skills service layer.
 //!
 //! Unified management architecture in v3.10.0 and later:
-//! - Single source of truth (SSOT): `~/.cc-switch/skills/`.
+//! - Single source of truth (SSOT): `~/.nexus-composer/skills/`.
 //! - Installations download to the SSOT and synchronize to application directories as needed.
 //! - The database stores installation records and enablement state.
 
@@ -16,7 +16,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::time::timeout;
 
 use crate::app_config::{AppType, InstalledSkill, SkillApps, UnmanagedSkill};
-use crate::config::get_app_config_dir;
 use crate::database::Database;
 use crate::error::format_skill_error;
 
@@ -39,7 +38,7 @@ pub enum SyncMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillStorageLocation {
-    /// Nexus Composer-managed directory: ~/.cc-switch/skills/.
+    /// Nexus Composer-managed directory: ~/.nexus-composer/skills/.
     #[default]
     CcSwitch,
     /// Standard Agent Skills directory: ~/.agents/skills/.
@@ -485,11 +484,11 @@ impl SkillService {
 
     // ========== Path management ==========
 
-    /// Returns the configured SSOT directory: ~/.cc-switch/skills/ or ~/.agents/skills/.
+    /// Returns the configured SSOT directory: ~/.nexus-composer/skills/ or ~/.agents/skills/.
     pub fn get_ssot_dir() -> Result<PathBuf> {
         let location = crate::settings::get_skill_storage_location();
         let dir = match location {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::CcSwitch => crate::config::get_app_skills_dir(),
             SkillStorageLocation::Unified => {
                 let home = dirs::home_dir().context(format_skill_error(
                     "GET_HOME_DIR_FAILED",
@@ -503,9 +502,9 @@ impl SkillService {
         Ok(dir)
     }
 
-    /// Returns the Skill uninstallation backup directory: ~/.cc-switch/skill-backups/.
+    /// Returns the Skill uninstallation backup directory: ~/.nexus-composer/skill-backups/.
     fn get_backup_dir() -> Result<PathBuf> {
-        let dir = get_app_config_dir().join("skill-backups");
+        let dir = crate::config::get_app_skill_backup_dir();
         fs::create_dir_all(&dir)?;
         Ok(dir)
     }
@@ -1184,7 +1183,7 @@ impl SkillService {
         // 1. Resolve the old and new directories without changing settings.
         let old_dir = Self::get_ssot_dir()?;
         let new_dir = match target {
-            SkillStorageLocation::CcSwitch => get_app_config_dir().join("skills"),
+            SkillStorageLocation::CcSwitch => crate::config::get_app_skills_dir(),
             SkillStorageLocation::Unified => {
                 let home = dirs::home_dir().context("Cannot determine home directory")?;
                 home.join(".agents").join("skills")

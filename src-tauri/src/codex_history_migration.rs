@@ -7,7 +7,7 @@ use crate::codex_config::{
     get_codex_config_dir, read_codex_config_text, NEXUS_COMPOSER_CODEX_MODEL_PROVIDER_ID,
 };
 use crate::codex_state_db::codex_state_db_paths;
-use crate::config::{atomic_write, copy_file, get_app_config_dir};
+use crate::config::{atomic_write, copy_file, get_app_backup_dir};
 use crate::database::{is_official_seed_id, Database};
 use crate::error::AppError;
 use crate::settings::{
@@ -459,9 +459,7 @@ pub struct CodexOfficialHistoryRestoreOutcome {
 
 /// Parent directory for unified session toggle migration backups (each migration creates a timestamped generation directory underneath).
 fn official_history_unify_backup_parent() -> PathBuf {
-    get_app_config_dir()
-        .join("backups")
-        .join(OFFICIAL_UNIFY_MIGRATION_NAME)
+    get_app_backup_dir().join(OFFICIAL_UNIFY_MIGRATION_NAME)
 }
 
 /// Whether there are migration backups available for restore (for the frontend to decide whether to show the "restore backups" checkbox).
@@ -906,8 +904,7 @@ fn insert_known_legacy_source_id(ids: &mut BTreeSet<String>, provider_id: &str) 
 }
 
 fn migration_backup_root(migration_name: &str) -> PathBuf {
-    get_app_config_dir()
-        .join("backups")
+    get_app_backup_dir()
         .join(migration_name)
         .join(Local::now().format("%Y%m%d_%H%M%S").to_string())
 }

@@ -27,6 +27,12 @@ pub fn get_app_config_dir_override() -> Option<PathBuf> {
 }
 
 fn read_override_from_store(app: &tauri::AppHandle) -> Option<PathBuf> {
+    // An isolated test/dev home must never inherit a persisted production
+    // app-data override, otherwise a smoke test could migrate real user data.
+    if crate::config::get_test_home_dir().is_some() {
+        return None;
+    }
+
     let store = match app.store_builder("app_paths.json").build() {
         Ok(store) => store,
         Err(e) => {

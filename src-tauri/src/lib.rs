@@ -1,4 +1,5 @@
 mod app_config;
+mod app_storage;
 mod app_store;
 mod auto_launch;
 mod claude_desktop_config;
@@ -255,7 +256,7 @@ fn macos_tray_icon() -> Option<Image<'static>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Install a panic hook so crashes are logged to
-    // <app_config_dir>/crash.log (default: ~/.cc-switch/crash.log).
+    // <app_config_dir>/crash.log (default: ~/.nexus-composer/crash.log).
     panic_hook::setup_panic_hook();
 
     let mut builder = tauri::Builder::default();
@@ -347,6 +348,47 @@ pub fn run() {
 
             // Refresh Store-backed path overrides before later path reads (logs, DB, etc.).
             app_store::refresh_app_config_dir_override(app.handle());
+
+            // Resolve and, when needed, promote the authoritative app-data layout
+            // before any settings, log, backup, Skill, or database file is opened.
+            // SQLite schema migration remains a separate later phase.
+            let storage_preparation = loop {
+                match app_storage::prepare_app_storage(crate::database::SCHEMA_VERSION) {
+                    Ok(app_storage::StoragePreparation::Ready {
+                        database_path,
+                        report_path,
+                        migrated,
+                    }) => break (database_path, report_path, migrated),
+                    Ok(app_storage::StoragePreparation::DatabaseTooNew { path, version }) => {
+                        crate::init_status::set_init_error(crate::init_status::InitErrorPayload {
+                            path: path.display().to_string(),
+                            error: format!(
+                                "Database version is newer than supported ({version}). This app only supports {}. Upgrade the app and try again.",
+                                crate::database::SCHEMA_VERSION
+                            ),
+                            kind: Some("db_version_too_new".to_string()),
+                            db_version: Some(version),
+                            supported_version: Some(crate::database::SCHEMA_VERSION),
+                        });
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let database_path = crate::config::get_app_database_path();
+                        eprintln!("Failed to prepare Nexus Composer storage: {error}");
+                        if !show_database_init_error_dialog(
+                            app.handle(),
+                            &database_path,
+                            &error.to_string(),
+                        ) {
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            };
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
             #[cfg(target_os = "windows")]
             set_windows_app_user_model_id(app.handle());
@@ -407,9 +449,20 @@ pub fn run() {
             // This must happen after logging is initialized so init logs are emitted.
             usage_events::init(app.handle().clone());
 
+            if storage_preparation.2 {
+                if let Some(report_path) = storage_preparation.1.as_ref() {
+                    log::info!(
+                        "Application storage migration completed; report: {}",
+                        report_path.display()
+                    );
+                } else {
+                    log::info!("Application storage migration completed");
+                }
+            }
+
             // Initialize the database.
             let app_config_dir = crate::config::get_app_config_dir();
-            let db_path = app_config_dir.join("cc-switch.db");
+            let db_path = storage_preparation.0;
             let json_path = app_config_dir.join("config.json");
 
             // Check whether config.json still needs migration into SQLite.
@@ -2109,7 +2162,7 @@ fn show_database_init_error_dialog(
             Dữ liệu của bạn chưa bị mất; ứng dụng sẽ không tự động xóa tệp cơ sở dữ liệu.\n\
             Nguyên nhân thường gặp: phiên bản cơ sở dữ liệu mới hơn, tệp bị hỏng, thiếu quyền truy cập hoặc ổ đĩa sắp hết dung lượng.\n\n\
             Gợi ý:\n\
-            1) Sao lưu toàn bộ thư mục cấu hình (bao gồm cc-switch.db)\n\
+            1) Sao lưu toàn bộ thư mục cấu hình (bao gồm nexus-composer.db)\n\
             2) Nếu thấy thông báo về phiên bản cơ sở dữ liệu mới hơn, hãy nâng cấp Nexus Composer\n\
             3) Nếu lỗi xảy ra ngay sau khi nâng cấp, hãy quay lại phiên bản cũ để xuất hoặc sao lưu dữ liệu rồi nâng cấp lại\n\n\
             Nhấn 'Thử lại' để thử khởi tạo lại\n\
@@ -2123,7 +2176,7 @@ fn show_database_init_error_dialog(
             Your data is NOT lost - the app will not delete the database automatically.\n\
             Common causes include: newer database version, corrupted file, permission issues, or low disk space.\n\n\
             Suggestions:\n\
-            1) Back up the entire config directory (including cc-switch.db)\n\
+            1) Back up the entire config directory (including nexus-composer.db)\n\
             2) If you see “database version is newer”, please upgrade Nexus Composer\n\
             3) If this happened right after upgrading, consider rolling back to export/backup then upgrade again\n\n\
             Click 'Retry' to attempt initialization again\n\

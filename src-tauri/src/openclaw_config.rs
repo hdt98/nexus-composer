@@ -3,7 +3,7 @@
 //! Reads and writes `~/.openclaw/openclaw.json` in JSON5 format.
 //! OpenClaw uses additive provider management, with all providers in one file.
 
-use crate::config::{atomic_write, get_app_config_dir};
+use crate::config::atomic_write;
 use crate::error::AppError;
 use crate::settings::{effective_backup_retain_count, get_openclaw_override_dir};
 use chrono::Local;
@@ -383,7 +383,7 @@ fn write_root_section(section: &str, value: &Value) -> Result<OpenClawWriteOutco
 }
 
 fn create_openclaw_backup(source: &str) -> Result<PathBuf, AppError> {
-    let backup_dir = get_app_config_dir().join("backups").join("openclaw");
+    let backup_dir = crate::config::get_app_backup_dir().join("openclaw");
     fs::create_dir_all(&backup_dir).map_err(|e| AppError::io(&backup_dir, e))?;
 
     let base_id = format!("openclaw_{}", Local::now().format("%Y%m%d_%H%M%S"));
@@ -1017,7 +1017,7 @@ mod tests {
             assert!(first_outcome.backup_path.is_some());
 
             let first_written = fs::read_to_string(get_openclaw_config_path()).unwrap();
-            let backup_dir = get_app_config_dir().join("backups").join("openclaw");
+            let backup_dir = crate::config::get_app_backup_dir().join("openclaw");
             let backup_count = fs::read_dir(&backup_dir).unwrap().count();
             assert_eq!(backup_count, 1);
 

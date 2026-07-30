@@ -32,7 +32,7 @@ mod schema;
 mod tests;
 
 // Export DAO types for external consumers.
-use crate::config::get_app_config_dir;
+use crate::config::get_app_database_path;
 use crate::error::AppError;
 pub(crate) use dao::providers_seed::{is_official_seed_id, CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID};
 pub(crate) use dao::proxy::{
@@ -109,9 +109,9 @@ fn register_db_change_hook(conn: &Connection) {
 impl Database {
     /// Initializes the database connection and creates tables.
     ///
-    /// The database file is located at `~/.cc-switch/cc-switch.db`.
+    /// The database file is located at the canonical Nexus Composer storage path.
     pub fn init() -> Result<Self, AppError> {
-        let db_path = get_app_config_dir().join("cc-switch.db");
+        let db_path = get_app_database_path();
         let db_exists = db_path.exists();
 
         // Ensure the parent directory exists.
@@ -120,6 +120,21 @@ impl Database {
         }
 
         let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
+
+        // Storage-path migration has already selected this file. Validate the
+        // selected SQLite database before any schema or pragma mutation.
+        let stored_version = if db_exists {
+            let version = Self::get_user_version(&conn)?;
+            if version > SCHEMA_VERSION {
+                return Err(AppError::Database(format!(
+                    "Database version {version} is newer than supported version {SCHEMA_VERSION}"
+                )));
+            }
+            Self::validate_integrity(&conn)?;
+            version
+        } else {
+            0
+        };
 
         // Enable foreign-key constraints.
         conn.execute("PRAGMA foreign_keys = ON;", [])
@@ -135,23 +150,22 @@ impl Database {
         let db = Self {
             conn: Mutex::new(conn),
         };
-        db.create_tables()?;
 
-        // Pre-migration backup: only when upgrading from an existing database
-        {
-            let conn = lock_conn!(db.conn);
-            let version = Self::get_user_version(&conn)?;
-            drop(conn);
-            if version > 0 && version < SCHEMA_VERSION {
-                log::info!(
-                    "Creating pre-migration database backup (v{version} → v{SCHEMA_VERSION})"
-                );
-                if let Err(e) = db.backup_database_file() {
-                    log::warn!("Pre-migration backup failed, continuing migration: {e}");
-                }
-            }
+        // Physical storage promotion is complete, but schema migration has not
+        // started. A verified backup is mandatory before the first DDL write.
+        if db_exists && stored_version < SCHEMA_VERSION {
+            log::info!(
+                "Creating pre-migration database backup (v{stored_version} → v{SCHEMA_VERSION})"
+            );
+            db.backup_database_file()?.ok_or_else(|| {
+                AppError::Database(
+                    "Pre-migration database backup was not created; schema migration was not started"
+                        .to_string(),
+                )
+            })?;
         }
 
+        db.create_tables()?;
         db.apply_schema_migrations()?;
         if let Err(e) = db.ensure_incremental_auto_vacuum() {
             log::warn!("Failed to ensure incremental auto-vacuum: {e}");
@@ -185,6 +199,37 @@ impl Database {
         let conn = Connection::open(db_path).map_err(|e| AppError::Database(e.to_string()))?;
         let version = Self::get_user_version(&conn)?;
         Ok((version > SCHEMA_VERSION).then_some(version))
+    }
+
+    /// Run a full SQLite integrity check before any schema mutation.
+    fn validate_integrity(conn: &Connection) -> Result<(), AppError> {
+        let mut statement = conn
+            .prepare("PRAGMA integrity_check")
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let mut rows = statement
+            .query([])
+            .map_err(|error| AppError::Database(error.to_string()))?;
+        let mut saw_row = false;
+        while let Some(row) = rows
+            .next()
+            .map_err(|error| AppError::Database(error.to_string()))?
+        {
+            saw_row = true;
+            let result: String = row
+                .get(0)
+                .map_err(|error| AppError::Database(error.to_string()))?;
+            if result != "ok" {
+                return Err(AppError::Database(format!(
+                    "SQLite integrity check failed: {result}"
+                )));
+            }
+        }
+        if !saw_row {
+            return Err(AppError::Database(
+                "SQLite integrity check returned no result".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Creates an in-memory database for tests.

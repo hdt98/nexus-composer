@@ -61,15 +61,15 @@ fn create_backup(conflicts: &[EnvConflict]) -> Result<BackupInfo, String> {
     let json = serde_json::to_string_pretty(&backup_info)
         .map_err(|e| format!("Failed to serialize backup data: {e}"))?;
 
-    fs::write(&backup_file, json).map_err(|e| format!("Failed to write backup file: {e}"))?;
+    crate::config::atomic_write(&backup_file, json.as_bytes())
+        .map_err(|e| format!("Failed to write backup file: {e}"))?;
 
     Ok(backup_info)
 }
 
 /// Get backup directory path
 fn get_backup_dir() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or("Failed to locate the user home directory")?;
-    Ok(home.join(".cc-switch").join("backups"))
+    Ok(crate::config::get_app_backup_dir())
 }
 
 /// Delete a single environment variable

@@ -61,10 +61,10 @@ fn import_default_config_claude_persists_provider() {
     );
 
     // Verify persistence to SQLite, which replaced config.json in v3.7.0.
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let db_path = home.join(".nexus-composer").join("nexus-composer.db");
     assert!(
         db_path.exists(),
-        "importing default config should persist to cc-switch.db"
+        "importing default config should persist to nexus-composer.db"
     );
 }
 
@@ -144,10 +144,10 @@ fn import_mcp_from_claude_creates_config_and_enables_servers() {
     );
 
     // Verify that data was persisted to the database.
-    let db_path = home.join(".cc-switch").join("cc-switch.db");
+    let db_path = home.join(".nexus-composer").join("nexus-composer.db");
     assert!(
         db_path.exists(),
-        "state.save should persist to cc-switch.db when changes detected"
+        "state.save should persist to nexus-composer.db when changes detected"
     );
 }
 

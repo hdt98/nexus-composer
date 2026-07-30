@@ -4,7 +4,7 @@
 //!
 //! Unified management architecture in v3.10.0 and later:
 //! - Skills use one ID primary key with enablement flags for four applications.
-//! - Files are stored in ~/.cc-switch/skills/ and synchronized to each application directory.
+//! - Files are stored in ~/.nexus-composer/skills/ and synchronized to each application directory.
 
 use crate::app_config::{InstalledSkill, SkillApps};
 use crate::database::{lock_conn, Database};

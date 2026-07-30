@@ -192,7 +192,7 @@ impl Database {
         tx: &rusqlite::Transaction<'_>,
         config: &MultiAppConfig,
     ) -> Result<(), AppError> {
-        // Since v3.10.0, the skill source of truth is ~/.cc-switch/skills/ plus the unified schema.
+        // The Skill source of truth is now ~/.nexus-composer/skills/ plus the unified schema.
         //
         // Legacy `skills.skills` records installation state without complete metadata and cannot
         // guarantee that the corresponding skill files exist in the source-of-truth directory.
