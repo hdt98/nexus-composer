@@ -3305,6 +3305,22 @@ mod tests {
                         "type": "function_call_output",
                         "call_id": "call_1",
                         "output": "ok"
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_2",
+                        "name": "exec",
+                        "arguments": "{}"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_2",
+                        "output": "done"
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "late duplicate output for call_1"
                     }
                 ],
                 "tools": [{
@@ -3339,11 +3355,29 @@ mod tests {
                         .is_some_and(|calls| !calls.is_empty())
             })
             .collect();
-        assert_eq!(assistant_tool_calls.len(), 1);
+        assert_eq!(assistant_tool_calls.len(), 2);
         assert_eq!(
             assistant_tool_calls[0]["content"], "Checking the provider now.",
             "mid-turn narration must ride on the assistant tool_calls message"
         );
+        assert!(
+            assistant_tool_calls[1].get("content").is_none()
+                || assistant_tool_calls[1]["content"].is_null(),
+            "only the immediately following tool_calls message absorbs narration"
+        );
+        let tool_results: Vec<&Value> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(tool_results.len(), 3);
+        assert!(
+            tool_results.iter().all(|message| message["name"] == "exec"),
+            "tool results must carry the chat tool name so upstream gateways can resolve results whose call sits in an earlier assistant block"
+        );
+        let dangling = tool_results.last().expect("dangling tool result");
+        assert_eq!(dangling["tool_call_id"], "call_1");
+        assert_eq!(dangling["content"], "late duplicate output for call_1");
+
         let bare_narration = messages.iter().any(|message| {
             message["role"] == "assistant"
                 && message.get("tool_calls").is_none()

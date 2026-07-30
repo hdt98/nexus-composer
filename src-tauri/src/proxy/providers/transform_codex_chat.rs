@@ -627,6 +627,11 @@ fn append_responses_input_as_chat_messages(
     // the history matches what actually happened. Standalone assistant
     // messages (final answers, narration before a user turn) are untouched.
     merge_narration_into_tool_call_messages(messages);
+    // Codex emits duplicate or delayed tool outputs whose call sits in an
+    // earlier assistant block. Strict chat gateways (Kimi K3) resolve tool
+    // names positionally from the immediately preceding assistant block and
+    // reject such results with HTTP 400. Make every result self-describing.
+    attach_tool_names_to_tool_result_messages(messages);
     if preserve_exact_history {
         if let Some(reasoning) = pending_reasoning
             .take()
@@ -806,6 +811,48 @@ fn append_responses_item_as_chat_message(
     }
 
     Ok(())
+}
+
+/// Stamp the chat tool name onto every tool result message whose matching
+/// assistant tool_call is present anywhere in the converted history. The
+/// first assistant block wins when a call id repeats, mirroring how upstream
+/// gateways resolve positional matches. Unresolvable results keep their
+/// previously accepted shape instead of being rewritten.
+fn attach_tool_names_to_tool_result_messages(messages: &mut [Value]) {
+    let mut names_by_call_id: HashMap<String, String> = HashMap::new();
+    for message in messages.iter() {
+        let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) else {
+            continue;
+        };
+        for tool_call in tool_calls {
+            if let (Some(id), Some(name)) = (
+                tool_call.get("id").and_then(Value::as_str),
+                tool_call.pointer("/function/name").and_then(Value::as_str),
+            ) {
+                names_by_call_id
+                    .entry(id.to_string())
+                    .or_insert_with(|| name.to_string());
+            }
+        }
+    }
+    if names_by_call_id.is_empty() {
+        return;
+    }
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        if message.get("name").is_some() {
+            continue;
+        }
+        if let Some(name) = message
+            .get("tool_call_id")
+            .and_then(Value::as_str)
+            .and_then(|call_id| names_by_call_id.get(call_id))
+        {
+            message["name"] = json!(name);
+        }
+    }
 }
 
 /// Fold an assistant narration message directly followed by an assistant
@@ -3034,6 +3081,133 @@ mod tests {
         assert_eq!(messages[2]["tool_call_id"], "call_2");
         assert_eq!(messages[2]["content"], "[\"main.rs\",\"lib.rs\"]");
         assert_eq!(messages[3]["role"], "user");
+    }
+
+    #[test]
+    fn tool_results_carry_tool_names_after_later_assistant_tool_blocks() {
+        // Regression: Codex Desktop re-emits outputs of an earlier call after
+        // a later assistant tool block. Strict chat gateways resolve tool
+        // names positionally and reject such history with HTTP 400 unless each
+        // tool message carries the tool name explicitly.
+        let input = json!({
+            "model": "kimi-k3",
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "exec:14",
+                    "name": "exec",
+                    "input": "ls"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "exec:14",
+                    "output": [{"type": "input_text", "text": "Script running with cell ID 13"}]
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "wait:15",
+                    "name": "wait",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "wait:15",
+                    "output": "Script running with cell ID 13"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "exec:14",
+                    "output": [{"type": "input_text", "text": "idle-poll 1"}]
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "exec:14",
+                    "output": [{"type": "input_text", "text": "idle-poll 2"}]
+                },
+                {
+                    "role": "user",
+                    "content": "Continue."
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        let tool_results: Vec<&Value> = messages
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .collect();
+        assert_eq!(tool_results.len(), 4);
+        assert!(tool_results.iter().all(|message| {
+            matches!(message.get("name"), Some(Value::String(name)) if !name.is_empty())
+        }));
+        let named = |call_id: &str| {
+            tool_results
+                .iter()
+                .filter(|message| message["tool_call_id"] == call_id)
+                .map(|message| message["name"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(named("exec:14"), vec!["exec", "exec", "exec"]);
+        assert_eq!(named("wait:15"), vec!["wait"]);
+        // The dangling outputs keep their order and content; only the name is added.
+        let first = tool_results[0]["content"].as_str().unwrap();
+        assert!(first.contains("custom_tool_call_output"));
+        assert!(first.contains("cell ID 13"));
+    }
+
+    #[test]
+    fn tool_results_use_flattened_namespace_chat_names() {
+        let input = json!({
+            "model": "kimi-k3",
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_ns",
+                    "name": "exec",
+                    "namespace": "node_repl",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ns",
+                    "output": "ok"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        let chat_name = messages[0]["tool_calls"][0]["function"]["name"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(chat_name, "node_repl__exec");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["name"], chat_name);
+    }
+
+    #[test]
+    fn tool_results_without_matching_call_keep_prevailing_shape() {
+        let input = json!({
+            "model": "kimi-k3",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "orphan",
+                    "output": "ok"
+                }
+            ]
+        });
+
+        let result = responses_to_chat_completions(input).unwrap();
+        let messages = result["messages"].as_array().unwrap();
+
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "orphan");
+        assert!(messages[0].get("name").is_none());
     }
 
     #[test]
