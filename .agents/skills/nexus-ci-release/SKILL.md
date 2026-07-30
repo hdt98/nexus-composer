@@ -60,7 +60,13 @@ bundle is correct.
 
 1. Confirm the authoritative remote, base branch, target branch, and clean
    status before branching.
-2. Fetch the target and create one clearly named branch for one scope.
+2. Fetch the target and create one clearly named branch for one scope. Name
+   the branch after the product scope, never after the coding agent you are
+   (no codex/, claude/, or similar agent-style prefixes). Harness names are
+   reserved words in this repository (codex, claude, and gemini are app
+   types), so even a scope like Codex model routing must read as product
+   scope from the branch name alone. Prefer a name such as
+   feat/multi-provider-model-routing over feat/codex-model-routing.
 3. Preserve unrelated and untracked files; stage explicit paths only.
 4. Review `git diff --check`, the complete diff, and fresh validation output.
 5. Commit with a concise conventional message that describes the behavior.
